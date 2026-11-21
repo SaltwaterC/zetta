@@ -89,7 +89,7 @@ pub(crate) fn finish_pane_output_save(in_progress: &mut bool) {
     *in_progress = false;
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn prepare_pane_launches<T>(
     pane_ids: impl IntoIterator<Item = u64>,
     mut prepare: impl FnMut(u64) -> T,
@@ -568,9 +568,7 @@ impl TerminalPane {
             PaneStackSelection::Base => self.theme_override.as_deref(),
             PaneStackSelection::Stacked(id) => self
                 .stack
-                .entries
-                .iter()
-                .find(|entry| entry.id == id)
+                .entry(id)
                 .and_then(|entry| entry.theme_override.as_deref()),
         }
     }

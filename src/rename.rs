@@ -1,3 +1,6 @@
+//! Tab and pane names: which source a tab's title comes from, in priority
+//! order, and renaming tabs and panes inline.
+
 use super::*;
 use crate::process_control::{TabNameRequest, WorktreeNameRequest};
 
@@ -203,7 +206,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+        let Some(pane_id) = self.current_tab().map(|tab| tab.active_pane) else {
             return;
         };
         self.begin_pane_rename(pane_id, window, cx);
@@ -215,7 +218,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let Some(label) = tab.pane(pane_id).map(TerminalPane::label) else {
@@ -229,14 +232,12 @@ impl Zetta {
     }
 
     pub(crate) fn is_renaming(&self) -> bool {
-        self.tabs
-            .get(self.active_tab)
+        self.current_tab()
             .is_some_and(|tab| tab.rename_buffer.is_some())
     }
 
     pub(crate) fn is_editing_pane_overlay(&self) -> bool {
-        self.tabs
-            .get(self.active_tab)
+        self.current_tab()
             .is_some_and(|tab| tab.overlay_buffer.is_some())
     }
 }

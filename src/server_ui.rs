@@ -1,3 +1,6 @@
+//! The directory a file server started from a pane serves: the pane's trusted
+//! directory, translated out of WSL where its shell runs there.
+
 use super::*;
 
 pub(crate) enum ServerRoot {
@@ -17,8 +20,7 @@ impl ServerRoot {
 impl Zetta {
     pub(crate) fn active_server_root(&self, cx: &App) -> Result<ServerRoot> {
         let pane = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(Tab::active_pane)
             .context("finding the active pane")?;
         server_root_for_pane(pane, cx)

@@ -1,3 +1,6 @@
+//! Editing pane templates: the selected template, split or pane, its fields and
+//! dropdowns, and validating the template as it changes.
+
 use super::projects::{editing_project, mark_project_dirty, project_editor};
 use super::*;
 

@@ -388,8 +388,7 @@ impl Zetta {
             // process tree.
             pane.selected_stacked = None;
         }
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
+        let tab_id = take_next_id(&mut self.next_tab_id);
         let mut tab = match state.into_tab_by_pane(tab_id, |routing_id, name| {
             restored_profiles
                 .get(&routing_id)
@@ -752,8 +751,7 @@ impl Zetta {
 
     fn background_session_is_transferable(&self, session_id: u64) -> bool {
         self.background_sessions
-            .iter()
-            .find(|tab| tab.id == session_id)
+            .by_id(session_id)
             .is_some_and(|tab| {
                 tab.panes.iter().all(|pane| {
                     (pane.terminal.is_some() || pane.error.is_some())

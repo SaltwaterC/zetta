@@ -1,3 +1,6 @@
+//! `zetta serial`: its arguments, the connection settings they give, and
+//! copying between the terminal and the device.
+
 use std::ffi::OsString;
 use std::io::{self, Read as _, Write as _};
 use std::sync::{
@@ -7,7 +10,7 @@ use std::sync::{
 
 use anyhow::{Context as _, Result};
 
-use crate::startup::format_help_table;
+use crate::startup::{format_help_table, set_once};
 
 use super::CliServiceCommand;
 use super::raw_terminal::RawTerminal;
@@ -98,14 +101,13 @@ fn parse_serial_console_args(args: &[OsString]) -> Result<CliServiceCommand> {
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--device" | "-d" => {
-                anyhow::ensure!(device.is_none(), "--device may only be specified once");
-                device = Some(
-                    arguments
+                set_once(&mut device, "--device", || {
+                    Ok(arguments
                         .next()
                         .context("--device requires a serial device path")?
                         .to_string_lossy()
-                        .into_owned(),
-                );
+                        .into_owned())
+                })?;
             }
             "--baud-rate" | "-b" => {
                 baud_rate = parse_nonzero_u32(

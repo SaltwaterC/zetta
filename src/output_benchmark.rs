@@ -1,3 +1,6 @@
+//! `zetta benchmark output`: writing a measured volume of text to the terminal
+//! and reporting how fast it went through.
+
 use std::{
     io::{self, Write as _},
     time::{Duration, Instant},

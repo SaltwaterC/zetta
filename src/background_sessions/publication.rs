@@ -9,6 +9,7 @@ use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Condvar, Mutex, OnceLock},
 };
+use zetta_sync::RecoverPoison as _;
 
 use super::{BackgroundSessionSummary, SessionCatalogPublisher};
 
@@ -70,28 +71,19 @@ struct Worker {
 
 impl Worker {
     fn submit(&self, publication: Publication) {
-        self.queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(publication);
+        self.queue.lock().recover_poison().push(publication);
         self.ready.notify_one();
     }
 
     fn run(&self, mut apply: impl FnMut(Publication)) {
         loop {
             let publication = {
-                let mut queue = self
-                    .queue
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut queue = self.queue.lock().recover_poison();
                 loop {
                     if let Some(first) = queue.first.take() {
                         break first;
                     }
-                    queue = self
-                        .ready
-                        .wait(queue)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    queue = self.ready.wait(queue).recover_poison();
                 }
             };
             self.drain(publication, &mut apply);
@@ -103,11 +95,7 @@ impl Worker {
             // No queue lock is held during serialization, storage I/O, or
             // completion. Producers never wait for a slow filesystem.
             apply(publication);
-            let next = self
-                .queue
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .finished();
+            let next = self.queue.lock().recover_poison().finished();
             let Some(next) = next else { break };
             publication = next;
         }

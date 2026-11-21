@@ -1,9 +1,21 @@
+//! Spawning a pane's terminal: the environment and shell integration it starts
+//! with, local and shared sessions, and wiring the result into the pane.
+
 use super::*;
 #[cfg(feature = "zmux")]
 use crate::mux::MuxPaneIds;
 #[cfg(feature = "zmux")]
 use crate::mux::SharedSessionKey;
 use crate::worktree_detection::terminal_event_requires_worktree_detection;
+
+#[cfg(feature = "zmux")]
+mod shared;
+#[cfg(feature = "zmux")]
+pub(crate) use shared::*;
+mod stacked;
+#[cfg(windows)]
+mod windows_handoff;
+pub(crate) use stacked::*;
 
 /// PowerShell loads its integration from the command passed at process start,
 /// before the first prompt. Sending a second line through its terminal makes
@@ -122,600 +134,6 @@ struct LocalTerminalLaunch {
     initial_console_palette: Option<terminal::ConsoleLaunchOptions>,
     shell_integration_startup_command: Option<Vec<u8>>,
     tracked_multi_command_launch: bool,
-}
-
-#[cfg(feature = "zmux")]
-#[derive(Clone)]
-pub(crate) struct SharedTerminalLaunch {
-    tab_id: u64,
-    pane_id: u64,
-    attention_id: u64,
-    pane_routing_id: u64,
-    terminal_theme: Option<Arc<Theme>>,
-    provider: Arc<crate::mux::MuxPtyProvider>,
-    shell: Shell,
-    environment: HashMap<String, String>,
-    /// The nonce this pane's shell is given to authenticate its lifecycle
-    /// markers; see `shared_draft_process`. Drawn by the window, because the
-    /// window's terminal has to expect it and the daemon that starts the
-    /// shell cannot tell it. Kept across the one resynchronised retry, which
-    /// is safe because a refused draft started no shell.
-    marker_nonce: Option<String>,
-    working_directory: Option<PathBuf>,
-    title: String,
-    profile_name: String,
-    cursor_shape: terminal::terminal_settings::CursorShape,
-    alternate_scroll: terminal::terminal_settings::AlternateScroll,
-    max_scroll_history_lines: Option<usize>,
-    shell_integration_startup_command: Option<Vec<u8>>,
-    tracked_multi_command_launch: bool,
-    base_revision: zmux::messages::SessionRevision,
-    console_palette: terminal::ConsolePalette,
-    /// Whether this launch has already been resynchronised once. A session
-    /// whose daemon was replaced leaves every window proposing pane ids that no
-    /// longer exist; the first refusal brings the window up to date and the
-    /// launch is made again, but only once, so a session that refuses for some
-    /// other reason cannot put the window in a loop.
-    resynchronized: bool,
-}
-
-#[cfg(feature = "zmux")]
-enum SharedTerminalBuild {
-    Ready(Box<TerminalBuilder>, Box<SpawnedTerminal>),
-    Conflict {
-        tab_id: u64,
-        pane_id: u64,
-        state: Box<zmux::messages::SharedSessionState>,
-    },
-    /// The session refused the proposed geometry, and a fresh snapshot came
-    /// back with it. This window's picture of the session was wrong, so the
-    /// snapshot is applied before the draft is given up — otherwise the same
-    /// wrong picture produces the same refusal for every later split.
-    Desynchronized {
-        tab_id: u64,
-        pane_id: u64,
-        state: Box<zmux::messages::SharedSessionState>,
-        reason: String,
-    },
-}
-
-#[cfg(feature = "zmux")]
-enum SharedTerminalBatchBuild {
-    Ready {
-        session_id: u64,
-        state: zmux::messages::SharedSessionState,
-        terminals: Vec<(TerminalBuilder, SpawnedTerminal)>,
-    },
-    Conflict {
-        state: zmux::messages::SharedSessionState,
-        panes: Vec<(u64, u64)>,
-    },
-    /// As [`SharedTerminalBuild::Desynchronized`]: the panes are the session's
-    /// now, whatever went wrong here, so the window converges on the committed
-    /// state rather than dropping them.
-    Desynchronized {
-        state: zmux::messages::SharedSessionState,
-        panes: Vec<(u64, u64)>,
-        reason: String,
-    },
-}
-
-/// What a shared pane's terminal is built from, whichever way its bytes travel.
-///
-/// A bundle because the two spawn paths — one pane, and a batch of them — build
-/// the same thing from values they hold differently.
-#[cfg(feature = "zmux")]
-struct SharedPaneTerminal<'a> {
-    pane: &'a Arc<zmux::client::SharedPane>,
-    runtime: &'a crate::mux::MuxRuntime,
-    title: String,
-    cursor_shape: terminal::terminal_settings::CursorShape,
-    alternate_scroll: terminal::terminal_settings::AlternateScroll,
-    max_scroll_history_lines: Option<usize>,
-    working_directory: Option<PathBuf>,
-    /// What this pane's draft gave its shell; `None` for one that carried no
-    /// nonce, whose markers then authenticate nothing.
-    marker_nonce: Option<String>,
-    executor: &'a gpui::BackgroundExecutor,
-}
-
-/// Builds the byte stream a shared pane's terminal reads.
-///
-/// Over the multiplexer's own stream unless the session's panes travel over
-/// Mosh, in which case this brings up that pane's link and hands back the
-/// session to keep: the multiplexer's stream for it is then released with the
-/// `SharedPane` the caller drops. A Mosh link that could not be brought up
-/// leaves the pane on the multiplexer's stream, and hands back why.
-#[cfg(feature = "zmux")]
-fn build_shared_pane_terminal(
-    build: SharedPaneTerminal<'_>,
-) -> (
-    TerminalBuilder,
-    Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
-    Option<String>,
-) {
-    let SharedPaneTerminal {
-        pane,
-        runtime,
-        title,
-        cursor_shape,
-        alternate_scroll,
-        max_scroll_history_lines,
-        working_directory,
-        marker_nonce,
-        executor,
-    } = build;
-    let session_id = pane.session_id();
-    let mux_pane_id = pane.pane_id();
-    // A pane added to a session whose panes travel over Mosh travels the same
-    // way: half a tab on a transport the other half is not on would come apart
-    // the moment either one was interrupted.
-    let mut streams =
-        crate::remote_pane_transport::bootstrap_spawned_pane(runtime, session_id, mux_pane_id);
-    if let Some(stream) = streams.take(mux_pane_id) {
-        let (built, session) = crate::background_session_ui::zosh_panes::build_zosh_pane(
-            crate::background_session_ui::zosh_panes::ZoshPaneBuild {
-                title,
-                cursor_shape,
-                alternate_scroll,
-                max_scroll_history_lines,
-                window_id: 0,
-                working_directory,
-                runtime,
-                session_id,
-                mux_pane_id,
-                executor,
-            },
-            stream,
-        );
-        // The relay reports this window's Mosh size to the multiplexer. Its
-        // attachment viewport is only a bootstrap value and, unlike an SSH
-        // shared stream, no later viewport frames arrive here to replace it.
-        return (
-            built.with_command_marker_nonce(marker_nonce),
-            Some(session),
-            None,
-        );
-    }
-    let fallback = streams.fallback(mux_pane_id).map(str::to_owned);
-    let initial_viewport = pane.take_initial_viewport();
-    let built = TerminalBuilder::new_byte_stream(
-        Box::new(pane.reader()),
-        Box::new(
-            crate::background_session_ui::shared_panes::SharedPaneWriter { pane: pane.clone() },
-        ),
-        title,
-        cursor_shape,
-        alternate_scroll,
-        max_scroll_history_lines,
-        0,
-        executor,
-        PathStyle::local(),
-    )
-    .with_raw_output()
-    .with_shared_viewport(initial_viewport)
-    .with_working_directory(working_directory)
-    .with_replay(pane.replay.clone())
-    .with_pty_control(crate::mux::mux_pty_control_with_secret(
-        runtime.client().clone(),
-        session_id,
-        mux_pane_id,
-        runtime.session_secret(),
-    ))
-    .with_command_marker_nonce(marker_nonce);
-    (built, None, fallback)
-}
-
-#[cfg(feature = "zmux")]
-fn build_shared_terminal_batch(
-    launches: Vec<SharedTerminalLaunch>,
-    runtime: crate::mux::MuxRuntime,
-    request: zmux::messages::SharedSpawnBatchRequest,
-    terminal_executor: &gpui::BackgroundExecutor,
-) -> Result<SharedTerminalBatchBuild> {
-    let session_id = request.session_id;
-    let client = runtime.client().clone();
-    // Taken before the launches are consumed below: every recovery path has to
-    // name the drafts, including the ones that run after the loop has started.
-    let panes = launches
-        .iter()
-        .map(|launch| (launch.tab_id, launch.pane_id))
-        .collect::<Vec<_>>();
-    let result = match client.spawn_shared_batch(request) {
-        Ok(result) => result,
-        Err(error) => {
-            // The session would not take this geometry. Bring back what it
-            // actually holds so the window stops proposing the same thing.
-            let state = client.shared_snapshot(session_id)?;
-            return Ok(SharedTerminalBatchBuild::Desynchronized {
-                state,
-                panes,
-                reason: format!("{error:#}"),
-            });
-        }
-    };
-    let mut committed = match result {
-        zmux::client::SharedBatchResult::Applied(committed) => committed,
-        zmux::client::SharedBatchResult::Conflict(state) => {
-            return Ok(SharedTerminalBatchBuild::Conflict { state, panes });
-        }
-    };
-    let mut terminals = Vec::with_capacity(launches.len());
-    for launch in launches {
-        let mapping = committed
-            .mappings
-            .iter()
-            .find(|mapping| mapping.draft_id == launch.pane_id)
-            .with_context(|| format!("shared batch omitted draft pane {}", launch.pane_id))?;
-        launch
-            .provider
-            .record_shared_opened(session_id, mapping.pane_id);
-        // Committed already: the panes belong to the session whatever happens
-        // here, so a failed attachment converges the window on them instead of
-        // dropping panes that are running for every other viewer.
-        let pane = match attach_committed_shared_pane(
-            &client,
-            &runtime,
-            session_id,
-            mapping.pane_id,
-            &mut committed.state,
-        ) {
-            Ok(pane) => pane,
-            Err(error) => {
-                return Ok(SharedTerminalBatchBuild::Desynchronized {
-                    state: committed.state,
-                    panes,
-                    reason: format!("{error:#}"),
-                });
-            }
-        };
-        let pane = Arc::new(pane);
-        let image_paste_handler = crate::background_session_ui::image_paste::handler_for_pane(
-            &runtime,
-            session_id,
-            mapping.pane_id,
-            crate::background_session_ui::image_paste::LocalPasteTarget {
-                shell: launch.shell.clone(),
-                environment: launch.environment.clone(),
-                working_directory: launch.working_directory.clone(),
-            },
-        );
-        let (builder, zosh_session, transport_fallback) =
-            build_shared_pane_terminal(SharedPaneTerminal {
-                pane: &pane,
-                runtime: &runtime,
-                title: launch.title.clone(),
-                cursor_shape: launch.cursor_shape,
-                alternate_scroll: launch.alternate_scroll,
-                max_scroll_history_lines: launch.max_scroll_history_lines,
-                working_directory: launch.working_directory.clone(),
-                marker_nonce: launch.marker_nonce.clone(),
-                executor: terminal_executor,
-            });
-        let builder = builder
-            .with_image_paste_handler(image_paste_handler)
-            .with_init_command_startup_shell(launch.shell);
-        terminals.push((
-            builder,
-            SpawnedTerminal {
-                tab_id: launch.tab_id,
-                pane_id: launch.pane_id,
-                attention_id: launch.attention_id,
-                pane_routing_id: launch.pane_routing_id,
-                terminal_theme: launch.terminal_theme,
-                restore_options: None,
-                restored_working_directory: None,
-                mux_provider: None,
-                shared_pane: Some(pane),
-                zosh_session,
-                transport_fallback,
-                shared_runtime: Some(runtime.clone()),
-                shared_state: None,
-                shell_integration_startup_command: launch.shell_integration_startup_command,
-                tracked_multi_command_launch: launch.tracked_multi_command_launch,
-                image_paste_handler: None,
-            },
-        ));
-    }
-    Ok(SharedTerminalBatchBuild::Ready {
-        session_id,
-        state: committed.state,
-        terminals,
-    })
-}
-
-#[cfg(feature = "zmux")]
-fn attach_committed_shared_pane(
-    client: &Arc<zmux::client::Client>,
-    runtime: &crate::mux::MuxRuntime,
-    session_id: u64,
-    pane_id: u64,
-    state: &mut zmux::messages::SharedSessionState,
-) -> Result<zmux::client::SharedPane> {
-    let mut last_error = None;
-    for attempt in 0..3 {
-        if attempt > 0 {
-            *state = client.shared_snapshot(session_id)?;
-            anyhow::ensure!(
-                state.contains_pane(pane_id),
-                "committed shared pane {pane_id} was removed before it could attach"
-            );
-        }
-        match client.attach_shared_with_secret(
-            session_id,
-            pane_id,
-            runtime.session_secret().as_ref(),
-        ) {
-            Ok(zmux::client::AttachOutcome::SharedAttached { pane, .. }) => return Ok(pane),
-            Ok(_) => {
-                last_error = Some(anyhow::anyhow!(
-                    "committed shared pane did not attach as a shared stream"
-                ));
-            }
-            Err(error) => last_error = Some(error),
-        }
-    }
-    Err(last_error.expect("three shared attach attempts produce an outcome"))
-        .with_context(|| format!("attaching committed shared pane {pane_id}"))
-}
-
-/// What a shared pane draft may say about the process it asks for.
-///
-/// A pane in a shared session is started by the daemon, on the daemon's host.
-/// When that host is this machine, this window resolved the profile against the
-/// very configuration the daemon would read, and its resolution carries more
-/// than a name can — the working-directory tracking wrappers a WSL, MSYS2 or
-/// Cygwin profile needs — so it is sent and used as-is.
-///
-/// When the host is another machine, none of that holds. The program path, the
-/// `PATH` around it and the tracking files all name this machine, and sending
-/// them is exactly how a Linux client came to start macOS's `/bin/bash` 3.2
-/// with a Linux `PATH` in front of it. Only the profile name and the pane's
-/// routing identity cross; the daemon resolves the rest.
-///
-/// Either way the draft also carries `marker_nonce`, the secret the pane's
-/// shell integration signs its lifecycle markers with (see `run_command.rs`'s
-/// "What may satisfy a dependency"). The daemon starts the shell, but it is
-/// this window's terminal that has to recognise the markers, so the window
-/// draws the nonce and tells both. It rides only where nothing prints it: the
-/// zmux request, over a same-user private socket locally and over `ssh -T`'s
-/// encrypted channel to a remote daemon, which puts it in the shell's
-/// environment and retains it nowhere. It is never typed into the pane — the
-/// integration loader the daemon types is constant text — so no viewer's
-/// replay can contain it.
-///
-/// A remote pane carries it too, deliberately past the `ZETTA_`-only filter:
-/// it names nothing about this machine, and without it a `zetta pane wait` on
-/// a remote shared pane whose own startup files load Zetta's integration could
-/// never succeed. Anyone on that host who could read it from the shell's
-/// environment could also type into the pane, so it widens nothing.
-///
-/// A pane this window did not create — one it joined, or reattached after a
-/// restart — was given a nonce it never knew, so its terminal expects none and
-/// its markers fail every dependent closed. That is the intended limit, not an
-/// oversight: the alternative is trusting what a pane prints.
-#[cfg(feature = "zmux")]
-fn shared_draft_process(
-    remote: bool,
-    shell: &Shell,
-    environment: &HashMap<String, String>,
-    marker_nonce: Option<&str>,
-) -> (
-    Option<zetta_profiles::ProfileCommand>,
-    HashMap<String, String>,
-) {
-    let (command, mut environment) = if remote {
-        (
-            None,
-            zmux::messages::shared_draft_environment(environment.clone()),
-        )
-    } else {
-        (
-            Some(crate::config::profile_command(shell)),
-            environment.clone(),
-        )
-    };
-    // Whatever the window's own environment held is not this pane's.
-    environment.remove(terminal::COMMAND_MARKER_NONCE_ENV);
-    if let Some(nonce) = marker_nonce {
-        if remote {
-            // Not `give_command_marker_nonce`: its `WSLENV` entry is for a WSL
-            // distribution on this machine, and the shell runs on another.
-            environment.insert(
-                terminal::COMMAND_MARKER_NONCE_ENV.to_owned(),
-                nonce.to_owned(),
-            );
-        } else {
-            terminal::give_command_marker_nonce(shell, &mut environment, nonce);
-        }
-    }
-    (command, environment)
-}
-
-/// The size a pane's pty starts at, before any viewer has laid the pane out and
-/// reported a real one.
-///
-/// The daemon arbitrates a shared pane down to the smallest of its viewers, and
-/// falls back to this while none of them has measured. A fixed 80x24 meant a
-/// new pane's first screens were drawn — and wrapped — at a width no window was
-/// showing, so the source pane's own size is used instead: a split leaves the
-/// two halves near enough that the reflow, when the real sizes arrive, is
-/// small.
-#[cfg(feature = "zmux")]
-fn shared_spawn_stand_in_size(
-    tab: Option<&Tab>,
-    source_pane_id: u64,
-    cx: &App,
-) -> zmux::messages::TerminalSize {
-    let measured = tab
-        .and_then(|tab| tab.pane(source_pane_id))
-        .and_then(TerminalPane::selected_terminal)
-        .map(|terminal| terminal.read(cx).last_content().terminal_bounds)
-        .filter(|bounds| bounds.num_columns() > 0 && bounds.num_lines() > 0);
-    zmux::messages::TerminalSize {
-        columns: measured.map_or(80, |bounds| bounds.num_columns() as u16),
-        lines: measured.map_or(24, |bounds| bounds.num_lines() as u16),
-        cell_width: 0,
-        cell_height: 0,
-    }
-}
-
-/// Every pane a proposed layout names as already existing.
-///
-/// These are the ids the session is asked to place, translated from this
-/// window's own map. The daemon refuses the whole request if one of them names
-/// a pane it does not hold, which is why they are worth checking first.
-#[cfg(feature = "zmux")]
-fn shared_draft_layout_existing_ids(
-    layout: &zmux::messages::SharedDraftLayout,
-    ids: &mut Vec<u64>,
-) {
-    match layout {
-        zmux::messages::SharedDraftLayout::Draft { .. } => {}
-        zmux::messages::SharedDraftLayout::Existing { pane_id } => ids.push(*pane_id),
-        zmux::messages::SharedDraftLayout::Split { first, second, .. } => {
-            shared_draft_layout_existing_ids(first, ids);
-            shared_draft_layout_existing_ids(second, ids);
-        }
-    }
-}
-
-#[cfg(feature = "zmux")]
-fn shared_draft_layout(
-    layout: &PaneLayout,
-    draft_pane_id: u64,
-    mux_ids: &HashMap<u64, u64>,
-) -> Result<zmux::messages::SharedDraftLayout> {
-    Ok(match layout {
-        PaneLayout::Pane(pane_id) if *pane_id == draft_pane_id => {
-            zmux::messages::SharedDraftLayout::Draft {
-                draft_id: draft_pane_id,
-            }
-        }
-        PaneLayout::Pane(pane_id) => zmux::messages::SharedDraftLayout::Existing {
-            pane_id: *mux_ids
-                .get(pane_id)
-                .with_context(|| format!("shared pane {pane_id} has no multiplexer id"))?,
-        },
-        PaneLayout::Split {
-            axis,
-            first_ratio,
-            first,
-            second,
-        } => zmux::messages::SharedDraftLayout::Split {
-            axis: match axis {
-                SplitAxis::Horizontal => "horizontal",
-                SplitAxis::Vertical => "vertical",
-            }
-            .to_owned(),
-            first_ratio: *first_ratio,
-            first: Box::new(shared_draft_layout(first, draft_pane_id, mux_ids)?),
-            second: Box::new(shared_draft_layout(second, draft_pane_id, mux_ids)?),
-        },
-    })
-}
-
-#[cfg(feature = "zmux")]
-fn shared_complete_draft_layout(
-    layout: &PaneLayout,
-    draft_pane_ids: &HashSet<u64>,
-    mux_ids: &HashMap<u64, u64>,
-) -> Result<zmux::messages::SharedDraftLayout> {
-    Ok(match layout {
-        PaneLayout::Pane(pane_id) if draft_pane_ids.contains(pane_id) => {
-            zmux::messages::SharedDraftLayout::Draft { draft_id: *pane_id }
-        }
-        PaneLayout::Pane(pane_id) => zmux::messages::SharedDraftLayout::Existing {
-            pane_id: *mux_ids
-                .get(pane_id)
-                .with_context(|| format!("shared pane {pane_id} has no multiplexer id"))?,
-        },
-        PaneLayout::Split {
-            axis,
-            first_ratio,
-            first,
-            second,
-        } => zmux::messages::SharedDraftLayout::Split {
-            axis: match axis {
-                SplitAxis::Horizontal => "horizontal",
-                SplitAxis::Vertical => "vertical",
-            }
-            .to_owned(),
-            first_ratio: *first_ratio,
-            first: Box::new(shared_complete_draft_layout(
-                first,
-                draft_pane_ids,
-                mux_ids,
-            )?),
-            second: Box::new(shared_complete_draft_layout(
-                second,
-                draft_pane_ids,
-                mux_ids,
-            )?),
-        },
-    })
-}
-
-#[cfg(feature = "zmux")]
-fn shared_spawn_replacement(
-    layout: &PaneLayout,
-    draft_pane_id: u64,
-    mux_ids: &HashMap<u64, u64>,
-) -> Result<(Option<u64>, zmux::messages::SharedDraftLayout)> {
-    match layout {
-        PaneLayout::Split { first, second, .. }
-            if matches!(first.as_ref(), PaneLayout::Pane(id) if *id == draft_pane_id)
-                && matches!(second.as_ref(), PaneLayout::Pane(_)) =>
-        {
-            let PaneLayout::Pane(target) = second.as_ref() else {
-                unreachable!()
-            };
-            Ok((
-                Some(
-                    *mux_ids
-                        .get(target)
-                        .context("shared split target has no mux id")?,
-                ),
-                shared_draft_layout(layout, draft_pane_id, mux_ids)?,
-            ))
-        }
-        PaneLayout::Split { first, second, .. }
-            if matches!(second.as_ref(), PaneLayout::Pane(id) if *id == draft_pane_id)
-                && matches!(first.as_ref(), PaneLayout::Pane(_)) =>
-        {
-            let PaneLayout::Pane(target) = first.as_ref() else {
-                unreachable!()
-            };
-            Ok((
-                Some(
-                    *mux_ids
-                        .get(target)
-                        .context("shared split target has no mux id")?,
-                ),
-                shared_draft_layout(layout, draft_pane_id, mux_ids)?,
-            ))
-        }
-        PaneLayout::Split { first, second, .. } => {
-            if pane_layout_contains(first, draft_pane_id) {
-                shared_spawn_replacement(first, draft_pane_id, mux_ids)
-            } else if pane_layout_contains(second, draft_pane_id) {
-                shared_spawn_replacement(second, draft_pane_id, mux_ids)
-            } else {
-                anyhow::bail!("shared draft pane is not in the tab layout")
-            }
-        }
-        PaneLayout::Pane(_) => Ok((None, shared_draft_layout(layout, draft_pane_id, mux_ids)?)),
-    }
-}
-
-#[cfg(feature = "zmux")]
-fn pane_layout_contains(layout: &PaneLayout, pane_id: u64) -> bool {
-    match layout {
-        PaneLayout::Pane(id) => *id == pane_id,
-        PaneLayout::Split { first, second, .. } => {
-            pane_layout_contains(first, pane_id) || pane_layout_contains(second, pane_id)
-        }
-    }
 }
 
 /// Everything one interactive-terminal spawn needs. The tab, the pane and the
@@ -891,25 +309,24 @@ impl Zetta {
         profile: &Profile,
         cx: &mut Context<Self>,
     ) -> Option<Option<Arc<Theme>>> {
-        let (pane_theme_override, tab_theme_override) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .map_or((None, None), |tab| {
+        let (pane_theme_override, tab_theme_override) =
+            self.tabs.by_id(tab_id).map_or((None, None), |tab| {
                 (
                     tab.pane(pane_id)
                         .and_then(|pane| pane.theme_override.as_deref()),
                     tab.theme_override.as_deref(),
                 )
             });
-        let application_theme = self.application_theme(cx);
-        let policy = self.project_context_policy(tab_id);
-        let fallback = policy.theme_fallback(
+        match self.pane_theme(
+            tab_id,
             profile,
             self.project_config_for_tab(tab_id).map(Arc::as_ref),
-            &application_theme,
-        );
-        match resolve_terminal_theme(pane_theme_override, tab_theme_override, fallback, cx) {
+            ThemeOverrides {
+                pane: pane_theme_override,
+                tab: tab_theme_override,
+            },
+            cx,
+        ) {
             Ok(theme) => Some(theme),
             Err(error) => {
                 self.report_pane_spawn_error(
@@ -933,138 +350,10 @@ impl Zetta {
         error: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(pane) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-        {
+        if let Some(pane) = self.tabs.pane_in_mut(tab_id, pane_id) {
             pane.error = Some(error);
         }
         cx.notify();
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn spawn_windows_handoff_terminal(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        profile: Profile,
-        request: crate::windows_integration::WindowsHandoffRequest,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(terminal_theme) = self.resolve_pane_spawn_theme(tab_id, pane_id, &profile, cx)
-        else {
-            return;
-        };
-        let mut settings = TerminalSpawnSettings::current(cx);
-        let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
-        let child_handle = match request.duplicate_child_handle() {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.report_pane_spawn_error(
-                    tab_id,
-                    pane_id,
-                    format!("Could not monitor the handed-over process: {error}"),
-                    cx,
-                );
-                return;
-            }
-        };
-        let options = terminal::AttachedOptions {
-            shell: profile.command.clone(),
-            env: native_terminal_environment().into_iter().collect(),
-            cursor_shape: settings.cursor_shape,
-            alternate_scroll: settings.alternate_scroll,
-            max_scroll_history_lines: settings.max_scroll_history_lines,
-            path_hyperlink_regexes,
-            path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
-            window_id: cx.entity_id().as_u64(),
-        };
-        let image_paste_handler = Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
-            options.shell.clone(),
-            options.env.clone(),
-            None,
-        ));
-        let handover = request.into_handover();
-        let run_identity = self.run_pane_identity(tab_id, pane_id);
-        let build_executor = cx.background_executor().clone();
-        let terminal_executor = build_executor.clone();
-        let build = build_executor.spawn(async move {
-            TerminalBuilder::new_attached(handover, options, &terminal_executor, PathStyle::local())
-        });
-        let this = cx.entity().downgrade();
-        let terminal_theme_for_task = terminal_theme.clone();
-        window
-            .spawn(cx, async move |cx| match build.await {
-                Ok(attached) => {
-                    let terminal::AttachedTerminal {
-                        builder,
-                        child_events,
-                    } = attached;
-                    let builder = builder.with_image_paste_handler(image_paste_handler);
-                    crate::windows_integration::monitor_handoff_child(child_handle, child_events);
-                    this.update_in(cx, |this, window, cx| {
-                        let terminal = cx.new(|cx| builder.subscribe(cx));
-                        let view = cx.new(|cx| {
-                            TerminalView::new_with_theme(
-                                terminal.clone(),
-                                terminal_theme_for_task,
-                                window,
-                                cx,
-                            )
-                        });
-                        this.configure_terminal_view_silent_mode(tab_id, &view, cx);
-                        this.subscribe_spawned_terminal(
-                            tab_id,
-                            pane_id,
-                            run_identity,
-                            &terminal,
-                            window,
-                            cx,
-                        );
-                        this.subscribe_spawned_terminal_view(tab_id, pane_id, &view, window, cx);
-                        let should_focus = this
-                            .configure_spawned_terminal_focus(tab_id, pane_id, &view, window, cx);
-                        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
-                        if let Some(pane) = tab_index
-                            .and_then(|index| this.tabs.get_mut(index))
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.terminal = Some(terminal.clone());
-                            pane.view = Some(view.clone());
-                            pane.base_exited = false;
-                            pane.error = None;
-                            pane.exit = None;
-                        }
-                        this.schedule_worktree_detection_for_pane(tab_id, pane_id, cx);
-                        this.schedule_project_detection_for_pane(tab_id, pane_id, window, cx);
-                        if should_focus {
-                            let focus_handle = view.focus_handle(cx);
-                            this.focus_terminal_if_allowed(&focus_handle, window, cx);
-                        }
-                        this.sync_visible_terminals(cx);
-                        this.schedule_terminal_spawn_notify(cx);
-                    })
-                    .ok();
-                }
-                Err(error) => {
-                    this.update_in(cx, |this, _, cx| {
-                        if let Some(pane) = this
-                            .tabs
-                            .iter_mut()
-                            .find(|tab| tab.id == tab_id)
-                            .and_then(|tab| tab.pane_mut(pane_id))
-                        {
-                            pane.error = Some(format!("{error:#}"));
-                        }
-                        this.schedule_terminal_spawn_notify(cx);
-                    })
-                    .ok();
-                }
-            })
-            .detach();
     }
 
     /// Wires a freshly built terminal to the pane that owns it: the run
@@ -1200,8 +489,7 @@ impl Zetta {
         let focus_handle = view.focus_handle(cx);
         let emit_input_events = this
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
+            .by_id(tab_id)
             .is_some_and(|tab| tab.broadcast_input);
         let input_enabled = this.terminal_input_enabled();
         view.update(cx, |view, cx| {
@@ -1211,8 +499,7 @@ impl Zetta {
         cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
             if let Some(tab) = this
                 .tabs
-                .iter_mut()
-                .find(|tab| tab.id == tab_id)
+                .by_id_mut(tab_id)
                 .filter(|tab| tab.pane(pane_id).is_some_and(|pane| !pane.base_exited))
             {
                 tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
@@ -1222,16 +509,13 @@ impl Zetta {
             this.clear_active_tab_attention_if_focused(window, cx);
         })
         .detach();
-        this.tabs
-            .iter()
-            .position(|tab| tab.id == tab_id)
-            .is_some_and(|index| {
-                index == this.active_tab
-                    && this.tabs[index].active_pane == pane_id
-                    && this.tabs[index]
-                        .pane(pane_id)
-                        .is_some_and(|pane| pane.stack.selected_is_base())
-            })
+        this.tab_index(tab_id).is_some_and(|index| {
+            index == this.active_tab
+                && this.tabs[index].active_pane == pane_id
+                && this.tabs[index]
+                    .pane(pane_id)
+                    .is_some_and(|pane| pane.stack.selected_is_base())
+        })
     }
 
     /// Spawns the terminal a [`TerminalSpawnRequest`] describes. The single
@@ -1279,15 +563,10 @@ impl Zetta {
         let mut combined_environment = self.project_environment_for_tab(tab_id);
         combined_environment.extend(environment_overrides);
         let is_wsl = is_wsl_shell(&profile.command);
-        let Some((attention_id, pane_routing_id)) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| {
-                tab.pane(pane_id)
-                    .map(|pane| (tab.attention_id, pane.routing_id))
-            })
-        else {
+        let Some((attention_id, pane_routing_id)) = self.tabs.by_id(tab_id).and_then(|tab| {
+            tab.pane(pane_id)
+                .map(|pane| (tab.attention_id, pane.routing_id))
+        }) else {
             self.report_pane_spawn_error(
                 tab_id,
                 pane_id,
@@ -1297,36 +576,24 @@ impl Zetta {
             return;
         };
         let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
-        // The `mut` is for the zsh history step below, which is Unix-only.
-        #[cfg_attr(
-            windows,
-            allow(
-                unused_mut,
-                reason = "only the Unix shell-history setup mutates this map"
-            )
-        )]
-        let mut environment: HashMap<String, String> = match (TerminalEnvironment {
-            profile: &profile.command,
-            overrides: &combined_environment,
-            attention_id,
-            tracking_id: pane_id,
-            routing_id: pane_routing_id,
-            wsl_cwd_file: wsl_cwd_file.as_deref(),
-            theme_name: &effective_theme.name,
-            no_mux: self.no_mux,
-        })
-        .build()
-        {
-            Ok(environment) => environment,
-            Err(error) => {
-                self.report_pane_spawn_error(tab_id, pane_id, format!("{error:#}"), cx);
-                return;
-            }
+        let Some(environment) = self.build_spawn_environment(
+            TerminalEnvironment {
+                profile: &profile.command,
+                overrides: &combined_environment,
+                attention_id,
+                tracking_id: pane_id,
+                routing_id: pane_routing_id,
+                wsl_cwd_file: wsl_cwd_file.as_deref(),
+                theme_name: &effective_theme.name,
+                no_mux: self.no_mux,
+            },
+            &shell,
+            tab_id,
+            pane_id,
+            cx,
+        ) else {
+            return;
         };
-        #[cfg(not(windows))]
-        if let Err(error) = configure_zsh_history_environment(&shell, &mut environment, pane_id) {
-            log::warn!("could not configure early zsh history filtering: {error:#}");
-        }
         let shell_integration_startup_command = (!is_wsl)
             .then(|| shell_integration_startup_command(&shell))
             .flatten();
@@ -1375,8 +642,7 @@ impl Zetta {
                 });
             let title = self
                 .tabs
-                .iter()
-                .find(|tab| tab.id == tab_id)
+                .by_id(tab_id)
                 .and_then(|tab| tab.process_title.clone())
                 .unwrap_or_else(|| profile.name.clone());
             self.spawn_shared_terminal(
@@ -1444,6 +710,40 @@ impl Zetta {
             window,
             cx,
         );
+    }
+
+    /// The environment a pane's shell starts with, or `None` once a failure to
+    /// build it has been reported on the pane.
+    fn build_spawn_environment(
+        &mut self,
+        environment: TerminalEnvironment<'_>,
+        shell: &Shell,
+        tab_id: u64,
+        pane_id: u64,
+        cx: &mut Context<Self>,
+    ) -> Option<HashMap<String, String>> {
+        // The `mut` is for the zsh history step below, which is Unix-only.
+        #[cfg_attr(
+            windows,
+            allow(
+                unused_mut,
+                reason = "only the Unix shell-history setup mutates this map"
+            )
+        )]
+        let mut environment = match environment.build() {
+            Ok(environment) => environment,
+            Err(error) => {
+                self.report_pane_spawn_error(tab_id, pane_id, format!("{error:#}"), cx);
+                return None;
+            }
+        };
+        #[cfg(not(windows))]
+        if let Err(error) = configure_zsh_history_environment(shell, &mut environment, pane_id) {
+            log::warn!("could not configure early zsh history filtering: {error:#}");
+        }
+        #[cfg(windows)]
+        let _ = shell;
+        Some(environment)
     }
 
     fn spawn_prepared_local_terminal(
@@ -1559,637 +859,6 @@ impl Zetta {
             .detach();
     }
 
-    #[cfg(feature = "zmux")]
-    fn spawn_shared_terminal(
-        &mut self,
-        launch: SharedTerminalLaunch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let tab_id = launch.tab_id;
-        self.pending_shared_terminal_launches
-            .entry(tab_id)
-            .or_default()
-            .push(launch);
-        if !self.shared_spawn_batch_scheduled.insert(tab_id) {
-            return;
-        }
-        let executor = cx.background_executor().clone();
-        cx.spawn_in(window, async move |this, cx| {
-            executor.timer(Duration::ZERO).await;
-            this.update_in(cx, |this, window, cx| {
-                this.shared_spawn_batch_scheduled.remove(&tab_id);
-                let launches = this
-                    .pending_shared_terminal_launches
-                    .remove(&tab_id)
-                    .unwrap_or_default();
-                if launches.len() == 1 {
-                    this.spawn_shared_terminal_now(
-                        launches.into_iter().next().expect("one launch was queued"),
-                        window,
-                        cx,
-                    );
-                } else if !launches.is_empty() {
-                    this.spawn_shared_terminal_batch(launches, window, cx);
-                }
-            })
-            .ok();
-        })
-        .detach();
-    }
-
-    #[cfg(feature = "zmux")]
-    fn spawn_shared_terminal_now(
-        &mut self,
-        launch: SharedTerminalLaunch,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // Kept so a refusal that turns out to be this window being behind can
-        // be answered by making the same launch again, once, against the
-        // session as it actually is.
-        let retry = (!launch.resynchronized).then(|| SharedTerminalLaunch {
-            resynchronized: true,
-            ..launch.clone()
-        });
-        let SharedTerminalLaunch {
-            tab_id,
-            pane_id,
-            attention_id,
-            pane_routing_id,
-            terminal_theme,
-            provider,
-            shell,
-            environment,
-            marker_nonce,
-            working_directory,
-            title,
-            profile_name,
-            cursor_shape,
-            alternate_scroll,
-            max_scroll_history_lines,
-            shell_integration_startup_command,
-            tracked_multi_command_launch,
-            base_revision,
-            console_palette,
-            resynchronized: _,
-        } = launch;
-        // Before the geometry is read out of the tab, not after the session has
-        // refused it: the proposal is built from this window's translation of
-        // its panes, so a translation the session has outlived has to go first.
-        self.reconcile_shared_tab(tab_id, cx);
-        let spawn_geometry = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .with_context(|| format!("shared tab {tab_id} disappeared"))
-            .and_then(|tab| {
-                shared_spawn_replacement(&tab.layout, pane_id, self.mux_panes.ids()).map(
-                    |(target_pane_id, replacement)| {
-                        let active_pane = if tab.active_pane == pane_id {
-                            Some(zmux::messages::SharedPaneRef::Draft { draft_id: pane_id })
-                        } else {
-                            self.mux_panes
-                                .mux_pane_id(tab.active_pane)
-                                .map(|pane_id| zmux::messages::SharedPaneRef::Existing { pane_id })
-                        };
-                        (target_pane_id, replacement, active_pane)
-                    },
-                )
-            });
-        let Ok((target_pane_id, replacement, active_pane)) = spawn_geometry else {
-            self.report_pane_spawn_error(
-                tab_id,
-                pane_id,
-                format!(
-                    "Could not prepare the shared pane layout: {:#}",
-                    spawn_geometry.unwrap_err()
-                ),
-                cx,
-            );
-            return;
-        };
-        // The proposal is checked against what this window believes the session
-        // holds before it is sent, and the window is reconciled with that same
-        // belief on the way. A stale translation would otherwise be refused by
-        // the daemon for the whole request, and refused again for every split
-        // after it, because nothing here would have learned anything.
-        let mut named = target_pane_id.into_iter().collect::<Vec<_>>();
-        shared_draft_layout_existing_ids(&replacement, &mut named);
-        if let Some(zmux::messages::SharedPaneRef::Existing { pane_id }) = active_pane {
-            named.push(pane_id);
-        }
-        let key = provider.shared_key();
-        if !key
-            .as_ref()
-            .is_some_and(|key| self.shared_geometry_is_current(key, &named))
-        {
-            self.discard_uncommitted_shared_pane(
-                tab_id,
-                pane_id,
-                "The shared session changed while this pane was being created. Try again."
-                    .to_owned(),
-                cx,
-            );
-            return;
-        }
-        let remote = provider.runtime().is_remote();
-        let (draft_command, draft_environment) =
-            shared_draft_process(remote, &shell, &environment, marker_nonce.as_deref());
-        // Loaded by the daemon, before the pane has an attachment or anything
-        // retained. The wrapper that loads it is delivered as if typed, so the
-        // terminal echoes it to every viewer of a shared pane — and a viewer
-        // that did not write it has no way to know what it is looking at.
-        let daemon_loads_shell_integration = shell_integration_startup_command.is_some();
-        let shell_integration_startup_command = None;
-        let spawn_tab = self.tabs.iter().find(|tab| tab.id == tab_id);
-        let stand_in_size = shared_spawn_stand_in_size(
-            spawn_tab,
-            target_pane_id
-                .and_then(|mux_pane_id| {
-                    self.mux_panes.local_pane_id_among(
-                        spawn_tab
-                            .into_iter()
-                            .flat_map(|tab| tab.panes.iter().map(|pane| pane.id)),
-                        mux_pane_id,
-                    )
-                })
-                .unwrap_or(pane_id),
-            cx,
-        );
-        let executor = cx.background_executor().clone();
-        let terminal_executor = executor.clone();
-        let build = executor.spawn(async move {
-            let runtime = provider.runtime().clone();
-            let startup_shell = shell.clone();
-            let (program, _args) = shell.program_and_args();
-            let client = runtime.client().clone();
-            let operation_id = client.next_shared_operation_id();
-            let session_id = provider
-                .session_id()
-                .context("shared pane has no multiplexer session")?;
-            let request = zmux::messages::SharedSpawnBatchRequest {
-                session_id,
-                base_revision,
-                operation_id,
-                target_pane_id,
-                replacement,
-                panes: vec![zmux::messages::SharedPaneDraft {
-                    draft_id: pane_id,
-                    profile: profile_name.clone(),
-                    command: draft_command.clone(),
-                    env: draft_environment.clone(),
-                    working_directory: working_directory.clone(),
-                    // The pane being split. Only used when this window had no
-                    // directory of its own to send, which is the case for a
-                    // pane on another machine: it reports its directory to the
-                    // window that runs it, not to this one.
-                    inherit_working_directory_from: target_pane_id,
-                    load_shell_integration: daemon_loads_shell_integration,
-                    size: stand_in_size,
-                    console_palette,
-                    metadata: BackgroundPaneSummary {
-                        id: 0,
-                        label: title.clone(),
-                        profile: profile_name,
-                        configured_command: String::new(),
-                        application: program,
-                        foreground_command: None,
-                        terminal_title: None,
-                        working_directory: working_directory.clone(),
-                        state: BackgroundPaneState::Running,
-                        exit: None,
-                    },
-                }],
-                active_pane,
-            };
-            let spawned = match client.spawn_shared_batch(request) {
-                Ok(spawned) => spawned,
-                Err(error) => {
-                    // The session would not take the geometry. Whatever this
-                    // window believed about the session was wrong, so bring
-                    // back what is actually there rather than reporting and
-                    // leaving the same belief in place to fail again.
-                    let Ok(state) = client.shared_snapshot(session_id) else {
-                        return Err(error);
-                    };
-                    return Ok(SharedTerminalBuild::Desynchronized {
-                        tab_id,
-                        pane_id,
-                        state: Box::new(state),
-                        reason: format!("{error:#}"),
-                    });
-                }
-            };
-            let spawned = match spawned {
-                zmux::client::SharedBatchResult::Applied(spawned) => spawned,
-                zmux::client::SharedBatchResult::Conflict(state) => {
-                    return Ok::<_, anyhow::Error>(SharedTerminalBuild::Conflict {
-                        tab_id,
-                        pane_id,
-                        state: Box::new(state),
-                    });
-                }
-            };
-            let mapping = spawned
-                .mappings
-                .iter()
-                .find(|mapping| mapping.draft_id == pane_id)
-                .context("shared batch did not commit its requested pane")?;
-            provider.record_shared_opened(session_id, mapping.pane_id);
-            let mut committed_state = spawned.state;
-            // Past this point the pane exists for every viewer, so a failure
-            // here is this window's alone. Handing back the committed state
-            // rather than an error is what lets the pane arrive the ordinary
-            // way — as one the session holds and this window has yet to
-            // attach — instead of being dropped locally and left running.
-            let pane = match attach_committed_shared_pane(
-                &client,
-                &runtime,
-                session_id,
-                mapping.pane_id,
-                &mut committed_state,
-            ) {
-                Ok(pane) => pane,
-                Err(error) => {
-                    return Ok(SharedTerminalBuild::Desynchronized {
-                        tab_id,
-                        pane_id,
-                        state: Box::new(committed_state),
-                        reason: format!("{error:#}"),
-                    });
-                }
-            };
-            let pane = Arc::new(pane);
-            let image_paste_handler = crate::background_session_ui::image_paste::handler_for_pane(
-                &runtime,
-                pane.session_id(),
-                pane.pane_id(),
-                crate::background_session_ui::image_paste::LocalPasteTarget {
-                    shell,
-                    environment,
-                    working_directory: working_directory.clone(),
-                },
-            );
-            let (builder, zosh_session, transport_fallback) =
-                build_shared_pane_terminal(SharedPaneTerminal {
-                    pane: &pane,
-                    runtime: &runtime,
-                    title,
-                    cursor_shape,
-                    alternate_scroll,
-                    max_scroll_history_lines,
-                    working_directory,
-                    marker_nonce,
-                    executor: &terminal_executor,
-                });
-            let builder = builder
-                .with_image_paste_handler(image_paste_handler)
-                .with_init_command_startup_shell(startup_shell);
-            Ok::<_, anyhow::Error>(SharedTerminalBuild::Ready(
-                Box::new(builder),
-                Box::new(SpawnedTerminal {
-                    tab_id,
-                    pane_id,
-                    attention_id,
-                    pane_routing_id,
-                    terminal_theme,
-                    restore_options: None,
-                    restored_working_directory: None,
-                    mux_provider: None,
-                    shared_pane: Some(pane),
-                    zosh_session,
-                    transport_fallback,
-                    shared_runtime: Some(runtime),
-                    shared_state: Some(committed_state),
-                    shell_integration_startup_command,
-                    tracked_multi_command_launch,
-                    image_paste_handler: None,
-                }),
-            ))
-        });
-        let this = cx.entity().downgrade();
-        window
-            .spawn(cx, async move |cx| match build.await {
-                Ok(SharedTerminalBuild::Ready(builder, spawned)) => {
-                    this.update_in(cx, |this, window, cx| {
-                        this.finish_terminal_spawn(*builder, *spawned, window, cx);
-                    })
-                    .ok();
-                }
-                Ok(SharedTerminalBuild::Desynchronized {
-                    tab_id,
-                    pane_id,
-                    state,
-                    reason,
-                }) => {
-                    this.update_in(cx, |this, window, cx| {
-                        log::warn!(
-                            "shared session {} refused this window's pane layout: {reason}",
-                            state.session_id
-                        );
-                        // The snapshot first: it is the session as it is, and
-                        // applying it is what makes the retry below propose
-                        // something the session can actually accept.
-                        if let Some(key) = &key {
-                            this.apply_shared_snapshot(key, *state, window, cx);
-                        }
-                        let Some(mut retry) = retry else {
-                            this.discard_uncommitted_shared_pane(
-                                tab_id,
-                                pane_id,
-                                format!("Could not create the shared pane: {reason}"),
-                                cx,
-                            );
-                            return;
-                        };
-                        // Rebased on what the session is at now. The revision
-                        // the launch was built with belongs to the picture that
-                        // has just been replaced.
-                        if let Some(revision) = retry.provider.shared_key().and_then(|key| {
-                            this.shared_collaboration
-                                .state(&key)
-                                .map(|state| state.revision)
-                        }) {
-                            retry.base_revision = revision;
-                        }
-                        this.spawn_shared_terminal_now(retry, window, cx);
-                    })
-                    .ok();
-                }
-                Ok(SharedTerminalBuild::Conflict {
-                    tab_id,
-                    pane_id,
-                    state,
-                }) => {
-                    this.update_in(cx, |this, window, cx| {
-                        if let Some(key) = &key {
-                            this.apply_shared_snapshot(key, *state, window, cx);
-                        }
-                        this.discard_uncommitted_shared_pane(
-                            tab_id,
-                            pane_id,
-                            "The shared layout changed before this pane could be created."
-                                .to_owned(),
-                            cx,
-                        );
-                    })
-                    .ok();
-                }
-                Err(error) => {
-                    this.update_in(cx, |this, window, cx| {
-                        this.discard_uncommitted_shared_pane(
-                            tab_id,
-                            pane_id,
-                            format!("Could not create the shared pane: {error:#}"),
-                            cx,
-                        );
-                        if tracked_multi_command_launch {
-                            this.finish_multi_command_launch(window, cx);
-                        }
-                    })
-                    .ok();
-                }
-            })
-            .detach();
-    }
-
-    #[cfg(feature = "zmux")]
-    fn spawn_shared_terminal_batch(
-        &mut self,
-        launches: Vec<SharedTerminalLaunch>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let tab_id = launches[0].tab_id;
-        self.reconcile_shared_tab(tab_id, cx);
-        let draft_ids = launches
-            .iter()
-            .map(|launch| launch.pane_id)
-            .collect::<HashSet<_>>();
-        let layout = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .with_context(|| format!("shared tab {tab_id} disappeared"))
-            .and_then(|tab| {
-                shared_complete_draft_layout(&tab.layout, &draft_ids, self.mux_panes.ids()).map(
-                    |layout| {
-                        let active = if draft_ids.contains(&tab.active_pane) {
-                            zmux::messages::SharedPaneRef::Draft {
-                                draft_id: tab.active_pane,
-                            }
-                        } else {
-                            zmux::messages::SharedPaneRef::Existing {
-                                pane_id: self
-                                    .mux_panes
-                                    .mux_pane_id(tab.active_pane)
-                                    .expect("non-draft shared pane has a mux id"),
-                            }
-                        };
-                        (layout, active)
-                    },
-                )
-            });
-        let Ok((replacement, active_pane)) = layout else {
-            let error = layout.unwrap_err();
-            for launch in launches {
-                self.report_pane_spawn_error(
-                    tab_id,
-                    launch.pane_id,
-                    format!("Could not prepare the shared pane batch: {error:#}"),
-                    cx,
-                );
-            }
-            return;
-        };
-        // A batch replaces the session's whole layout rather than one node of
-        // it, so every pane the tab holds is named. That makes it the request
-        // most exposed to a translation this window kept for a pane the session
-        // dropped — one such id and the session refuses all of it.
-        let mut named = Vec::new();
-        shared_draft_layout_existing_ids(&replacement, &mut named);
-        if let zmux::messages::SharedPaneRef::Existing { pane_id } = active_pane {
-            named.push(pane_id);
-        }
-        let current = launches[0]
-            .provider
-            .shared_key()
-            .is_some_and(|key| self.shared_geometry_is_current(&key, &named));
-        if !current {
-            for launch in &launches {
-                self.discard_uncommitted_shared_pane(
-                    tab_id,
-                    launch.pane_id,
-                    "The shared session changed while these panes were being created. Try again."
-                        .to_owned(),
-                    cx,
-                );
-            }
-            return;
-        }
-        let runtime = launches[0].provider.runtime().clone();
-        let session_id = launches[0]
-            .provider
-            .session_id()
-            .expect("a shared launch has a session id");
-        let base_revision = launches[0].base_revision;
-        let remote = runtime.is_remote();
-        let client = runtime.client().clone();
-        let operation_id = client.next_shared_operation_id();
-        let stand_in_size = shared_spawn_stand_in_size(
-            self.tabs.iter().find(|tab| tab.id == tab_id),
-            launches[0].pane_id,
-            cx,
-        );
-        // A batch replaces the whole layout rather than splitting one pane, so
-        // the directory to fall back to is the tab's active pane's.
-        let inherit_directory_from = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| self.mux_panes.mux_pane_id(tab.active_pane));
-        let panes = launches
-            .iter()
-            .map(|launch| {
-                let (program, _args) = launch.shell.program_and_args();
-                let (command, env) = shared_draft_process(
-                    remote,
-                    &launch.shell,
-                    &launch.environment,
-                    launch.marker_nonce.as_deref(),
-                );
-                zmux::messages::SharedPaneDraft {
-                    draft_id: launch.pane_id,
-                    profile: launch.profile_name.clone(),
-                    command,
-                    env,
-                    working_directory: launch.working_directory.clone(),
-                    inherit_working_directory_from: inherit_directory_from,
-                    load_shell_integration: launch.shell_integration_startup_command.is_some(),
-                    size: stand_in_size,
-                    console_palette: launch.console_palette,
-                    metadata: BackgroundPaneSummary {
-                        id: 0,
-                        label: launch.title.clone(),
-                        profile: launch.profile_name.clone(),
-                        configured_command: String::new(),
-                        application: program,
-                        foreground_command: None,
-                        terminal_title: None,
-                        working_directory: launch.working_directory.clone(),
-                        state: BackgroundPaneState::Running,
-                        exit: None,
-                    },
-                }
-            })
-            .collect();
-        let executor = cx.background_executor().clone();
-        let terminal_executor = executor.clone();
-        let request = zmux::messages::SharedSpawnBatchRequest {
-            session_id,
-            base_revision,
-            operation_id,
-            target_pane_id: None,
-            replacement,
-            panes,
-            active_pane: Some(active_pane),
-        };
-        let daemon = runtime.daemon();
-        let build = executor.spawn(async move {
-            build_shared_terminal_batch(launches, runtime, request, &terminal_executor)
-        });
-        cx.spawn_in(window, async move |this, cx| match build.await {
-            Ok(SharedTerminalBatchBuild::Ready {
-                session_id,
-                state,
-                mut terminals,
-            }) => {
-                this.update_in(cx, |this, window, cx| {
-                    let key = SharedSessionKey {
-                        daemon: daemon.clone(),
-                        session_id,
-                    };
-                    for (_, spawned) in &terminals {
-                        let pane = spawned.shared_pane.as_ref().expect("batch pane is shared");
-                        this.mux_panes.record(spawned.pane_id, pane.pane_id());
-                        this.shared_collaboration.record_pane(
-                            &key,
-                            pane.pane_id(),
-                            spawned.pane_id,
-                        );
-                    }
-                    this.apply_shared_snapshot(&key, state, window, cx);
-                    for (builder, spawned) in terminals.drain(..) {
-                        this.finish_terminal_spawn(builder, spawned, window, cx);
-                    }
-                })
-                .ok();
-            }
-            Ok(SharedTerminalBatchBuild::Desynchronized {
-                state,
-                panes,
-                reason,
-            }) => {
-                this.update_in(cx, |this, window, cx| {
-                    log::warn!(
-                        "shared session {} refused this window's pane batch: {reason}",
-                        state.session_id
-                    );
-                    let key = SharedSessionKey {
-                        daemon: daemon.clone(),
-                        session_id: state.session_id,
-                    };
-                    this.apply_shared_snapshot(&key, state, window, cx);
-                    for (tab_id, pane_id) in panes {
-                        this.discard_uncommitted_shared_pane(
-                            tab_id,
-                            pane_id,
-                            "This window's view of the shared session was out of date. It has \
-                             been brought up to date — try again."
-                                .to_owned(),
-                            cx,
-                        );
-                    }
-                })
-                .ok();
-            }
-            Ok(SharedTerminalBatchBuild::Conflict { state, panes }) => {
-                this.update_in(cx, |this, window, cx| {
-                    let key = SharedSessionKey {
-                        daemon: daemon.clone(),
-                        session_id: state.session_id,
-                    };
-                    this.apply_shared_snapshot(&key, state, window, cx);
-                    for (tab_id, pane_id) in panes {
-                        this.discard_uncommitted_shared_pane(
-                            tab_id,
-                            pane_id,
-                            "The shared layout changed before this pane batch committed."
-                                .to_owned(),
-                            cx,
-                        );
-                    }
-                })
-                .ok();
-            }
-            Err(error) => {
-                this.update_in(cx, |this, _window, cx| {
-                    for pane_id in draft_ids {
-                        this.discard_uncommitted_shared_pane(
-                            tab_id,
-                            pane_id,
-                            format!("Could not create the shared panes: {error:#}"),
-                            cx,
-                        );
-                    }
-                })
-                .ok();
-            }
-        })
-        .detach();
-    }
-
     /// The shell a spawn runs, deriving it from the profile when the request did
     /// not name one.
     ///
@@ -2246,66 +915,7 @@ impl Zetta {
     }
 }
 
-/// What a spawned pane is registered from: the stream the multiplexer relays it
-/// on, the Mosh session carrying it when it has one instead, and the terminal
-/// showing it.
-#[cfg(feature = "zmux")]
-struct SpawnedSharedPane<'a> {
-    shared_pane: &'a Arc<zmux::client::SharedPane>,
-    zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
-    transport_fallback: Option<String>,
-    runtime: &'a crate::mux::MuxRuntime,
-    terminal: &'a Entity<Terminal>,
-}
-
 impl Zetta {
-    /// Registers a pane the multiplexer relays, once its terminal exists.
-    ///
-    /// Which registry it belongs in follows from how it is fed: a pane carried
-    /// over Mosh holds no stream from the multiplexer, and the one it was
-    /// attached with is released when the caller drops it — reading the remote
-    /// host's output twice would pay for it twice.
-    #[cfg(feature = "zmux")]
-    fn register_spawned_shared_pane(
-        &mut self,
-        ids: MuxPaneIds,
-        pane: SpawnedSharedPane<'_>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let SpawnedSharedPane {
-            shared_pane,
-            zosh_session,
-            transport_fallback,
-            runtime,
-            terminal,
-        } = pane;
-        let tab_id = ids.tab_id;
-        let pane_id = ids.pane_id;
-        match zosh_session {
-            Some(session) => self.register_zosh_pane(ids, session, runtime, window, cx),
-            None => {
-                if let Some(reason) = transport_fallback {
-                    self.note_transport_fallback(tab_id, pane_id, &reason, cx);
-                }
-                self.register_shared_pane(ids, shared_pane, runtime, window, cx);
-                // A pane spawned into a shared session is wired up here rather
-                // than in `connect_terminal_view`, which is what subscribes the
-                // panes an *attach* builds — so without this a pane you split
-                // never tells the daemon how big it is. The pty then keeps the
-                // stand-in size the draft was created with for the rest of its
-                // life: the pane draws at 24 lines in a full-height window, and
-                // maximizing it changes nothing, because the size this viewer
-                // is showing was never reported.
-                self.subscribe_shared_pane_size(pane_id, terminal, window, cx);
-            }
-        }
-        // Geometry and pane metadata were committed in the batch. Once the
-        // terminal exists, publish the remaining opaque PaneState that needs
-        // its stable local-to-mux mapping.
-        self.sync_shared_tab_state(tab_id, cx);
-    }
-
     /// Wires a terminal whose builder has resolved into the pane that asked for
     /// it, and runs whatever has to happen once it exists.
     ///
@@ -2394,7 +1004,7 @@ impl Zetta {
         this.subscribe_spawned_terminal_view(tab_id, pane_id, &view, window, cx);
         let should_focus =
             this.configure_spawned_terminal_focus(tab_id, pane_id, &view, window, cx);
-        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
+        let tab_index = this.tab_index(tab_id);
         let mut deferred_pending_command = None;
         if let Some(pane) = tab_index
             .and_then(|index| this.tabs.get_mut(index))
@@ -2422,11 +1032,7 @@ impl Zetta {
             }
         } else {
             let stored_in_background = {
-                let pane = this
-                    .background_sessions
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-                    .and_then(|tab| tab.pane_mut(pane_id));
+                let pane = this.background_sessions.pane_in_mut(tab_id, pane_id);
                 if let Some(pane) = pane {
                     pane.terminal = Some(terminal.clone());
                     true
@@ -2479,7 +1085,30 @@ impl Zetta {
         if tracked_multi_command_launch {
             this.finish_multi_command_launch(window, cx);
         }
-        if restore_options.is_some() {
+        this.deliver_spawn_startup_commands(
+            &terminal,
+            &view,
+            restore_options.is_some(),
+            shell_integration_startup_command,
+            deferred_pending_command,
+            cx,
+        );
+    }
+
+    /// Writes what a new shell is started with once it is ready for it: the
+    /// shell-integration line after the startup handshake, then a pending
+    /// command that had to wait for that line. A restored pane also finishes
+    /// its restore here.
+    fn deliver_spawn_startup_commands(
+        &mut self,
+        terminal: &Entity<Terminal>,
+        view: &Entity<TerminalView>,
+        restoring: bool,
+        shell_integration_startup_command: Option<Vec<u8>>,
+        deferred_pending_command: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if restoring {
             let terminal_for_restore = terminal.clone();
             if let Some(command) = shell_integration_startup_command.as_ref() {
                 let startup_handshake = terminal.update(cx, |terminal, _| {
@@ -2554,12 +1183,7 @@ impl Zetta {
             ..
         } = *spawned;
         let this = self;
-        if let Some(pane) = this
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-        {
+        if let Some(pane) = this.tabs.pane_in_mut(tab_id, pane_id) {
             pane.error = Some(format!("{error:#}"));
         }
         this.schedule_terminal_spawn_notify(cx);
@@ -2718,383 +1342,6 @@ fn pending_command_delivery(
 #[cfg(test)]
 #[path = "tests/terminal_spawn.rs"]
 mod tests;
-
-/// The inputs one stacked command terminal needs. Its `entry_id` addresses
-/// the [`PaneStack`] entry that shares `pane_id`'s layout region.
-pub(crate) struct StackedTerminalSpawnRequest {
-    pub(crate) tab_id: u64,
-    pub(crate) pane_id: u64,
-    pub(crate) entry_id: u64,
-    pub(crate) command: String,
-    pub(crate) profile: Profile,
-    pub(crate) working_directory: Option<PathBuf>,
-    pub(crate) wsl_directory: Option<String>,
-    pub(crate) terminal_theme: Option<Arc<Theme>>,
-}
-
-impl Zetta {
-    pub(crate) fn spawn_stacked_terminal(
-        &mut self,
-        request: StackedTerminalSpawnRequest,
-        settings: &mut TerminalSpawnSettings,
-        // `final_spawn` lets the last terminal of a batch move the shared
-        // hyperlink regexes instead of cloning them.
-        final_spawn: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let StackedTerminalSpawnRequest {
-            tab_id,
-            pane_id,
-            entry_id,
-            command,
-            profile,
-            working_directory,
-            wsl_directory,
-            terminal_theme,
-        } = request;
-        let is_wsl = is_wsl_shell(&profile.command);
-        let Some(attention_id) = self.attention_id_for_tab(tab_id) else {
-            self.stacked_terminal_failed(
-                tab_id,
-                pane_id,
-                entry_id,
-                "Could not identify the terminal's Zetta tab".to_owned(),
-                cx,
-            );
-            return;
-        };
-        let pane_routing_id = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| {
-                tab.pane(pane_id).and_then(|pane| {
-                    pane.stack
-                        .entries
-                        .iter()
-                        .find(|entry| entry.id == entry_id)
-                        .map(|entry| entry.routing_id)
-                })
-            })
-            .unwrap_or(entry_id);
-        let shell = stacked_task_shell(&profile.command, &command, wsl_directory.as_deref());
-        let project_environment = self.project_environment_for_tab(tab_id);
-        let effective_theme = terminal_theme.clone().unwrap_or_else(|| cx.theme().clone());
-        let environment = match (TerminalEnvironment {
-            profile: &profile.command,
-            overrides: &project_environment,
-            attention_id,
-            tracking_id: entry_id,
-            routing_id: pane_routing_id,
-            wsl_cwd_file: None,
-            theme_name: &effective_theme.name,
-            no_mux: self.no_mux,
-        })
-        .build()
-        {
-            Ok(environment) => environment,
-            Err(error) => {
-                self.stacked_terminal_failed(tab_id, pane_id, entry_id, format!("{error:#}"), cx);
-                return;
-            }
-        };
-
-        let (completion_tx, completion_rx) = async_channel::unbounded();
-        let task = SpawnInTerminal {
-            id: TaskId(format!("zetta-stacked-{tab_id}-{entry_id}")),
-            full_label: command.clone(),
-            label: command.clone(),
-            command: Some(command.clone()),
-            args: Vec::new(),
-            command_label: command.clone(),
-            cwd: working_directory.clone(),
-            env: SpawnInTerminal::default().env,
-            use_new_terminal: false,
-            allow_concurrent_runs: true,
-            reveal: task::RevealStrategy::Never,
-            reveal_target: task::RevealTarget::Dock,
-            hide: task::HideStrategy::Never,
-            shell: shell.clone(),
-            show_summary: false,
-            show_command: false,
-            show_rerun: false,
-            save: task::SaveStrategy::None,
-        };
-        let task_state = TaskState {
-            status: TaskStatus::Running,
-            completion_rx,
-            spawned_task: task,
-        };
-        // Console backend selection must preserve daemon session ownership.
-        let mux_provider = match self.mux_provider_for_tab(tab_id, cx) {
-            Ok(provider) => provider,
-            Err(error) => {
-                self.report_pane_spawn_error(
-                    tab_id,
-                    pane_id,
-                    format!(
-                        "Could not start the stacked terminal through the session multiplexer: {error:#}"
-                    ),
-                    cx,
-                );
-                return;
-            }
-        };
-        // WSL skips the palette helper, but still names its console backend.
-        let initial_console_palette = (!is_wsl
-            || profile.console_backend == crate::config::ConsoleBackend::ConsoleServer)
-            .then(|| terminal::ConsoleLaunchOptions {
-                palette: terminal::console_palette_for_theme(effective_theme.as_ref()),
-                backend: profile.console_backend,
-            });
-        let image_paste_handler = Arc::new(crate::ssh_image_paste::SshImagePasteHandler::new(
-            shell.clone(),
-            environment.clone(),
-            working_directory.clone(),
-        ));
-        let builder = TerminalBuilder::new_with_console_palette(
-            working_directory,
-            Some(task_state),
-            shell,
-            environment,
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            settings.path_hyperlink_regexes(final_spawn),
-            settings.path_hyperlink_timeout_ms,
-            false,
-            cx.entity_id().as_u64(),
-            Some(completion_tx),
-            cx,
-            Vec::new(),
-            PathStyle::local(),
-            mux_provider
-                .clone()
-                .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
-            initial_console_palette,
-            None,
-        );
-
-        let this = cx.entity().downgrade();
-        let spawned = SpawnedStackedTerminal {
-            tab_id,
-            pane_id,
-            entry_id,
-            attention_id,
-            pane_routing_id,
-            terminal_theme,
-            mux_provider,
-            image_paste_handler,
-        };
-        window
-            .spawn(cx, async move |cx| match builder.await {
-                Ok(builder) => {
-                    this.update_in(cx, |this, window, cx| {
-                        this.finish_stacked_terminal_spawn(builder, spawned, window, cx);
-                    })
-                    .ok();
-                }
-                Err(error) => {
-                    this.update_in(cx, |this, _window, cx| {
-                        this.stacked_terminal_failed(
-                            spawned.tab_id,
-                            spawned.pane_id,
-                            spawned.entry_id,
-                            format!("{error:#}"),
-                            cx,
-                        );
-                        this.schedule_terminal_spawn_notify(cx);
-                    })
-                    .ok();
-                }
-            })
-            .detach();
-    }
-
-    /// Wires a stacked command's terminal into the pane stack that asked for it.
-    ///
-    /// Unlike an interactive pane, a stacked entry routes its exit and its focus
-    /// through the stack's selection, which is why this does not reuse
-    /// `finish_terminal_spawn`.
-    fn finish_stacked_terminal_spawn(
-        &mut self,
-        mut builder: TerminalBuilder,
-        spawned: SpawnedStackedTerminal,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let SpawnedStackedTerminal {
-            tab_id,
-            pane_id,
-            entry_id,
-            attention_id,
-            pane_routing_id,
-            terminal_theme,
-            mux_provider,
-            image_paste_handler,
-        } = spawned;
-        builder = builder.with_image_paste_handler(image_paste_handler);
-        let this = self;
-        this.adopt_mux_pane(
-            tab_id,
-            entry_id,
-            mux_provider.as_deref(),
-            &mut builder,
-            window,
-            cx,
-        );
-        let terminal = cx.new(|cx| builder.subscribe(cx));
-        let view =
-            cx.new(|cx| TerminalView::new_with_theme(terminal.clone(), terminal_theme, window, cx));
-        this.configure_terminal_view_silent_mode(tab_id, &view, cx);
-        let run_registry = crate::run_command::process_run_registry();
-        let run_identity = crate::run_command::RunPaneIdentity::new(attention_id, pane_routing_id);
-        run_registry.pane_reopened(run_identity);
-        cx.subscribe_in(
-            &terminal,
-            window,
-            move |this, _terminal, event: &TerminalEvent, _window, cx| {
-                run_registry.observe_terminal_event(run_identity, event);
-                if let TerminalEvent::TaskFinished { exit_code } = event {
-                    this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
-                }
-            },
-        )
-        .detach();
-        cx.subscribe_in(
-            &view,
-            window,
-            move |this, _, event, window, cx| match event {
-                TerminalViewEvent::Close => {
-                    this.stacked_terminal_closed(tab_id, pane_id, entry_id, window, cx);
-                }
-                TerminalViewEvent::TitleChanged => cx.notify(),
-                TerminalViewEvent::PasteError(error) => this.show_error_notice(error.clone(), cx),
-                TerminalViewEvent::Input(_) => {}
-                TerminalViewEvent::OpenEditor(request) => {
-                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
-                }
-            },
-        )
-        .detach();
-        let input_enabled = this.terminal_input_enabled();
-        view.update(cx, |view, cx| {
-            view.set_emit_input_events(false);
-            view.set_input_enabled(input_enabled, cx);
-        });
-        let focus_handle = view.focus_handle(cx);
-        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
-            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                tab.activate_stack_entry(pane_id, PaneStackSelection::Stacked(entry_id));
-                cx.notify();
-            }
-            this.activate_current_project(window, cx);
-            this.clear_active_tab_attention_if_focused(window, cx);
-        })
-        .detach();
-        let tab_index = this.tabs.iter().position(|tab| tab.id == tab_id);
-        let should_focus = tab_index.is_some_and(|index| {
-            index == this.active_tab
-                && this.tabs[index].active_pane == pane_id
-                && this.tabs[index].pane(pane_id).is_some_and(|pane| {
-                    pane.stack.selected == PaneStackSelection::Stacked(entry_id)
-                })
-        });
-        let inserted = tab_index
-            .and_then(|index| this.tabs.get_mut(index))
-            .and_then(|tab| tab.pane_mut(pane_id))
-            .and_then(|pane| {
-                let entry = pane
-                    .stack
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.id == entry_id)?;
-                entry.terminal = Some(terminal.clone());
-                entry.view = Some(view.clone());
-                entry.state = StackedPaneState::Running;
-                Some(())
-            })
-            .is_some();
-        if !inserted {
-            let stored_in_background = this
-                .background_sessions
-                .iter_mut()
-                .find(|tab| tab.id == tab_id)
-                .and_then(|tab| tab.pane_mut(pane_id))
-                .and_then(|pane| {
-                    let entry = pane
-                        .stack
-                        .entries
-                        .iter_mut()
-                        .find(|entry| entry.id == entry_id)?;
-                    entry.terminal = Some(terminal.clone());
-                    entry.state = StackedPaneState::Running;
-                    Some(())
-                })
-                .is_some();
-            if stored_in_background {
-                terminal.update(cx, |terminal, cx| {
-                    terminal.set_ui_visible(false, cx);
-                });
-                this.observe_background_stacked_terminal(pane_id, entry_id, terminal.clone(), cx);
-                this.publish_background_session_catalog(cx);
-            }
-        }
-        if should_focus {
-            let focus_handle = view.focus_handle(cx);
-            this.focus_terminal_if_allowed(&focus_handle, window, cx);
-        }
-        this.sync_visible_terminals(cx);
-        this.schedule_terminal_spawn_notify(cx);
-    }
-
-    pub(crate) fn stacked_terminal_failed(
-        &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        entry_id: u64,
-        error: String,
-        cx: &mut Context<Self>,
-    ) {
-        let entry = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-            .and_then(|pane| {
-                pane.stack
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.id == entry_id)
-            });
-        if let Some(entry) = entry {
-            entry.state = StackedPaneState::Failed;
-            entry.error = Some(error);
-            cx.notify();
-            return;
-        }
-        let updated_background = self
-            .background_sessions
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-            .and_then(|pane| {
-                pane.stack
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.id == entry_id)
-            })
-            .map(|entry| {
-                entry.state = StackedPaneState::Failed;
-                entry.error = Some(error);
-            })
-            .is_some();
-        if updated_background {
-            self.publish_background_session_catalog(cx);
-        }
-    }
-}
 
 #[cfg(not(windows))]
 fn configure_zsh_history_environment<S>(

@@ -666,7 +666,7 @@ impl Zetta {
             done.await.ok();
             this.update_in(cx, |this, window, cx| {
                 this.settle_session_handover(tab_id, None, Some(window), cx);
-                if let Some(index) = this.tabs.iter().position(|tab| tab.id == tab_id) {
+                if let Some(index) = this.tab_index(tab_id) {
                     this.close_tab_at_with_policy(index, background_if_pinned, window, cx);
                 }
             })
@@ -831,8 +831,7 @@ impl Zetta {
         };
         let stranded = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
+            .by_id(tab_id)
             .into_iter()
             .flat_map(|tab| tab.panes.iter())
             .filter_map(|pane| {
@@ -957,7 +956,7 @@ impl Zetta {
             .mux_panes
             .runtime_for_tab(tab_id)
             .or_else(|| self.mux.clone());
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(index) = self.tab_index(tab_id) else {
             // The tab left the window while the request was in flight. A
             // subscription nobody will watch must not keep collecting events.
             if let (Some(Ok(_)), Some(runtime), Some(session_id)) =

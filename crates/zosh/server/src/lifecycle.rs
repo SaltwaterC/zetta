@@ -1,3 +1,8 @@
+//! How the server outlives the SSH command that started it. Mosh's bootstrap
+//! expects that command to exit once it prints `MOSH CONNECT`, so on Windows
+//! the server re-executes itself as a detached process and relays that first
+//! line.
+
 #[cfg(windows)]
 use anyhow::Context;
 use anyhow::{Result, bail};

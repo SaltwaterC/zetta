@@ -35,7 +35,7 @@ pub(super) fn reaper_loop(daemon: Arc<Daemon>, mut reader: Stream) {
     while reader.read(&mut byte).is_ok() {
         let mut exits = Vec::new();
         {
-            let mut sessions = daemon.sessions.lock().unwrap();
+            let mut sessions = daemon.sessions();
             for session in sessions.iter_mut() {
                 for pane in session.panes.iter_mut() {
                     if pane.exited {
@@ -183,10 +183,7 @@ pub(super) fn start_drain(daemon: Arc<Daemon>) -> Result<()> {
         waker
             .set_nonblocking(true)
             .expect("making the drain wake channel non-blocking");
-        *daemon
-            .drain_wake
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(wake);
+        *daemon.drain_wake.lock().recover_poison() = Some(wake);
         let wait = DrainWait::new(waker);
         let daemon = daemon.clone();
         Box::new(move || drain_loop(daemon, wait))
@@ -219,7 +216,7 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
         if last_liveness_check.elapsed() >= CLIENT_LIVENESS_INTERVAL {
             last_liveness_check = std::time::Instant::now();
             reclaim_panes_from_departed_clients(&daemon);
-            let mut sessions = daemon.sessions.lock().unwrap();
+            let mut sessions = daemon.sessions();
             for session in sessions.iter_mut() {
                 for pane in session.panes.iter_mut() {
                     if let Some(exit) = observe_pane_exit(session.id, pane) {
@@ -230,7 +227,7 @@ pub(super) fn drain_loop(daemon: Arc<Daemon>, mut wait: DrainWait) {
         }
         let mut idle = true;
         {
-            let mut sessions = daemon.sessions.lock().unwrap();
+            let mut sessions = daemon.sessions();
             for session in sessions.iter_mut() {
                 let session_id = session.id;
                 let revision = session
@@ -542,7 +539,7 @@ impl DrainWait {
         // not end the wait; the persistence worker wakes it once there is room.
         let backlogged = persistence_backlogged(daemon);
         {
-            let sessions = daemon.sessions.lock().unwrap();
+            let sessions = daemon.sessions();
             for session in sessions.iter() {
                 for pane in session.panes.iter() {
                     // An exited pane is drained to the end by the pass above and
@@ -729,7 +726,7 @@ pub(super) const CLIENT_LIVENESS_INTERVAL: std::time::Duration = std::time::Dura
 /// anyone else in a usable state.
 pub(super) fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
     let holders = {
-        let sessions = daemon.sessions.lock().unwrap();
+        let sessions = daemon.sessions();
         sessions
             .iter()
             .flat_map(|session| session.panes.iter())
@@ -755,7 +752,7 @@ pub(super) fn reclaim_panes_from_departed_clients(daemon: &Arc<Daemon>) {
     }
 
     let mut reclaimed = false;
-    let mut sessions = daemon.sessions.lock().unwrap();
+    let mut sessions = daemon.sessions();
     // Only the panes are reclaimed. A session's *scope* is deliberately left
     // alone: a private backgrounding is not a slow way of sharing it, so a
     // window exiting must not turn a session another Zetta could not see into
@@ -860,12 +857,7 @@ pub(super) fn persistence_backlogged(_daemon: &Daemon) -> bool {
 }
 
 pub(super) fn wake_drain(daemon: &Arc<Daemon>) {
-    if let Some(wake) = daemon
-        .drain_wake
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_mut()
-    {
+    if let Some(wake) = daemon.drain_wake.lock().recover_poison().as_mut() {
         use std::io::Write as _;
         let _ = wake.write_all(b".");
     }

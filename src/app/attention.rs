@@ -229,11 +229,7 @@ impl Zetta {
                         pane.view.clone(),
                     ),
                     PaneStackSelection::Stacked(entry_id) => {
-                        let entry = pane
-                            .stack
-                            .entries
-                            .iter()
-                            .find(|entry| entry.id == entry_id)?;
+                        let entry = pane.stack.entry(entry_id)?;
                         (
                             pane,
                             PaneStackSelection::Stacked(entry.id),
@@ -297,13 +293,11 @@ impl Zetta {
 
     pub(crate) fn attention_id_for_tab(&self, tab_id: u64) -> Option<u64> {
         self.tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
+            .by_id(tab_id)
             .map(|tab| tab.attention_id)
             .or_else(|| {
                 self.background_sessions
-                    .iter()
-                    .find(|tab| tab.id == tab_id)
+                    .by_id(tab_id)
                     .map(|tab| tab.attention_id)
             })
     }
@@ -313,11 +307,7 @@ impl Zetta {
         tab_id: u64,
         pane_id: u64,
     ) -> Option<crate::run_command::RunPaneIdentity> {
-        let tab = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))?;
+        let tab = self.any_tab(tab_id)?;
         let pane = tab.panes.iter().find(|pane| pane.id == pane_id)?;
         Some(crate::run_command::RunPaneIdentity::new(
             tab.attention_id,
@@ -331,17 +321,8 @@ impl Zetta {
         pane_id: u64,
         entry_id: u64,
     ) -> Option<crate::run_command::RunPaneIdentity> {
-        let tab = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))?;
-        let entry = tab
-            .pane(pane_id)?
-            .stack
-            .entries
-            .iter()
-            .find(|entry| entry.id == entry_id)?;
+        let tab = self.any_tab(tab_id)?;
+        let entry = tab.pane(pane_id)?.stack.entry(entry_id)?;
         Some(crate::run_command::RunPaneIdentity::new(
             tab.attention_id,
             entry.routing_id,
@@ -430,7 +411,7 @@ impl Zetta {
             cx.notify();
             return;
         }
-        if let Some(tab) = self.tabs.get(self.active_tab) {
+        if let Some(tab) = self.current_tab() {
             let active_is_visible = tab.pane_is_visible(tab.active_pane);
             if active_is_visible {
                 if let Some(view) = tab.active_view() {
@@ -447,7 +428,7 @@ impl Zetta {
     }
 
     pub(crate) fn active_terminal_focus(&self, cx: &App) -> Option<gpui::FocusHandle> {
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.current_tab()?;
         if !tab.pane_is_visible(tab.active_pane) {
             return None;
         }

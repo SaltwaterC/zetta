@@ -1,3 +1,7 @@
+//! Resizing panes: from the keyboard and by dragging, the smallest a pane may
+//! get, and grid sizes a program asks for that are applied once the layout
+//! allows.
+
 use std::{cell::Cell, rc::Rc};
 
 use super::*;
@@ -297,8 +301,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .is_none_or(|tab| tab.active_pane().is_none())
         {
             return;
@@ -322,8 +325,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .is_none_or(|tab| tab.active_pane().is_none())
         {
             return;
@@ -385,7 +387,7 @@ impl Zetta {
         if !self.pane_move_mode {
             return;
         }
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         if tab.maximized_pane.is_some() {
@@ -411,7 +413,7 @@ impl Zetta {
         {
             return;
         }
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == target.tab_id) else {
+        let Some(tab) = self.tabs.by_id_mut(target.tab_id) else {
             return;
         };
         if tab.maximized_pane.is_some() {
@@ -568,7 +570,7 @@ impl Zetta {
             return;
         }
 
-        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == gutter.tab_id) else {
+        let Some(tab_index) = self.tab_index(gutter.tab_id) else {
             return;
         };
         let Some(drag) = self.pane_resize_drag.as_ref() else {
@@ -624,7 +626,7 @@ impl Zetta {
     }
 
     fn begin_pane_resize_drag(&mut self, gutter: PaneResizeGutter) -> bool {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == gutter.tab_id) else {
+        let Some(tab) = self.tabs.by_id(gutter.tab_id) else {
             return false;
         };
         if tab.maximized_pane.is_some() || !tab.minimized_panes.is_empty() {
@@ -655,7 +657,7 @@ impl Zetta {
             return;
         }
         let (tab_id, pane_id, bounds, columns_delta, rows_delta) = {
-            let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            let Some(tab) = self.current_tab_mut() else {
                 return;
             };
             // The terminal focus is authoritative while a keybinding is being
@@ -769,12 +771,7 @@ impl Zetta {
         let Some(request) = self.pending_grid_requests.get_mut(&key) else {
             return;
         };
-        let Some(pane) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
-        else {
+        let Some(pane) = self.tabs.pane_in(tab_id, pane_id) else {
             self.pending_grid_requests.remove(&key);
             return;
         };
@@ -821,7 +818,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(tab_index) = self.tab_index(tab_id) else {
             return false;
         };
         let Some(bounds) = self.tabs[tab_index]

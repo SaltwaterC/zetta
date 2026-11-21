@@ -21,13 +21,7 @@ fn sessions(title: &str, count: u64) -> Vec<BackgroundSessionSummary> {
 }
 
 fn take_first(worker: &Worker) -> Publication {
-    worker
-        .queue
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .first
-        .take()
-        .unwrap()
+    worker.queue.lock().recover_poison().first.take().unwrap()
 }
 
 #[test]
@@ -81,12 +75,7 @@ fn slow_storage_keeps_first_and_latest_titles_and_seals_acknowledged_snapshots()
     }
     assert!(event_rx.try_recv().is_err(), "no early acknowledgement");
     assert_eq!(
-        worker
-            .queue
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pending
-            .len(),
+        worker.queue.lock().recover_poison().pending.len(),
         3,
         "one snapshot per side of the acknowledgement fence"
     );

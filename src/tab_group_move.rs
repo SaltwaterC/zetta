@@ -59,7 +59,7 @@ impl Zetta {
         {
             return;
         }
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let picker = destination_palette(&self.all_tab_group_entries(), tab.id, &tab.group);
@@ -91,7 +91,7 @@ impl Zetta {
         {
             return;
         }
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == action.tab_id) else {
+        let Some(index) = self.tab_index(action.tab_id) else {
             return;
         };
         if self.tabs[index].group == action.group {

@@ -1,3 +1,6 @@
+//! The service actions in a build without their features: the same names, so
+//! the actions stay registered and say the service is not built in.
+
 #[allow(
     unused_imports,
     reason = "needed only when at least one of the three CLI services below is disabled"

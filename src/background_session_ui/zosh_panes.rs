@@ -38,12 +38,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         log::warn!("remote pane transport fell back: {reason}");
-        if let Some(pane) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-        {
+        if let Some(pane) = self.tabs.pane_in_mut(tab_id, pane_id) {
             pane.transport_fallback = Some(reason.to_owned().into());
         }
         self.show_notice(reason.to_owned(), cx);

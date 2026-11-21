@@ -133,9 +133,7 @@ struct ProbeLog {
 }
 impl Probe {
     fn log(&self) -> std::sync::MutexGuard<'_, ProbeLog> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0.lock().recover_poison()
     }
 }
 impl ConsoleOutput for Probe {

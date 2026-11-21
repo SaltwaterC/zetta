@@ -1,3 +1,6 @@
+//! Serial consoles: finding the serial devices present, Linux's legacy ports
+//! included, and the settings a connection opens with.
+
 use super::*;
 
 pub(crate) const SERIAL_READ_TIMEOUT: Duration = Duration::from_millis(100);

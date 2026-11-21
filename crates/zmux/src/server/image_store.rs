@@ -16,7 +16,7 @@ use anyhow::Result;
 
 use crate::{
     catalog::{create_private_dir, write_private_file},
-    messages::{ClientId, MAX_IMAGE_BYTES, Response},
+    messages::{MAX_IMAGE_BYTES, Response},
 };
 
 use super::*;
@@ -24,23 +24,25 @@ use super::*;
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
 /// Stores an image for an active shared viewer.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the store-image request's decoded fields, plus the daemon, the requesting \
-              client's identity, and the connection to answer on"
-)]
 pub(super) fn store_image(
     daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: u64,
-    length: usize,
-    client_process_id: u32,
-    peer_process_id: Option<u32>,
-    client_id: ClientId,
-    stream_only: bool,
-    session_secret: Option<&str>,
+    request: crate::messages::StoreImageRequest,
+    caller: Caller<'_>,
     connection: &mut Connection,
 ) -> Result<()> {
+    let crate::messages::StoreImageRequest {
+        session_id,
+        pane_id,
+        length,
+    } = request;
+    let Caller {
+        client_process_id,
+        peer_process_id,
+        client_id,
+        stream_only,
+        session_secret,
+    } = caller;
+    let client_id = client_id.clone();
     anyhow::ensure!(
         (1..=MAX_IMAGE_BYTES).contains(&length),
         "image payload must be between 1 byte and {MAX_IMAGE_BYTES} bytes"
@@ -50,10 +52,7 @@ pub(super) fn store_image(
         let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
             session.id == session_id
         });
-        let mut sessions = daemon
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut sessions = daemon.sessions.lock().recover_poison();
         let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
             return connection.send(&Response::Error {
                 message: format!("session {session_id} does not exist"),
@@ -130,7 +129,7 @@ pub(super) fn sweep_image_staging(daemon: &Arc<Daemon>) -> Result<()> {
     let live_sessions = daemon
         .sessions
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .iter()
         .map(|session| session.id)
         .collect::<HashSet<_>>();

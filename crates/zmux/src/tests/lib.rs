@@ -5,28 +5,6 @@ fn args(values: &[&str]) -> Vec<OsString> {
 }
 
 #[test]
-fn format_help_table_aligns_multiline_rows_without_trailing_whitespace() {
-    let help = format_help_table([
-        ("short", "first description\ncontinued description"),
-        ("long label", "second description"),
-    ]);
-    let lines = help.lines().collect::<Vec<_>>();
-    let description_column = 2 + "long label".chars().count() + 2;
-
-    assert_eq!(lines.len(), 3);
-    assert_eq!(lines[0].find("first description"), Some(description_column));
-    assert_eq!(
-        lines[1].find("continued description"),
-        Some(description_column)
-    );
-    assert_eq!(
-        lines[2].find("second description"),
-        Some(description_column)
-    );
-    assert!(lines.iter().all(|line| *line == line.trim_end()));
-}
-
-#[test]
 fn kill_requires_a_session_id() {
     let error = run(&args(&["kill"])).unwrap_err().to_string();
     assert!(error.contains("requires a session ID"), "{error}");

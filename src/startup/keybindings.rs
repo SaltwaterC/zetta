@@ -1,3 +1,6 @@
+//! The built-in keybindings: profile and tab-group shortcuts, the platform's
+//! own chords, and how keystrokes are stored and displayed.
+
 use super::*;
 
 #[cfg(target_os = "macos")]

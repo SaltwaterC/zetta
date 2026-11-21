@@ -1,3 +1,7 @@
+//! The terminal state the server keeps for its client: the screen, the rows
+//! that scrolled off it within the budget the client asked for, the window
+//! title, and queries still waiting for an answer.
+
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 

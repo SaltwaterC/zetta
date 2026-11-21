@@ -18,10 +18,7 @@ fn a_relay_releasing_backpressure_wakes_the_drain() {
     let (notify, mut wait) = Stream::pair().unwrap();
     notify.set_nonblocking(true).unwrap();
     wait.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-    *daemon
-        .drain_wake
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(notify);
+    *daemon.drain_wake.lock().recover_poison() = Some(notify);
     let (server, mut client) = Stream::pair().unwrap();
     let relay = spawn_relay(
         &Connection::new(server),

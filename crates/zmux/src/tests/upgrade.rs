@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use super::*;
 use std::os::fd::IntoRawFd as _;
 

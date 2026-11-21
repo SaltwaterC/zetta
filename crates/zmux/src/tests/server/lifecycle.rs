@@ -410,15 +410,15 @@ mod owner_identity {
             key_envelope: None,
             offered: false,
         };
-        share(
-            daemon,
-            request,
-            process_id,
-            Some(process_id),
-            None,
-            &mut connection,
-        )
-        .unwrap();
+        let client_id = ClientId::new("reprotect");
+        let caller = Caller {
+            client_process_id: process_id,
+            peer_process_id: Some(process_id),
+            client_id: &client_id,
+            stream_only: false,
+            session_secret: None,
+        };
+        share(daemon, request, caller, &mut connection).unwrap();
         client.receive::<Response>().unwrap().0
     }
 

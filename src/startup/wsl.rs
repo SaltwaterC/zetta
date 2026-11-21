@@ -1,5 +1,14 @@
+//! Shells that run under another layer on Windows: the environment WSL is given
+//! through `WSLENV`, and the MSYS2 and Cygwin profiles, paths and directory
+//! tracking.
+
 use super::*;
-use std::ffi::OsStr;
+use std::{ffi::OsStr, sync::LazyLock};
+
+#[cfg(windows)]
+mod cygwin_msys;
+#[cfg(windows)]
+pub(crate) use cygwin_msys::*;
 
 pub(crate) fn is_wsl_shell(shell: &Shell) -> bool {
     let program = match shell {
@@ -337,73 +346,6 @@ pub(crate) fn cygwin_path_to_windows(root: &Path, directory: &str) -> Option<Pat
     Some(path)
 }
 
-#[cfg(windows)]
-fn windows_path_to_msys(path: &Path) -> Option<String> {
-    let path = path.to_string_lossy().replace('\\', "/");
-    let bytes = path.as_bytes();
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1..3] == *b":/" {
-        return Some(format!(
-            "/{}/{}",
-            (bytes[0] as char).to_ascii_lowercase(),
-            &path[3..]
-        ));
-    }
-    path.strip_prefix("//")
-        .map(|path| format!("//{path}"))
-        .or_else(|| path.starts_with('/').then_some(path))
-}
-
-#[cfg(windows)]
-pub(crate) fn windows_path_to_cygwin(root: &Path, path: &Path) -> Option<String> {
-    let mut path = path.to_string_lossy().replace('\\', "/");
-    if path.chars().any(char::is_control) {
-        return None;
-    }
-    if let Some(stripped) = path.strip_prefix("//?/") {
-        path = stripped.to_owned();
-    }
-    if path
-        .get(..4)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("UNC/"))
-    {
-        path = format!("//{}", &path[4..]);
-    }
-
-    let mut root = root.to_string_lossy().replace('\\', "/");
-    while root.ends_with('/') {
-        root.pop();
-    }
-    if path.eq_ignore_ascii_case(&root) {
-        return Some("/".to_owned());
-    }
-    if path.len() > root.len()
-        && path[root.len()..].starts_with('/')
-        && path[..root.len()].eq_ignore_ascii_case(&root)
-    {
-        return Some(format!("/{}", &path[root.len() + 1..]));
-    }
-    let bytes = path.as_bytes();
-    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
-        let suffix = path[2..].trim_start_matches('/');
-        return if suffix.is_empty() {
-            Some(format!(
-                "/cygdrive/{}",
-                (bytes[0] as char).to_ascii_lowercase()
-            ))
-        } else {
-            Some(format!(
-                "/cygdrive/{}/{}",
-                (bytes[0] as char).to_ascii_lowercase(),
-                suffix
-            ))
-        };
-    }
-    if path.starts_with("//") {
-        return Some(path);
-    }
-    path.starts_with('/').then_some(path)
-}
-
 fn path_for_external_editor(path: &str) -> String {
     #[cfg(windows)]
     {
@@ -425,329 +367,6 @@ pub(crate) fn paths_for_external_editor(arguments: &[String]) -> Vec<String> {
         .collect()
 }
 
-#[cfg(windows)]
-const MSYS2_BASH_TRACKER: &str = r#"if [[ -n ${__ZETTA_COMMAND_MARKER_NONCE+x} ]]; then
-    __zetta_marker_nonce=$__ZETTA_COMMAND_MARKER_NONCE
-    unset __ZETTA_COMMAND_MARKER_NONCE
-fi
-__zetta_at_prompt=0
-__zetta_command_started=0
-__zetta_preexec() {
-    [[ "$__zetta_at_prompt" == 1 ]] || return
-    __zetta_at_prompt=0
-    case "$BASH_COMMAND" in
-        __zetta_precmd|__zetta_mark_prompt) return ;;
-    esac
-    __zetta_command_started=1
-    printf '\033]2;zetta-event;%s:command-started:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
-}
-__zetta_precmd() {
-    local status=$?
-    if [[ "$__zetta_command_started" == 1 ]]; then
-        printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "${__zetta_marker_nonce-}" "$status"
-        __zetta_command_started=0
-    fi
-    if [[ -n ${__zetta_marker_nonce-} ]]; then
-        printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
-    else
-        printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-    fi
-    printf '\033]2;zetta-cmd;%s:bash\033\\' "${__zetta_marker_nonce-}"
-    return "$status"
-}
-__zetta_mark_prompt() {
-    __zetta_at_prompt=1
-}
-trap '__zetta_preexec' DEBUG
-printf '\033]2;zetta-event;%s:tracking-ready\033\\' "${__zetta_marker_nonce-}""#;
-
-#[cfg(windows)]
-const MSYS2_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
-    ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
-    export ZDOTDIR
-else
-    unset ZDOTDIR
-fi
-typeset -g __zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE-}"
-unset __ZETTA_COMMAND_MARKER_NONCE
-original_zdotdir="${ZDOTDIR:-$HOME}"
-[[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
-
-function __zetta_report_cwd() {
-    local zetta_status=$?
-    if (( __ZETTA_COMMAND_STARTED )); then
-        printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "$__zetta_marker_nonce" "$zetta_status"
-        __ZETTA_COMMAND_STARTED=0
-    fi
-    if [[ "$PWD" == /* ]]; then
-        if [[ -n ${__zetta_marker_nonce-} ]]; then
-            printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
-        else
-            printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-        fi
-    fi
-    printf '\033]2;zetta-cmd;%s:zsh\033\\' "$__zetta_marker_nonce"
-    return $zetta_status
-}
-function __zetta_report_preexec() {
-    __ZETTA_COMMAND_STARTED=1
-    printf '\033]2;zetta-event;%s:command-started:%s\033\\' "$__zetta_marker_nonce" "$1"
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$1"
-}
-typeset -g __ZETTA_COMMAND_STARTED=0
-autoload -Uz add-zsh-hook
-add-zsh-hook precmd __zetta_report_cwd
-add-zsh-hook preexec __zetta_report_preexec
-command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
-unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
-printf '\033]2;zetta-event;%s:tracking-ready\033\\' "$__zetta_marker_nonce"
-"#;
-
-#[cfg(windows)]
-const CYGWIN_BASH_TRACKER: &str = r#"if [[ -n ${__ZETTA_COMMAND_MARKER_NONCE+x} ]]; then
-    __zetta_marker_nonce=$__ZETTA_COMMAND_MARKER_NONCE
-    unset __ZETTA_COMMAND_MARKER_NONCE
-fi
-__zetta_at_prompt=0
-__zetta_command_started=0
-__zetta_preexec() {
-    [[ "$__zetta_at_prompt" == 1 ]] || return
-    __zetta_at_prompt=0
-    case "$BASH_COMMAND" in
-        __zetta_precmd|__zetta_mark_prompt) return ;;
-    esac
-    __zetta_command_started=1
-    printf '\033]2;zetta-event;%s:command-started:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
-}
-__zetta_precmd() {
-    local status=$?
-    if [[ "$__zetta_command_started" == 1 ]]; then
-        printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "${__zetta_marker_nonce-}" "$status"
-        __zetta_command_started=0
-    fi
-    case "$PWD" in
-        /*)
-            printf '\033]7;file://localhost%s\033\\' "$PWD"
-            if [[ -n ${__zetta_marker_nonce-} ]]; then
-                printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
-            else
-                printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-            fi
-            ;;
-    esac
-    printf '\033]2;zetta-cmd;%s:bash\033\\' "${__zetta_marker_nonce-}"
-    return "$status"
-}
-__zetta_mark_prompt() {
-    __zetta_at_prompt=1
-}
-trap '__zetta_preexec' DEBUG
-printf '\033]2;zetta-event;%s:tracking-ready\033\\' "${__zetta_marker_nonce-}""#;
-
-#[cfg(windows)]
-const CYGWIN_ZSH_TRACKER: &str = r#"if [[ -n ${ZETTA_ORIGINAL_ZDOTDIR+x} ]]; then
-    ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
-    export ZDOTDIR
-else
-    unset ZDOTDIR
-fi
-typeset -g __zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE-}"
-unset __ZETTA_COMMAND_MARKER_NONCE
-original_zdotdir="${ZDOTDIR:-$HOME}"
-[[ -r "$original_zdotdir/.zshenv" ]] && source "$original_zdotdir/.zshenv"
-
-function __zetta_report_cwd() {
-    local zetta_status=$?
-    if (( __ZETTA_COMMAND_STARTED )); then
-        printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "$__zetta_marker_nonce" "$zetta_status"
-        __ZETTA_COMMAND_STARTED=0
-    fi
-    if [[ "$PWD" == /* ]]; then
-        printf '\033]7;file://localhost%s\033\\' "$PWD"
-        if [[ -n ${__zetta_marker_nonce-} ]]; then
-            printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
-        else
-            printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-        fi
-    fi
-    printf '\033]2;zetta-cmd;%s:zsh\033\\' "$__zetta_marker_nonce"
-    return $zetta_status
-}
-function __zetta_report_preexec() {
-    __ZETTA_COMMAND_STARTED=1
-    printf '\033]2;zetta-event;%s:command-started:%s\033\\' "$__zetta_marker_nonce" "$1"
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$1"
-}
-typeset -g __ZETTA_COMMAND_STARTED=0
-autoload -Uz add-zsh-hook
-add-zsh-hook precmd __zetta_report_cwd
-add-zsh-hook preexec __zetta_report_preexec
-command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
-unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR original_zdotdir
-printf '\033]2;zetta-event;%s:tracking-ready\033\\' "$__zetta_marker_nonce"
-"#;
-
-#[cfg(windows)]
-const CYGWIN_FISH_TRACKER: &str = r#"if set -q __ZETTA_COMMAND_MARKER_NONCE; set -g __zetta_marker_nonce "$__ZETTA_COMMAND_MARKER_NONCE"; set -e __ZETTA_COMMAND_MARKER_NONCE; end; set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "$__zetta_marker_nonce" "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr '^/' -- "$PWD"; printf '\033]7;file://localhost%s\033\\' "$PWD"; if test -n "$__zetta_marker_nonce"; printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"; else; printf '\033]2;zetta-cwd:%s\033\\' "$PWD"; end; end; printf '\033]2;zetta-cmd;%s:fish\033\\' "$__zetta_marker_nonce"; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf '\033]2;zetta-event;%s:command-started:%s\033\\' "$__zetta_marker_nonce" "$argv[1]"; printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$argv[1]"; end; printf '\033]2;zetta-event;%s:tracking-ready\033\\' "$__zetta_marker_nonce""#;
-
-#[cfg(windows)]
-fn cygwin_nushell_tracker(config_path: &str) -> String {
-    format!(
-        r#"let zetta_marker_nonce = ($env.__ZETTA_COMMAND_MARKER_NONCE? | default '')
-hide-env -i __ZETTA_COMMAND_MARKER_NONCE
-let zetta_user_config = ($nu.default-config-dir | path join 'config.nu')
-if ($zetta_user_config | path exists) {{ source $zetta_user_config }}
-$env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt | append {{||
-    if ($env.ZETTA_COMMAND_STARTED? | default false) {{
-        let status = ($env.LAST_EXIT_CODE? | default 0)
-        print -n $"\e]2;zetta-event;($zetta_marker_nonce):command-finished:($status)\e\\"
-        $env.ZETTA_COMMAND_STARTED = false
-    }}
-    print -n $"\e]7;file://localhost($env.PWD)\e\\"
-    if ($zetta_marker_nonce | is-empty) {{
-        print -n $"\e]2;zetta-cwd:($env.PWD)\e\\"
-    }} else {{
-        print -n $"\e]2;zetta-cwd;($zetta_marker_nonce):($env.PWD)\e\\"
-    }}
-    print -n $"\e]2;zetta-cmd;($zetta_marker_nonce):nu\e\\"
-}})
-$env.config.hooks.pre_execution = ($env.config.hooks.pre_execution | append {{||
-    let command = (commandline)
-    $env.ZETTA_COMMAND_STARTED = true
-    print -n $"\e]2;zetta-event;($zetta_marker_nonce):command-started:($command)\e\\"
-    print -n $"\e]2;zetta-cmd;($zetta_marker_nonce):($command)\e\\"
-}})
-print -n $"\e]2;zetta-event;($zetta_marker_nonce):tracking-ready\e\\"
-^rm -f -- '{}'
-"#,
-        config_path.replace('\'', "''")
-    )
-}
-
-#[cfg(windows)]
-pub(crate) fn cygwin_shell_with_tracking(
-    shell: Shell,
-    pane_id: u64,
-    temporary_directory: &Path,
-) -> Result<Shell> {
-    let Some((root, shell_kind)) = cygwin_profile(&shell) else {
-        return Ok(shell);
-    };
-
-    let make_nushell_config = || -> Result<String> {
-        let path = temporary_directory.join(format!(
-            "zetta-cygwin-nu-{}-{pane_id}.nu",
-            std::process::id()
-        ));
-        let cygwin_path = windows_path_to_cygwin(&root, &path)
-            .context("temporary Nushell config cannot be represented as a Cygwin path")?;
-        fs::write(&path, cygwin_nushell_tracker(&cygwin_path)).with_context(|| {
-            format!(
-                "writing Cygwin Nushell CWD integration in {}",
-                path.display()
-            )
-        })?;
-        Ok(cygwin_path)
-    };
-
-    let add_tracking_arguments = |args: &mut Vec<String>| -> Result<()> {
-        match shell_kind {
-            CygwinShell::Fish => {
-                if !args.iter().any(|arg| arg == "-C" || arg == "--command") {
-                    args.extend(["-C".to_owned(), CYGWIN_FISH_TRACKER.to_owned()]);
-                }
-            }
-            CygwinShell::Nushell => {
-                args.extend(["--config".to_owned(), make_nushell_config()?]);
-            }
-            CygwinShell::Bash | CygwinShell::Zsh => {}
-        }
-        Ok(())
-    };
-
-    match shell {
-        Shell::Program(program) => {
-            let mut args = Vec::new();
-            add_tracking_arguments(&mut args)?;
-            Ok(Shell::WithArguments {
-                program,
-                args,
-                title_override: None,
-            })
-        }
-        Shell::WithArguments {
-            program,
-            mut args,
-            title_override,
-        } => {
-            add_tracking_arguments(&mut args)?;
-            Ok(Shell::WithArguments {
-                program,
-                args,
-                title_override,
-            })
-        }
-        Shell::System => unreachable!(),
-    }
-}
-
-#[cfg(windows)]
-pub(crate) fn msys2_cwd_tracking_environment(
-    shell: &Shell,
-    pane_id: u64,
-    temporary_directory: &Path,
-) -> Result<Vec<(String, String)>> {
-    let Some((_, shell)) = msys2_profile(shell) else {
-        return Ok(Vec::new());
-    };
-    match shell {
-        Msys2Shell::Bash => {
-            let existing = env::var("PROMPT_COMMAND").ok();
-            Ok(vec![(
-                "PROMPT_COMMAND".to_owned(),
-                format!(
-                    "{MSYS2_BASH_TRACKER}__zetta_precmd{};__zetta_mark_prompt",
-                    existing
-                        .filter(|command| !command.is_empty())
-                        .map(|command| format!(";{command}"))
-                        .unwrap_or_default()
-                ),
-            )])
-        }
-        Msys2Shell::Zsh => {
-            let directory = temporary_directory
-                .join(format!("zetta-msys2-zsh-{}-{pane_id}", std::process::id()));
-            fs::create_dir_all(&directory)
-                .with_context(|| format!("creating {}", directory.display()))?;
-            fs::write(directory.join(".zshenv"), MSYS2_ZSH_TRACKER).with_context(|| {
-                format!(
-                    "writing MSYS2 Zsh CWD integration in {}",
-                    directory.display()
-                )
-            })?;
-            let msys_directory = windows_path_to_msys(&directory)
-                .context("temporary directory cannot be represented as an MSYS2 path")?;
-            let mut environment = vec![
-                ("ZDOTDIR".to_owned(), msys_directory.clone()),
-                ("ZETTA_INTEGRATION_ZDOTDIR".to_owned(), msys_directory),
-            ];
-            if let Some(original) = env::var_os("ZDOTDIR") {
-                let original = PathBuf::from(original);
-                let original = if original.is_absolute() {
-                    windows_path_to_msys(&original)
-                        .context("ZDOTDIR cannot be represented as an MSYS2 path")?
-                } else {
-                    original.to_string_lossy().into_owned()
-                };
-                environment.push(("ZETTA_ORIGINAL_ZDOTDIR".to_owned(), original));
-            }
-            Ok(environment)
-        }
-    }
-}
-
 #[cfg(not(windows))]
 pub(crate) fn msys2_cwd_tracking_environment(
     _shell: &Shell,
@@ -755,157 +374,6 @@ pub(crate) fn msys2_cwd_tracking_environment(
     _temporary_directory: &Path,
 ) -> Result<Vec<(String, String)>> {
     Ok(Vec::new())
-}
-
-#[cfg(windows)]
-fn cygwin_path_environment_value(root: &Path, inherited_path: Option<&str>) -> String {
-    let inherited_path = inherited_path
-        .map(OsString::from)
-        .or_else(|| env::var_os("PATH"));
-    let inherited_text = inherited_path
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned());
-    let cygwin_bin = root.join("bin");
-    let cygwin_bin_key = cygwin_bin
-        .to_string_lossy()
-        .replace('\\', "/")
-        .trim_end_matches('/')
-        .to_ascii_lowercase();
-    let mut paths = vec![cygwin_bin.clone()];
-    if let Some(inherited_path) = inherited_path.as_ref() {
-        paths.extend(env::split_paths(&inherited_path).filter(|path| {
-            path.to_string_lossy()
-                .replace('\\', "/")
-                .trim_end_matches('/')
-                .to_ascii_lowercase()
-                != cygwin_bin_key
-        }));
-    }
-    if let Ok(joined) = env::join_paths(paths) {
-        return joined.to_string_lossy().into_owned();
-    }
-    // Joining only fails when a component contains the separator, which leaves
-    // no vector to join; build the string directly instead.
-    let separator = if cfg!(windows) { ";" } else { ":" };
-    let root = cygwin_bin.to_string_lossy().into_owned();
-    inherited_text
-        .map(|path| format!("{root}{separator}{path}"))
-        .unwrap_or(root)
-}
-
-#[cfg(windows)]
-pub(crate) fn cygwin_cwd_tracking_environment_with_path(
-    shell: &Shell,
-    pane_id: u64,
-    temporary_directory: &Path,
-    inherited_path: Option<&str>,
-) -> Result<Vec<(String, String)>> {
-    let Some((root, shell_kind)) = cygwin_profile(shell) else {
-        return Ok(Vec::new());
-    };
-
-    let mut environment = vec![
-        (
-            "PATH".to_owned(),
-            cygwin_path_environment_value(&root, inherited_path),
-        ),
-        ("CHERE_INVOKING".to_owned(), "1".to_owned()),
-        (
-            "ZETTA_CYGWIN_ROOT".to_owned(),
-            root.to_string_lossy().into_owned(),
-        ),
-    ];
-    match shell_kind {
-        CygwinShell::Bash => {
-            environment.push((
-                "PROMPT_COMMAND".to_owned(),
-                cygwin_bash_prompt_command(env::var("PROMPT_COMMAND").ok().as_deref()),
-            ));
-        }
-        CygwinShell::Zsh => {
-            let directory = temporary_directory
-                .join(format!("zetta-cygwin-zsh-{}-{pane_id}", std::process::id()));
-            fs::create_dir_all(&directory)
-                .with_context(|| format!("creating {}", directory.display()))?;
-            fs::write(directory.join(".zshenv"), CYGWIN_ZSH_TRACKER).with_context(|| {
-                format!(
-                    "writing Cygwin Zsh CWD integration in {}",
-                    directory.display()
-                )
-            })?;
-            let cygwin_directory = windows_path_to_cygwin(&root, &directory)
-                .context("temporary directory cannot be represented as a Cygwin path")?;
-            let mut zdotdir = vec![
-                ("ZDOTDIR".to_owned(), cygwin_directory.clone()),
-                ("ZETTA_INTEGRATION_ZDOTDIR".to_owned(), cygwin_directory),
-            ];
-            if let Some(original) = env::var_os("ZDOTDIR") {
-                let original = PathBuf::from(original);
-                let original = if original.is_absolute() {
-                    windows_path_to_cygwin(&root, &original)
-                        .context("ZDOTDIR cannot be represented as a Cygwin path")?
-                } else {
-                    original.to_string_lossy().into_owned()
-                };
-                zdotdir.push(("ZETTA_ORIGINAL_ZDOTDIR".to_owned(), original));
-            }
-            environment.extend(zdotdir);
-        }
-        CygwinShell::Fish | CygwinShell::Nushell => {}
-    }
-    Ok(environment)
-}
-
-#[cfg(windows)]
-pub(crate) fn ensure_cygwin_environment<S>(
-    shell: &Shell,
-    environment: &mut HashMap<String, String, S>,
-) where
-    S: std::hash::BuildHasher,
-{
-    let Some((root, shell_kind)) = cygwin_profile(shell) else {
-        return;
-    };
-    let inherited_path = environment.get("PATH").map(String::as_str);
-    environment.insert(
-        "PATH".to_owned(),
-        cygwin_path_environment_value(&root, inherited_path),
-    );
-    environment.insert("CHERE_INVOKING".to_owned(), "1".to_owned());
-    environment.insert(
-        "ZETTA_CYGWIN_ROOT".to_owned(),
-        root.to_string_lossy().into_owned(),
-    );
-    if matches!(shell_kind, CygwinShell::Zsh)
-        && let Some(integration_directory) = environment.get("ZETTA_INTEGRATION_ZDOTDIR").cloned()
-    {
-        environment.insert("ZDOTDIR".to_owned(), integration_directory);
-    }
-    if matches!(shell_kind, CygwinShell::Bash)
-        && !environment
-            .get("PROMPT_COMMAND")
-            .is_some_and(|command| command.contains("__zetta_precmd"))
-    {
-        let existing = environment
-            .get("PROMPT_COMMAND")
-            .map(String::as_str)
-            .filter(|command| !command.is_empty());
-        environment.insert(
-            "PROMPT_COMMAND".to_owned(),
-            cygwin_bash_prompt_command(existing),
-        );
-    }
-}
-
-#[cfg(windows)]
-fn cygwin_bash_prompt_command(existing: Option<&str>) -> String {
-    format!(
-        "{CYGWIN_BASH_TRACKER}__zetta_precmd{};__zetta_mark_prompt",
-        existing
-            .filter(|command| !command.is_empty())
-            .map(|command| format!(";{command}"))
-            .unwrap_or_default()
-    )
 }
 
 pub(crate) fn launch_working_directory(
@@ -942,167 +410,71 @@ pub(crate) fn wsl_cwd_tracking_file(profile: &Profile, pane_id: u64) -> Option<P
     })
 }
 
-pub(crate) const WSL_CWD_TRACKER: &str = r#"marker="${ZETTA_CWD_TRACKING_FILE:-}"
-unset ZETTA_CWD_TRACKING_FILE
-# The nonce `zetta-cmd;` markers carry. Only the shells integrated below are
-# handed it back, and each moves it into a shell variable, so the programs a
-# pane runs do not inherit it.
-zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE:-}"
-unset __ZETTA_COMMAND_MARKER_NONCE
-shell="${SHELL:-}"
-if [ ! -x "$shell" ]; then
-    shell="$(getent passwd "$(id -u)" 2>/dev/null | cut -d: -f7)"
-fi
-[ -x "$shell" ] || shell=/bin/sh
-# Windows-side process inspection can't see into the WSL VM's own process
-# namespace, so the tab title can't be derived from the host process tree the
-# way it is for native Windows shells. Report it explicitly instead: a
-# `zetta-cmd;<nonce>:<value>` title marker carrying the shell name at idle, or
-# the command about to run, mirrored by `foreground_command_marker` in
-# crates/terminal/src/terminal.rs.
-export ZETTA_SHELL_NAME="${shell##*/}"
+/// The POSIX layer a Windows Bash or Zsh runs under. One tracker script serves
+/// both; only Cygwin's also reports the directory as an OSC 7 file URI.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+enum PosixLayer {
+    Msys2,
+    Cygwin,
+}
 
-case "${shell##*/}" in
-    bash)
-        # Bash 3.2 misparses case patterns in a heredoc inside $(...).
-        # Define the producer first so the substitution only parses its call.
-        zetta_bash_prompt() {
-            cat <<'ZETTA_BASH_PROMPT'
-if [[ -n ${__ZETTA_COMMAND_MARKER_NONCE+x} ]]; then
-    __zetta_marker_nonce=$__ZETTA_COMMAND_MARKER_NONCE
-    unset __ZETTA_COMMAND_MARKER_NONCE
-fi
-__zetta_preexec() {
-    [[ "${__zetta_at_prompt:-0}" == 1 ]] || return
-    __zetta_at_prompt=0
-    case "$BASH_COMMAND" in
-        __zetta_precmd|__zetta_mark_prompt) return ;;
-    esac
-    __zetta_command_started=1
-    printf '\033]2;zetta-event;%s:command-started:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$BASH_COMMAND"
-}
-__zetta_precmd() {
-    local status=$?
-    if [[ ${_zetta_integration_attempted:-0} != 1 && -n ${ZETTA_HOST_EXECUTABLE:-} ]] &&
-        ! declare -F _zetta_complete >/dev/null; then
-        _zetta_integration_attempted=1
-        eval "$("$ZETTA_HOST_EXECUTABLE" init bash)"
-    fi
-    if [[ "$__zetta_command_started" == 1 ]]; then
-        printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "${__zetta_marker_nonce-}" "$status"
-        __zetta_command_started=0
-    fi
-    case "$PWD" in
-        /*)
-            printf '\033]7;file://localhost%s\033\\' "$PWD"
-            if [[ -n ${__zetta_marker_nonce-} ]]; then
-                printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
-            else
-                printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-            fi
-            ;;
-    esac
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "${__zetta_marker_nonce-}" "$ZETTA_SHELL_NAME"
-    return "$status"
-}
-__zetta_mark_prompt() {
-    __zetta_at_prompt=1
-}
-trap '__zetta_preexec' DEBUG
-PROMPT_COMMAND="__zetta_precmd${ZETTA_ORIGINAL_PROMPT_COMMAND:+;${ZETTA_ORIGINAL_PROMPT_COMMAND}};__zetta_mark_prompt"
-printf '\033]2;zetta-event;%s:tracking-ready\033\\' "${__zetta_marker_nonce-}"
-__zetta_precmd
-ZETTA_BASH_PROMPT
-        }
-        zetta_full_prompt_command="$(zetta_bash_prompt)"
-        export ZETTA_ORIGINAL_PROMPT_COMMAND="$PROMPT_COMMAND"
-        PROMPT_COMMAND="$zetta_full_prompt_command"
-        export PROMPT_COMMAND
-        export __ZETTA_COMMAND_MARKER_NONCE="$zetta_marker_nonce"
-        exec "$shell" -l
-        ;;
-    fish)
-        export __ZETTA_COMMAND_MARKER_NONCE="$zetta_marker_nonce"
-        exec "$shell" -l -C 'if set -q __ZETTA_COMMAND_MARKER_NONCE; set -g __zetta_marker_nonce "$__ZETTA_COMMAND_MARKER_NONCE"; set -e __ZETTA_COMMAND_MARKER_NONCE; end; set -g __ZETTA_COMMAND_STARTED 0; function __zetta_report_cwd --on-event fish_prompt; set -l command_status $status; if test "$__ZETTA_COMMAND_STARTED" = 1; printf "\033]2;zetta-event;%s:command-finished:%s\033\\" "$__zetta_marker_nonce" "$command_status"; set -g __ZETTA_COMMAND_STARTED 0; end; if string match -qr "^/" -- "$PWD"; printf "\033]7;file://localhost%s\033\\" "$PWD"; if test -n "$__zetta_marker_nonce"; printf "\033]2;zetta-cwd;%s:%s\033\\" "$__zetta_marker_nonce" "$PWD"; else; printf "\033]2;zetta-cwd:%s\033\\" "$PWD"; end; end; printf "\033]2;zetta-cmd;%s:%s\033\\" "$__zetta_marker_nonce" "$ZETTA_SHELL_NAME"; end; function __zetta_report_preexec --on-event fish_preexec; set -g __ZETTA_COMMAND_STARTED 1; printf "\033]2;zetta-event;%s:command-started:%s\033\\" "$__zetta_marker_nonce" "$argv[1]"; printf "\033]2;zetta-cmd;%s:%s\033\\" "$__zetta_marker_nonce" "$argv[1]"; end; printf "\033]2;zetta-event;%s:tracking-ready\033\\" "$__zetta_marker_nonce"; if test -n "$ZETTA_HOST_EXECUTABLE"; and not functions -q __zetta_at_subcommand; $ZETTA_HOST_EXECUTABLE init fish | source; end'
-        ;;
-    zsh)
-        integration_zdotdir="$(mktemp -d "${TMPDIR:-/tmp}/zetta-zsh-XXXXXX" 2>/dev/null || true)"
-        if [ -n "$integration_zdotdir" ]; then
-            export ZETTA_ORIGINAL_ZDOTDIR="${ZDOTDIR:-$HOME}"
-            export ZETTA_INTEGRATION_ZDOTDIR="$integration_zdotdir"
-            cat > "$integration_zdotdir/.zshenv" <<'ZETTA_ZSHENV'
-typeset -g __zetta_marker_nonce="${__ZETTA_COMMAND_MARKER_NONCE-}"
-unset __ZETTA_COMMAND_MARKER_NONCE
-ZDOTDIR="$ZETTA_ORIGINAL_ZDOTDIR"
-[[ -r "$ZDOTDIR/.zshenv" ]] && source "$ZDOTDIR/.zshenv"
+/// The Bash tracker of every POSIX layer Zetta starts a shell in: MSYS2 and
+/// Cygwin through `bash_prompt_command`, and WSL through `wsl_cwd_tracker`.
+const POSIX_BASH_TRACKER: &str = include_str!("wsl/posix_tracker.bash");
 
-if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]]; then
-    function zetta { command "$ZETTA_HOST_EXECUTABLE" "$@"; }
-fi
+/// What fills a tracker's `# zetta: file-uri` line where `$PWD` is also a path
+/// the host can open as a `file://` URI.
+const FILE_URI_REPORT: &str = r#"printf '\033]7;file://localhost%s\033\\' "$PWD""#;
 
-function __zetta_report_cwd() {
-    local zetta_status=$?
-    if (( __ZETTA_COMMAND_STARTED )); then
-        printf '\033]2;zetta-event;%s:command-finished:%s\033\\' "$__zetta_marker_nonce" "$zetta_status"
-        __ZETTA_COMMAND_STARTED=0
-    fi
-    if [[ "$PWD" == /* ]]; then
-        printf '\033]7;file://localhost%s\033\\' "$PWD"
-        if [[ -n ${__zetta_marker_nonce-} ]]; then
-            printf '\033]2;zetta-cwd;%s:%s\033\\' "$__zetta_marker_nonce" "$PWD"
-        else
-            printf '\033]2;zetta-cwd:%s\033\\' "$PWD"
-        fi
-    fi
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$ZETTA_SHELL_NAME"
-    return $zetta_status
+/// `script` with its `# zetta: file-uri` line filled in for `layer`. MSYS2
+/// leaves the comment where it is.
+#[cfg(any(windows, test))]
+fn posix_tracker(script: &str, layer: PosixLayer) -> String {
+    match layer {
+        PosixLayer::Msys2 => script.to_owned(),
+        PosixLayer::Cygwin => script.replace("# zetta: file-uri", FILE_URI_REPORT),
+    }
 }
-function __zetta_report_preexec() {
-    __ZETTA_COMMAND_STARTED=1
-    printf '\033]2;zetta-event;%s:command-started:%s\033\\' "$__zetta_marker_nonce" "$1"
-    printf '\033]2;zetta-cmd;%s:%s\033\\' "$__zetta_marker_nonce" "$1"
-}
-typeset -g __ZETTA_COMMAND_STARTED=0
-function __zetta_load_shell_integration() {
-    add-zsh-hook -d precmd __zetta_load_shell_integration
-    if [[ -n ${ZETTA_HOST_EXECUTABLE:-} ]] && (( ! $+functions[_zetta] )); then
-        eval "$("$ZETTA_HOST_EXECUTABLE" init zsh)"
-    fi
-}
-autoload -Uz add-zsh-hook
-add-zsh-hook precmd __zetta_load_shell_integration
-add-zsh-hook precmd __zetta_report_cwd
-add-zsh-hook preexec __zetta_report_preexec
-command rm -rf -- "$ZETTA_INTEGRATION_ZDOTDIR"
-unset ZETTA_ORIGINAL_ZDOTDIR ZETTA_INTEGRATION_ZDOTDIR
-printf '\033]2;zetta-event;%s:tracking-ready\033\\' "$__zetta_marker_nonce"
-ZETTA_ZSHENV
-            ZDOTDIR="$integration_zdotdir"
-            export ZDOTDIR
-            export __ZETTA_COMMAND_MARKER_NONCE="$zetta_marker_nonce"
-            exec "$shell" -l
-        fi
-        ;;
-esac
 
-# Shells without an injection mechanism retain the legacy tracker.
-parent=$$
-if [ -n "$marker" ]; then
-    (
-        previous=
-        while kill -0 "$parent" 2>/dev/null; do
-            cwd="$(readlink "/proc/$parent/cwd" 2>/dev/null)" || break
-            if [ "$cwd" != "$previous" ]; then
-                printf '%s\n' "$cwd" > "${marker}.tmp" && mv -f "${marker}.tmp" "$marker"
-                previous="$cwd"
-            fi
-            sleep 0.1
-        done
-        rm -f "$marker" "${marker}.tmp"
-    ) </dev/null >/dev/null 2>&1 &
-fi
-exec "$shell" -l"#;
+/// The `PROMPT_COMMAND` that loads the Bash tracker. The tracker runs once and
+/// replaces itself; `existing`, the user's own `PROMPT_COMMAND`, is handed to
+/// it as a quoted word and runs at every prompt after Zetta's own hook.
+///
+/// The value ends on the tracker's last command, not a newline, because rc
+/// files extend it with `PROMPT_COMMAND="$PROMPT_COMMAND; …"`, and a line that
+/// starts with `;` is a syntax error Bash skips without a word.
+#[cfg(any(windows, test))]
+fn bash_prompt_command(layer: PosixLayer, existing: Option<&str>) -> String {
+    let existing = existing.unwrap_or_default();
+    posix_tracker(POSIX_BASH_TRACKER, layer)
+        .replace(
+            "# zetta: user-prompt-command",
+            &format!(
+                "__zetta_user_prompt_command='{}'",
+                existing.replace('\'', r"'\''")
+            ),
+        )
+        .trim_end()
+        .to_owned()
+}
+
+/// The script a WSL pane's `/bin/sh` runs to start the user's shell with
+/// tracking. Its Bash branch carries the same tracker MSYS2 and Cygwin use,
+/// with the WSL loader in place of a hook known in advance: the distribution's
+/// own `PROMPT_COMMAND` is only known inside it.
+pub(crate) fn wsl_cwd_tracker() -> &'static str {
+    static TRACKER: LazyLock<String> = LazyLock::new(|| {
+        let bash = POSIX_BASH_TRACKER
+            .replace("# zetta: file-uri", FILE_URI_REPORT)
+            .replace(
+                "# zetta: user-prompt-command\n",
+                include_str!("wsl/wsl_bash_loader.bash"),
+            );
+        include_str!("wsl/cwd_tracker.sh").replace("# zetta: bash-tracker", bash.trim_end())
+    });
+    &TRACKER
+}
 
 pub(crate) fn wsl_shell_with_tracking(
     shell: Shell,
@@ -1146,7 +518,7 @@ pub(crate) fn wsl_command_with_tracking(
             "--exec".to_owned(),
             "/bin/sh".to_owned(),
             "-c".to_owned(),
-            WSL_CWD_TRACKER.to_owned(),
+            wsl_cwd_tracker().to_owned(),
             "zetta-wsl-cwd".to_owned(),
         ]);
     }

@@ -27,8 +27,7 @@ pub(crate) fn parse_pane_wait_args(args: &[OsString]) -> Result<PaneWaitCommand>
                 std::process::exit(0);
             }
             "--allow-failure" | "-a" => {
-                anyhow::ensure!(!allow_failure, "--allow-failure may only be specified once");
-                allow_failure = true;
+                set_flag(&mut allow_failure, "--allow-failure")?;
             }
             option if option.starts_with('-') => {
                 anyhow::bail!("unknown pane wait option {option:?}")
@@ -79,57 +78,16 @@ pub(crate) fn parse_pane_wait_args(args: &[OsString]) -> Result<PaneWaitCommand>
 
 pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
     let mut notify = false;
-    let mut app_name = None;
-    let mut icon = None;
-    let mut sound = None;
-    let mut timeout = None;
+    let mut options = NotificationOptions::default();
     let mut positional = Vec::new();
     let mut arguments = args.iter();
     while let Some(argument) = arguments.next() {
-        match argument.to_string_lossy().as_ref() {
-            "--notify" | "-n" => {
-                anyhow::ensure!(!notify, "--notify may only be specified once");
-                notify = true;
-            }
-            "--app-name" | "-a" => {
-                anyhow::ensure!(app_name.is_none(), "--app-name may only be specified once");
-                app_name = Some(
-                    arguments
-                        .next()
-                        .context("--app-name requires a name")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--icon" | "-i" => {
-                anyhow::ensure!(icon.is_none(), "--icon may only be specified once");
-                icon = Some(
-                    arguments
-                        .next()
-                        .context("--icon requires a path")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--sound" | "-s" => {
-                anyhow::ensure!(sound.is_none(), "--sound may only be specified once");
-                sound = Some(
-                    arguments
-                        .next()
-                        .context("--sound requires a name")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--timeout" | "-t" => {
-                anyhow::ensure!(timeout.is_none(), "--timeout may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--timeout requires default, never, or a number of milliseconds")?
-                    .to_string_lossy()
-                    .into_owned();
-                timeout = Some(parse_notification_timeout(&value)?);
-            }
+        let text = argument.to_string_lossy();
+        if options.parse(&text, &mut arguments)? {
+            continue;
+        }
+        match text.as_ref() {
+            "--notify" | "-n" => set_flag(&mut notify, "--notify")?,
             "--help" | "-h" => anyhow::bail!("{}", attention_help()),
             option if option.starts_with('-') => {
                 anyhow::bail!("unknown attention option {option:?}")
@@ -143,7 +101,7 @@ pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
         "usage: zetta attention [OPTIONS] [SUMMARY] [BODY]; run `zetta attention --help` for details"
     );
     anyhow::ensure!(
-        notify || (app_name.is_none() && icon.is_none() && sound.is_none() && timeout.is_none()),
+        notify || options.is_empty(),
         "--app-name, --icon, --sound, and --timeout require --notify"
     );
     if notify && !cfg!(feature = "notifications") {
@@ -162,14 +120,7 @@ pub(crate) fn parse_attention_args(args: &[OsString]) -> Result<StartupArgs> {
     Ok(StartupArgs::for_mode(StartupMode::Attention(
         AttentionCommand {
             notify,
-            notification: NotificationRequest {
-                summary,
-                body,
-                app_name,
-                icon,
-                sound,
-                timeout,
-            },
+            notification: options.request(summary, body),
         },
     )))
 }
@@ -216,50 +167,48 @@ pub(crate) fn parse_pane_args(args: &[OsString]) -> Result<PaneCommand> {
                 std::process::exit(0);
             }
             "--direction" | "-d" => {
-                anyhow::ensure!(
-                    direction.is_none(),
-                    "--direction may only be specified once"
-                );
-                let value = arguments
-                    .next()
-                    .context("--direction requires left, right, up, or down")?
-                    .to_string_lossy()
-                    .into_owned();
-                direction = Some(parse_pane_direction(&value).with_context(|| {
-                    format!("unknown pane direction {value:?}; use left, right, up, or down")
-                })?);
+                set_once(&mut direction, "--direction", || {
+                    let value = arguments
+                        .next()
+                        .context("--direction requires left, right, up, or down")?
+                        .to_string_lossy()
+                        .into_owned();
+                    parse_pane_direction(&value).with_context(|| {
+                        format!("unknown pane direction {value:?}; use left, right, up, or down")
+                    })
+                })?;
             }
             "--label" | "-l" => {
-                anyhow::ensure!(label.is_none(), "--label may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--label requires a non-empty pane label")?
-                    .to_string_lossy()
-                    .into_owned();
-                anyhow::ensure!(!value.is_empty(), "--label requires a non-empty pane label");
-                label = Some(value);
+                set_once(&mut label, "--label", || {
+                    let value = arguments
+                        .next()
+                        .context("--label requires a non-empty pane label")?
+                        .to_string_lossy()
+                        .into_owned();
+                    anyhow::ensure!(!value.is_empty(), "--label requires a non-empty pane label");
+                    Ok(value)
+                })?;
             }
             "--pane" | "-p" => {
-                anyhow::ensure!(pane.is_none(), "--pane may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--pane requires an existing pane label")?
-                    .to_string_lossy()
-                    .into_owned();
-                anyhow::ensure!(!value.is_empty(), "--pane requires a non-empty pane label");
-                pane = Some(value);
+                set_once(&mut pane, "--pane", || {
+                    let value = arguments
+                        .next()
+                        .context("--pane requires an existing pane label")?
+                        .to_string_lossy()
+                        .into_owned();
+                    anyhow::ensure!(!value.is_empty(), "--pane requires a non-empty pane label");
+                    Ok(value)
+                })?;
             }
             "--overlay" | "-o" | "--overlay-size" | "-S" | "--overlay-opacity" | "-O"
             | "--overlay-color" | "-c" => {
                 parse_pane_overlay_arg(&value, &mut overlay, &mut arguments)?;
             }
             "--stack" | "-s" => {
-                anyhow::ensure!(!stack, "--stack may only be specified once");
-                stack = true;
+                set_flag(&mut stack, "--stack")?;
             }
             "--list" | "-L" => {
-                anyhow::ensure!(!list, "--list may only be specified once");
-                list = true;
+                set_flag(&mut list, "--list")?;
             }
             option if option.starts_with('-') => anyhow::bail!("unknown pane option {option:?}"),
             positional => anyhow::bail!(
@@ -396,22 +345,24 @@ pub(super) fn parse_terminal_size_subcommand(arguments: &[OsString]) -> Result<S
             "--json" | "-j" => json = true,
             "--resize" | "-r" => resize = true,
             "--columns" | "-c" => {
-                anyhow::ensure!(columns.is_none(), "--columns may only be specified once");
-                columns = Some(parse_terminal_resize_dimension(
-                    terminal_size_arguments
-                        .next()
-                        .context("--columns requires a positive whole number")?,
-                    "--columns",
-                )?);
+                set_once(&mut columns, "--columns", || {
+                    parse_terminal_resize_dimension(
+                        terminal_size_arguments
+                            .next()
+                            .context("--columns requires a positive whole number")?,
+                        "--columns",
+                    )
+                })?;
             }
             "--rows" | "-R" => {
-                anyhow::ensure!(rows.is_none(), "--rows may only be specified once");
-                rows = Some(parse_terminal_resize_dimension(
-                    terminal_size_arguments
-                        .next()
-                        .context("--rows requires a positive whole number")?,
-                    "--rows",
-                )?);
+                set_once(&mut rows, "--rows", || {
+                    parse_terminal_resize_dimension(
+                        terminal_size_arguments
+                            .next()
+                            .context("--rows requires a positive whole number")?,
+                        "--rows",
+                    )
+                })?;
             }
             "--help" | "-h" => {
                 println!("{}", terminal_size_help());
@@ -448,8 +399,7 @@ pub(super) fn parse_edit_subcommand(arguments: &[OsString]) -> Result<StartupArg
                 std::process::exit(0);
             }
             "--delete-after" | "-d" if options => {
-                anyhow::ensure!(!delete_after, "--delete-after may only be specified once");
-                delete_after = true;
+                set_flag(&mut delete_after, "--delete-after")?;
             }
             option if options && option.starts_with('-') => {
                 anyhow::bail!("unknown edit option {option:?}")
@@ -731,69 +681,59 @@ fn parse_pane_overlay_arg(
     });
     match option {
         "--overlay" | "-o" => {
-            anyhow::ensure!(
-                overlay.text.is_none(),
-                "--overlay may only be specified once"
-            );
-            overlay.text = Some(
-                arguments
+            set_once(&mut overlay.text, "--overlay", || {
+                Ok(arguments
                     .next()
                     .context("--overlay requires overlay text")?
                     .to_string_lossy()
-                    .into_owned(),
-            );
+                    .into_owned())
+            })?;
         }
         "--overlay-size" | "-S" => {
-            anyhow::ensure!(
-                overlay.font_size.is_none(),
-                "--overlay-size may only be specified once"
-            );
-            let value = arguments
-                .next()
-                .context("--overlay-size requires sm, base, lg, xl, 2xl, or 3xl")?
-                .to_string_lossy()
-                .into_owned();
-            overlay.font_size = Some(OverlayFontSize::parse(&value).with_context(|| {
-                format!(
-                    "unknown overlay size {value:?}; expected one of {}",
-                    OverlayFontSize::CLI_NAMES.join(", ")
-                )
-            })?);
+            set_once(&mut overlay.font_size, "--overlay-size", || {
+                let value = arguments
+                    .next()
+                    .context("--overlay-size requires sm, base, lg, xl, 2xl, or 3xl")?
+                    .to_string_lossy()
+                    .into_owned();
+                OverlayFontSize::parse(&value).with_context(|| {
+                    format!(
+                        "unknown overlay size {value:?}; expected one of {}",
+                        OverlayFontSize::CLI_NAMES.join(", ")
+                    )
+                })
+            })?;
         }
         "--overlay-opacity" | "-O" => {
-            anyhow::ensure!(
-                overlay.opacity.is_none(),
-                "--overlay-opacity may only be specified once"
-            );
-            let value = arguments
-                .next()
-                .context("--overlay-opacity requires a percentage from 0 to 100")?
-                .to_string_lossy()
-                .into_owned();
-            let percent = value
-                .parse::<u8>()
-                .with_context(|| format!("--overlay-opacity {value:?} must be a whole number"))?;
-            anyhow::ensure!(
-                percent <= 100,
-                "--overlay-opacity must be between 0 and 100"
-            );
-            overlay.opacity = Some(percent);
+            set_once(&mut overlay.opacity, "--overlay-opacity", || {
+                let value = arguments
+                    .next()
+                    .context("--overlay-opacity requires a percentage from 0 to 100")?
+                    .to_string_lossy()
+                    .into_owned();
+                let percent = value.parse::<u8>().with_context(|| {
+                    format!("--overlay-opacity {value:?} must be a whole number")
+                })?;
+                anyhow::ensure!(
+                    percent <= 100,
+                    "--overlay-opacity must be between 0 and 100"
+                );
+                Ok(percent)
+            })?;
         }
         "--overlay-color" | "-c" => {
-            anyhow::ensure!(
-                overlay.color.is_none(),
-                "--overlay-color may only be specified once"
-            );
-            let value = arguments
-                .next()
-                .context("--overlay-color requires a color name or hex color")?
-                .to_string_lossy()
-                .into_owned();
-            anyhow::ensure!(
-                overlay_color_from_value(&value).is_some(),
-                "invalid overlay color {value:?}"
-            );
-            overlay.color = Some(value);
+            set_once(&mut overlay.color, "--overlay-color", || {
+                let value = arguments
+                    .next()
+                    .context("--overlay-color requires a color name or hex color")?
+                    .to_string_lossy()
+                    .into_owned();
+                anyhow::ensure!(
+                    overlay_color_from_value(&value).is_some(),
+                    "invalid overlay color {value:?}"
+                );
+                Ok(value)
+            })?;
         }
         _ => unreachable!("parse_pane_args routes only overlay options here"),
     }

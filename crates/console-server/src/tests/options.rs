@@ -36,15 +36,6 @@ fn rejects_missing_values_unknown_options_and_unbounded_timeout() {
     }
 }
 #[test]
-fn help_table_aligns_multiline_descriptions_without_trailing_whitespace() {
-    let help = format_help_table([("a", "first\nnext"), ("long", "second")]);
-    let lines: Vec<_> = help.lines().collect();
-    assert_eq!(lines[0].find("first"), lines[1].find("next"));
-    assert_eq!(lines[0].find("first"), lines[2].find("second"));
-    assert!(lines.iter().all(|line| !line.ends_with(' ')));
-}
-
-#[test]
 fn pipeline_accepts_both_flag_forms() {
     for flag in ["--pipeline", "-p"] {
         assert!(

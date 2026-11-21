@@ -89,7 +89,7 @@ impl Zetta {
     }
 
     fn refuse_if_active_tab_is_protected(&self) -> Result<()> {
-        match self.tabs.get(self.active_tab) {
+        match self.current_tab() {
             Some(tab) => self.refuse_if_tab_is_protected(tab.attention_id),
             None => Ok(()),
         }

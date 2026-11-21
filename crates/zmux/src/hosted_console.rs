@@ -17,6 +17,7 @@ use std::os::windows::io::{AsRawHandle as _, OwnedHandle};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::Duration;
+use zetta_sync::RecoverPoison as _;
 
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::{Config, Term, test::TermSize};
@@ -32,9 +33,7 @@ const QUEUE_LIMIT: usize = 1024 * 1024;
 const OUTPUT_PIPE_CAPACITY: u32 = 128 * 1024;
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().recover_poison()
 }
 
 /// Turns console output into a stream that needs no side channel.
@@ -120,10 +119,7 @@ impl Pipeline {
         while (queues.daemon_bytes > QUEUE_LIMIT || queues.parser_bytes > QUEUE_LIMIT)
             && !queues.cancelled
         {
-            queues = self
-                .changed
-                .wait(queues)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            queues = self.changed.wait(queues).recover_poison();
         }
         if queues.cancelled {
             return Err(io::ErrorKind::BrokenPipe.into());
@@ -157,10 +153,7 @@ impl Pipeline {
             if queues.ended || queues.cancelled {
                 return None;
             }
-            queues = self
-                .changed
-                .wait(queues)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            queues = self.changed.wait(queues).recover_poison();
         }
     }
     fn parsed(&self, bytes: usize) {
@@ -171,10 +164,7 @@ impl Pipeline {
         let mut queues = lock(&self.queues);
         let target = queues.published;
         while queues.parsed < target && !queues.cancelled {
-            queues = self
-                .changed
-                .wait(queues)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            queues = self.changed.wait(queues).recover_poison();
         }
         if queues.cancelled {
             Err(io::ErrorKind::BrokenPipe.into())

@@ -1,3 +1,7 @@
+//! The command palette overlay: opening it with the effective keymap's
+//! shortcuts, running the chosen command, and routing keys to whichever overlay
+//! has them.
+
 use super::*;
 use crate::command_palette::PaletteKind;
 use crate::command_palette::action_available_in_launch_mode;
@@ -301,8 +305,8 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let tab_id = self.current_tab().map(|tab| tab.id);
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let Some(buffer) = tab.rename_buffer.as_mut() else {
@@ -357,7 +361,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let Some(buffer) = tab.overlay_buffer.as_mut() else {
@@ -410,8 +414,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some(section) = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(|tab| tab.overlay_style_picker.as_ref())
             .map(|picker| picker.section)
         else {

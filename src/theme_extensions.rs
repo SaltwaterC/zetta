@@ -1,3 +1,6 @@
+//! Theme extensions: fetching Zed extensions that carry themes, installing them
+//! within size limits, and listing or removing those installed.
+
 use std::{
     collections::BTreeMap,
     fs,

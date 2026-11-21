@@ -4,6 +4,8 @@
 use std::sync::{Arc, Condvar, Mutex};
 #[cfg(not(target_os = "macos"))]
 use std::time::Duration;
+#[cfg(not(target_os = "macos"))]
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::{Context as _, Result};
 #[cfg(not(target_os = "macos"))]
@@ -141,14 +143,14 @@ impl BuiltinSound {
         stream.play().context("failed to start audio playback")?;
 
         let (lock, condvar) = &*done;
-        let finished = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let finished = lock.lock().recover_poison();
         let (_finished, result) = condvar
             .wait_timeout_while(
                 finished,
                 duration + Duration::from_millis(500),
                 |finished| !*finished,
             )
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .recover_poison();
         anyhow::ensure!(!result.timed_out(), "audio playback did not finish in time");
         std::thread::sleep(TEARDOWN_GRACE);
         Ok(())
@@ -256,8 +258,7 @@ where
                     position += 1;
                     if position >= samples.len() {
                         let (lock, condvar) = &*done;
-                        let mut finished =
-                            lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        let mut finished = lock.lock().recover_poison();
                         *finished = true;
                         condvar.notify_one();
                     }

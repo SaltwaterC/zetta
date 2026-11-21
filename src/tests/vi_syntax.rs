@@ -160,7 +160,7 @@ fn unrelated_initialization_does_not_block_a_fully_highlighted_preview() {
         .configuration
         .initializing
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .recover_poison();
     let (completed, result) = mpsc::channel();
     let preview_grammars = Arc::clone(&grammars);
     let worker = thread::spawn(move || {
@@ -272,7 +272,7 @@ fn a_busy_visible_injection_is_ready_before_the_preview_returns() {
         .configuration
         .initializing
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .recover_poison();
     let (entered, started) = mpsc::channel();
     let (completed, result) = mpsc::channel();
     let preview_grammars = Arc::clone(&grammars);

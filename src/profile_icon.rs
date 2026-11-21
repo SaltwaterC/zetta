@@ -1,9 +1,14 @@
+//! Profile icons: the ones a profile can name, the one chosen automatically for
+//! its shell or program, and how each renders in the UI and Windows' jump list.
+
 use std::path::PathBuf;
 #[cfg(windows)]
 use std::{
     path::Path,
     sync::{Mutex, OnceLock},
 };
+#[cfg(windows)]
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::{Context as _, Result};
 use gpui::img;
@@ -230,19 +235,14 @@ fn executable_icon_path(executable: &Path) -> Option<PathBuf> {
     static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, Option<PathBuf>>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Some(path) = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(executable)
-        .cloned()
-    {
+    if let Some(path) = cache.lock().recover_poison().get(executable).cloned() {
         return path;
     }
 
     let extracted = extract_executable_icon(executable).ok();
     cache
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .insert(executable.to_path_buf(), extracted.clone());
     extracted
 }

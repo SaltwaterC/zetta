@@ -36,6 +36,7 @@ pub mod relay;
 mod launcher;
 #[cfg(windows)]
 pub use launcher::run;
+use zetta_sync::RecoverPoison as _;
 
 use std::sync::{Mutex, MutexGuard};
 
@@ -44,9 +45,7 @@ use std::sync::{Mutex, MutexGuard};
 /// connection thread cannot leave inconsistent; so a poisoned lock is simply
 /// taken.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().recover_poison()
 }
 
 #[cfg(test)]

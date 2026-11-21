@@ -1,3 +1,6 @@
+//! The settings dialog's modals: choosing a font, adding a profile, capturing a
+//! keystroke, and confirming unsaved changes.
+
 use super::*;
 use crate::settings_view::widgets::activate_on_click;
 use crate::ui_tokens::RADIUS_CONTROL;

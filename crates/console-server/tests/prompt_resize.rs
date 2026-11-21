@@ -8,6 +8,7 @@ use std::io;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 use vte::ansi::{Processor, StdSyncHandler};
+use zetta_sync::RecoverPoison as _;
 
 struct State {
     term: Term<VoidListener>,
@@ -19,9 +20,7 @@ struct Output(Arc<Mutex<State>>);
 
 impl Output {
     fn lock(&self) -> MutexGuard<'_, State> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.0.lock().recover_poison()
     }
 
     fn text(&self) -> String {

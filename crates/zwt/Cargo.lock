@@ -146,6 +146,8 @@ dependencies = [
  "alacritty_terminal",
  "unicode-width",
  "windows-sys 0.59.0",
+ "zetta_cli_help",
+ "zetta_sync",
 ]
 
 [[package]]
@@ -964,6 +966,7 @@ dependencies = [
  "memchr",
  "tempfile",
  "windows",
+ "zetta_cli_help",
 ]
 
 [[package]]
@@ -971,6 +974,13 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+
+[[package]]
+name = "zetta_cli_help"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "zetta_profiles"
@@ -981,6 +991,10 @@ dependencies = [
  "serde_json",
  "windows",
 ]
+
+[[package]]
+name = "zetta_sync"
+version = "0.1.0"
 
 [[package]]
 name = "zmij"
@@ -1012,7 +1026,9 @@ dependencies = [
  "windows",
  "zclip",
  "zeroize",
+ "zetta_cli_help",
  "zetta_profiles",
+ "zetta_sync",
 ]
 
 [[package]]
@@ -1024,7 +1040,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "uds_windows",
  "windows",
+ "zetta_cli_help",
  "zmux",
 ]

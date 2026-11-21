@@ -40,6 +40,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
+use zetta_sync::RecoverPoison as _;
 
 use crate::persistence::PersistenceStore;
 
@@ -177,10 +178,7 @@ impl PersistenceQueue {
         let mut state = self.lock_state();
         let target = state.queued;
         while state.applied < target {
-            state = self
-                .applied
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = self.applied.wait(state).recover_poison();
         }
         drop(state);
         self.lock_store()
@@ -191,10 +189,7 @@ impl PersistenceQueue {
             let appends = {
                 let mut state = self.lock_state();
                 while state.appends.is_empty() {
-                    state = self
-                        .queued
-                        .wait(state)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state = self.queued.wait(state).recover_poison();
                 }
                 std::mem::take(&mut state.appends)
             };
@@ -239,9 +234,7 @@ impl PersistenceQueue {
     }
 
     fn lock_state(&self) -> MutexGuard<'_, QueueState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock().recover_poison()
     }
 
     fn lock_store(&self) -> MutexGuard<'_, Option<PersistenceStore>> {

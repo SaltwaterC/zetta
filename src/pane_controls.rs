@@ -1,3 +1,6 @@
+//! Pane controls, the buttons drawn over a pane: when they show, when they hide
+//! again after idling, and staying hidden for a pane or tab that asked.
+
 use super::*;
 
 const PANE_CONTROLS_IDLE_DELAY: Duration = Duration::from_millis(1200);
@@ -127,7 +130,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane_id = self.tabs.get(self.active_tab).map(|tab| tab.active_pane);
+        let pane_id = self.current_tab().map(|tab| tab.active_pane);
         if let Some(pane_id) = pane_id {
             self.toggle_pane_controls_for(&[pane_id], cx);
         }
@@ -140,8 +143,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let pane_ids = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .map(|tab| tab.panes.iter().map(|pane| pane.id).collect::<Vec<_>>())
             .unwrap_or_default();
         self.toggle_pane_controls_for(&pane_ids, cx);

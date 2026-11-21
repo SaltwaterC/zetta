@@ -1,3 +1,6 @@
+//! Parsing `zetta`'s command line: the launch options, the subcommand that
+//! replaces the launch, and the startup mode they add up to.
+
 use super::cli_help::{
     attention_help, benchmark_help, benchmark_output_help, edit_help, help_text,
     is_version_argument, pane_help, pane_splits_help, parse_overlay_args, parse_tab_icon_args,
@@ -5,7 +8,7 @@ use super::cli_help::{
     version_text,
 };
 use super::*;
-use crate::cli_services::{NotificationRequest, parse_notification_timeout};
+use crate::cli_services::{NotificationOptions, NotificationRequest};
 use crate::command_panes::{
     MAX_PANE_COMMAND_BYTES, PaneCommand, pane_command_byte_len, parse_pane_direction,
 };
@@ -187,6 +190,8 @@ use subcommands::{
 
 pub(crate) use subcommands::parse_attention_target;
 
+pub(crate) use zetta_cli_help::{set_flag, set_once};
+
 pub(crate) fn parse_args_from(args: impl IntoIterator<Item = OsString>) -> Result<StartupArgs> {
     let arguments = args.into_iter().collect::<Vec<_>>();
     if let Some(parsed) = parse_subcommand(&arguments)? {
@@ -279,26 +284,65 @@ fn parse_subcommand(arguments: &[OsString]) -> Result<Option<StartupArgs>> {
 /// The plain `zetta [OPTIONS] [-e COMMAND …]` launch: the only form that takes
 /// the global options, and the only one that ends in a window.
 fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
-    let mut config = None;
-    let mut keymap = None;
-    let mut profile = None;
-    let mut split = None;
-    let mut replace_pane = false;
-    let mut theme_override = None;
-    let mut geometry = None;
-    let mut cell_size = None;
-    #[cfg(feature = "zmux")]
-    let mut no_mux = false;
-    #[cfg(not(feature = "zmux"))]
-    let no_mux = true;
-    #[cfg(feature = "zmux")]
-    let mut explicit_no_mux = false;
-    #[cfg(not(feature = "zmux"))]
-    let explicit_no_mux = false;
-    #[cfg(windows)]
-    let mut mode = StartupMode::Application;
-    #[cfg(not(windows))]
-    let mut mode = StartupMode::Application;
+    let options = parse_launch_options(arguments)?;
+    check_launch_options(&options)?;
+    Ok(options.into_startup_args())
+}
+
+/// The plain launch's options as given, before their combinations are checked.
+struct LaunchOptions {
+    config: Option<PathBuf>,
+    keymap: Option<PathBuf>,
+    profile: Option<String>,
+    split: Option<String>,
+    replace_pane: bool,
+    theme_override: Option<String>,
+    geometry: Option<TerminalGrid>,
+    cell_size: Option<terminal_view::PhysicalCellSize>,
+    /// Always set in a build without the multiplexer.
+    no_mux: bool,
+    /// Whether `--no-mux` was given, as opposed to implied by the build.
+    explicit_no_mux: bool,
+    mode: StartupMode,
+}
+
+impl LaunchOptions {
+    fn into_startup_args(self) -> StartupArgs {
+        StartupArgs {
+            config_path: self.config,
+            keymap_path: self.keymap,
+            profile: self.profile,
+            split: self.split,
+            replace_pane: self.replace_pane,
+            theme_override: self.theme_override,
+            geometry: self.geometry,
+            cell_size: self.cell_size,
+            no_mux: self.no_mux,
+            mode: self.mode,
+            profile_report: None,
+            profile_duration: None,
+            profile_pane_stress: false,
+            profile_workload: PerformanceWorkload::Standard,
+            profile_external_terminal: false,
+            tftp_command: None,
+        }
+    }
+}
+
+fn parse_launch_options(arguments: Vec<OsString>) -> Result<LaunchOptions> {
+    let mut options = LaunchOptions {
+        config: None,
+        keymap: None,
+        profile: None,
+        split: None,
+        replace_pane: false,
+        theme_override: None,
+        geometry: None,
+        cell_size: None,
+        no_mux: !cfg!(feature = "zmux"),
+        explicit_no_mux: false,
+        mode: StartupMode::Application,
+    };
     let mut args = arguments.into_iter();
     while let Some(argument) = args.next() {
         let argument = argument.to_string_lossy();
@@ -308,13 +352,13 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
         }
         match argument.as_ref() {
             "--config" | "-c" => {
-                config = Some(args.next().context("--config requires a path")?.into());
+                options.config = Some(args.next().context("--config requires a path")?.into());
             }
             "--keymap" | "-k" => {
-                keymap = Some(args.next().context("--keymap requires a path")?.into());
+                options.keymap = Some(args.next().context("--keymap requires a path")?.into());
             }
             "--profile" | "-p" => {
-                profile = Some(
+                options.profile = Some(
                     args.next()
                         .context("--profile requires a name")?
                         .to_string_lossy()
@@ -331,14 +375,13 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                     !name.is_empty() && !name.starts_with('-'),
                     "--split requires a template name"
                 );
-                split = Some(name);
+                options.split = Some(name);
             }
             "--replace-pane" | "-r" => {
-                anyhow::ensure!(!replace_pane, "--replace-pane may only be specified once");
-                replace_pane = true;
+                set_flag(&mut options.replace_pane, "--replace-pane")?;
             }
             "--theme" | "-t" => {
-                theme_override = Some(
+                options.theme_override = Some(
                     args.next()
                         .context("--theme requires a theme name")?
                         .to_string_lossy()
@@ -346,39 +389,36 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                 );
             }
             "--cell-size" | "-C" => {
-                anyhow::ensure!(
-                    cell_size.is_none(),
-                    "--cell-size may only be specified once"
-                );
-                cell_size =
-                    Some(parse_cell_size(&args.next().context(
-                        "--cell-size requires WIDTHxHEIGHT in backing pixels",
-                    )?)?);
+                set_once(&mut options.cell_size, "--cell-size", || {
+                    parse_cell_size(
+                        &args
+                            .next()
+                            .context("--cell-size requires WIDTHxHEIGHT in backing pixels")?,
+                    )
+                })?;
             }
             "--geometry" | "-g" => {
-                anyhow::ensure!(geometry.is_none(), "--geometry may only be specified once");
-                geometry = Some(parse_geometry(
-                    &args.next().context("--geometry requires COLUMNSxROWS")?,
-                )?);
+                set_once(&mut options.geometry, "--geometry", || {
+                    parse_geometry(&args.next().context("--geometry requires COLUMNSxROWS")?)
+                })?;
             }
             #[cfg(feature = "zmux")]
             "--no-mux" | "-n" => {
-                anyhow::ensure!(!no_mux, "--no-mux may only be specified once");
-                no_mux = true;
-                explicit_no_mux = true;
+                set_flag(&mut options.no_mux, "--no-mux")?;
+                options.explicit_no_mux = true;
             }
             "--new-window" | "-w" => {
                 anyhow::ensure!(
-                    mode == StartupMode::Application,
+                    options.mode == StartupMode::Application,
                     "--new-window cannot be combined with another startup mode"
                 );
-                mode = StartupMode::NewWindow;
+                options.mode = StartupMode::NewWindow;
             }
             #[cfg(windows)]
             // Hidden: written into the Start menu shortcut by the installer,
             // not something a user types.
             "--register-windows-shell" => {
-                mode = StartupMode::RegisterWindowsShell(
+                options.mode = StartupMode::RegisterWindowsShell(
                     args.next()
                         .context("--register-windows-shell requires a shortcut path")?
                         .into(),
@@ -386,7 +426,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
             }
             #[cfg(windows)]
             "--unregister-windows-shell" => {
-                mode = StartupMode::UnregisterWindowsShell;
+                options.mode = StartupMode::UnregisterWindowsShell;
             }
             #[cfg(windows)]
             // COM launches the GUI executable with this switch. It is kept
@@ -394,10 +434,10 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
             // Windows' out-of-process activation protocol.
             "-Embedding" | "--embedding" => {
                 anyhow::ensure!(
-                    mode == StartupMode::Application,
+                    options.mode == StartupMode::Application,
                     "Windows embedding cannot be combined with another startup mode"
                 );
-                mode = StartupMode::WindowsEmbedding;
+                options.mode = StartupMode::WindowsEmbedding;
             }
             // GNOME Shell uses this private no-op argument to notice changes
             // to the dynamically generated desktop action list. It is
@@ -414,7 +454,7 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
             }
             "--command" | "-e" => {
                 anyhow::ensure!(
-                    mode == StartupMode::Application,
+                    options.mode == StartupMode::Application,
                     "-e/--command cannot be combined with another startup mode"
                 );
                 let command = args
@@ -424,99 +464,99 @@ fn parse_application_args(arguments: Vec<OsString>) -> Result<StartupArgs> {
                     !command.is_empty(),
                     "-e/--command requires a command and optional arguments"
                 );
-                mode = StartupMode::Command(command);
+                options.mode = StartupMode::Command(command);
                 break;
             }
             "--help" | "-h" => unreachable!("help arguments return before parsing options"),
             unknown => anyhow::bail!("unknown argument {unknown:?}"),
         }
     }
+    Ok(options)
+}
+
+/// The combinations of launch options that are refused, each with the message
+/// naming the pair.
+fn check_launch_options(options: &LaunchOptions) -> Result<()> {
     anyhow::ensure!(
-        profile.is_none()
+        options.profile.is_none()
             || matches!(
-                mode,
+                options.mode,
                 StartupMode::Application | StartupMode::NewWindow | StartupMode::Command(_)
             ),
         "--profile cannot be combined with another startup mode"
     );
     anyhow::ensure!(
-        split.is_none() || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
+        options.split.is_none()
+            || matches!(
+                options.mode,
+                StartupMode::Application | StartupMode::Command(_)
+            ),
         "--split cannot be combined with another startup mode"
     );
     anyhow::ensure!(
-        !replace_pane || mode == StartupMode::Application,
+        !options.replace_pane || options.mode == StartupMode::Application,
         "--replace-pane cannot be combined with another startup mode"
     );
     anyhow::ensure!(
-        (geometry.is_none() && cell_size.is_none())
-            || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
+        (options.geometry.is_none() && options.cell_size.is_none())
+            || matches!(
+                options.mode,
+                StartupMode::Application | StartupMode::Command(_)
+            ),
         "--geometry and --cell-size cannot be combined with another startup mode"
     );
     anyhow::ensure!(
-        (geometry.is_none() && cell_size.is_none()) || !replace_pane,
+        (options.geometry.is_none() && options.cell_size.is_none()) || !options.replace_pane,
         "--geometry and --cell-size cannot be combined with --replace-pane"
     );
     // The window is sized for one pane filling it, before it is first shown.
     anyhow::ensure!(
-        geometry.is_none() || split.is_none(),
+        options.geometry.is_none() || options.split.is_none(),
         "--geometry cannot be combined with --split"
     );
     anyhow::ensure!(
-        !replace_pane || split.is_some() || profile.is_some(),
+        !options.replace_pane || options.split.is_some() || options.profile.is_some(),
         "--replace-pane requires --split or --profile"
     );
     anyhow::ensure!(
-        theme_override.is_none() || profile.is_some(),
+        options.theme_override.is_none() || options.profile.is_some(),
         "--theme requires --profile"
     );
     anyhow::ensure!(
-        !explicit_no_mux || matches!(mode, StartupMode::Application | StartupMode::Command(_)),
+        !options.explicit_no_mux
+            || matches!(
+                options.mode,
+                StartupMode::Application | StartupMode::Command(_)
+            ),
         "--no-mux cannot be combined with another startup mode"
     );
-    if mode == StartupMode::NewWindow {
+    if options.mode == StartupMode::NewWindow {
         anyhow::ensure!(
-            config.is_none(),
+            options.config.is_none(),
             "--new-window cannot be combined with --config"
         );
         anyhow::ensure!(
-            keymap.is_none(),
+            options.keymap.is_none(),
             "--new-window cannot be combined with --keymap"
         );
         anyhow::ensure!(
-            split.is_none(),
+            options.split.is_none(),
             "--new-window cannot be combined with --split"
         );
         anyhow::ensure!(
-            !replace_pane,
+            !options.replace_pane,
             "--new-window cannot be combined with --replace-pane"
         );
         anyhow::ensure!(
-            theme_override.is_none(),
+            options.theme_override.is_none(),
             "--new-window cannot be combined with --theme"
         );
         anyhow::ensure!(
-            !explicit_no_mux,
+            !options.explicit_no_mux,
             "--new-window cannot be combined with --no-mux"
         );
     }
-    Ok(StartupArgs {
-        config_path: config,
-        keymap_path: keymap,
-        profile,
-        split,
-        replace_pane,
-        theme_override,
-        geometry,
-        cell_size,
-        no_mux,
-        mode,
-        profile_report: None,
-        profile_duration: None,
-        profile_pane_stress: false,
-        profile_workload: PerformanceWorkload::Standard,
-        profile_external_terminal: false,
-        tftp_command: None,
-    })
+    Ok(())
 }
 
 pub(crate) fn select_launch_profile(

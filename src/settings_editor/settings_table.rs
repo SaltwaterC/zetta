@@ -266,67 +266,276 @@ const RETENTION_OPTIONS: &[(&str, &str)] =
 #[cfg(not(feature = "session-persistence"))]
 const RETENTION_OPTIONS: &[(&str, &str)] = &[("none", "None"), ("memory", "Memory")];
 
+fn default_profile_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Custom(CustomSpec {
+        encode: |form| json!(form.default_profile),
+        // The name the file's choice resolved to, spelled as the
+        // profile spells it rather than as the file did.
+        decode: |form, _, config| {
+            form.default_profile = config.profiles[config.default_profile].name.clone();
+        },
+        // The first profile is the one used when none is named, and
+        // the file matches profile names regardless of case.
+        default: |form| match form.profiles.first() {
+            Some(first) if first.name.text.eq_ignore_ascii_case(&form.default_profile) => {
+                json!(form.default_profile)
+            }
+            Some(first) => json!(first.name.text),
+            None => Value::Null,
+        },
+    })
+}
+
+fn new_tab_profile_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Choice(ChoiceSpec {
+        options: &[("default", "Default"), ("inherit", "Inherit")],
+        get: |form| form.new_tab_profile.as_str(),
+        set: |form, value| {
+            if let Ok(value) = NewTabProfile::parse(value) {
+                form.new_tab_profile = value;
+            }
+        },
+        default: "default",
+    })
+}
+
+fn default_tab_icon_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Custom(CustomSpec {
+        encode: |form| {
+            form.default_tab_icon.map_or(Value::Null, |icon| {
+                let name: &'static str = icon.into();
+                json!(name)
+            })
+        },
+        decode: |form, value, _| {
+            form.default_tab_icon = match value {
+                None => Some(IconName::Terminal),
+                Some(Value::Null) => None,
+                Some(value) => value
+                    .as_str()
+                    .and_then(|name| name.parse().ok())
+                    .or(Some(IconName::Terminal)),
+            };
+        },
+        default: |_| json!("terminal"),
+    })
+}
+
+fn working_directory_scope_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Choice(ChoiceSpec {
+        options: &[("none", "None"), ("pane", "Pane"), ("tab", "Tab")],
+        get: |form| form.working_directory_scope.as_str(),
+        set: |form, value| {
+            if let Ok(value) = WorkingDirectoryScope::parse(value) {
+                form.working_directory_scope = value;
+            }
+        },
+        default: "tab",
+    })
+}
+
+fn light_theme_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Custom(CustomSpec {
+        encode: |form| json!(form.theme),
+        decode: |form, value, _| {
+            form.theme = value
+                .and_then(Value::as_str)
+                .unwrap_or(crate::ZETTA_DEFAULT_THEME)
+                .to_owned();
+        },
+        default: |_| json!(crate::ZETTA_DEFAULT_THEME),
+    })
+}
+
+fn dark_theme_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Custom(CustomSpec {
+        encode: |form| json!(form.dark_theme),
+        decode: |form, value, _| {
+            form.dark_theme = value
+                .and_then(Value::as_str)
+                .unwrap_or(crate::ZETTA_DEFAULT_DARK_THEME)
+                .to_owned();
+        },
+        default: |_| json!(crate::ZETTA_DEFAULT_DARK_THEME),
+    })
+}
+
+fn font_size_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Number(NumberSpec {
+        text: text_access!(terminal_font_size),
+        noun: "Font size",
+        unit: None,
+        min: f64::from(crate::config::MIN_TERMINAL_FONT_SIZE),
+        max: f64::from(crate::config::MAX_TERMINAL_FONT_SIZE),
+        integer: false,
+        step: Step::By(1.),
+        // Unset: the theme's buffer size applies, and follows the
+        // theme. Writing any number back would pin one.
+        empty: Empty::Unset(Placeholder::ThemeFontSize),
+        sentinel: None,
+        default: None,
+        start: Start::ThemeFontSize,
+    })
+}
+
+fn font_family_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Custom(CustomSpec {
+        encode: |form| json!(form.terminal_font_family),
+        decode: |form, value, _| {
+            form.terminal_font_family = value
+                .and_then(Value::as_str)
+                .filter(|family| !family.trim().is_empty())
+                .unwrap_or(crate::config::DEFAULT_TERMINAL_FONT_FAMILY)
+                .to_owned();
+        },
+        default: |_| json!(crate::config::DEFAULT_TERMINAL_FONT_FAMILY),
+    })
+}
+
+fn scroll_history_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Number(NumberSpec {
+        text: text_access!(max_scroll_history_lines),
+        noun: "Scrollback history",
+        unit: Some("lines"),
+        min: 0.,
+        max: terminal::MAX_SCROLL_HISTORY_LINES as f64,
+        integer: true,
+        step: Step::Accelerating,
+        empty: Empty::Invalid,
+        sentinel: Some(("Max", terminal::MAX_SCROLL_HISTORY_LINES as f64)),
+        default: Some(terminal::MAX_SCROLL_HISTORY_LINES as f64),
+        start: Start::Value(0.),
+    })
+}
+
+fn inactive_pane_opacity_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Custom(CustomSpec {
+        encode: |form| json!(two_decimals(f64::from(form.inactive_pane_opacity))),
+        decode: |form, value, _| {
+            form.inactive_pane_opacity = value
+                .and_then(Value::as_f64)
+                .map_or(crate::config::DEFAULT_INACTIVE_PANE_OPACITY, |opacity| {
+                    opacity as f32
+                });
+        },
+        default: |_| {
+            json!(two_decimals(f64::from(
+                crate::config::DEFAULT_INACTIVE_PANE_OPACITY
+            )))
+        },
+    })
+}
+
+fn pane_controls_position_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Choice(ChoiceSpec {
+        options: &[("right", "Right"), ("left", "Left")],
+        get: |form| form.pane_controls_position.as_str(),
+        set: |form, value| {
+            if let Ok(value) = PaneControlsPosition::parse(value) {
+                form.pane_controls_position = value;
+            }
+        },
+        default: "right",
+    })
+}
+
+fn console_backend_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Choice(ChoiceSpec {
+        options: &[("conpty", "ConPTY"), ("console-server", "Console server")],
+        get: |form| form.console_backend.as_str(),
+        set: |form, value| {
+            if let Some(value) = crate::config::ConsoleBackend::parse(value) {
+                form.console_backend = value;
+            }
+        },
+        default: "console-server",
+    })
+}
+
+fn session_retention_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Choice(ChoiceSpec {
+        options: RETENTION_OPTIONS,
+        get: |form| form.session_retention.as_str(),
+        set: |form, value| {
+            if let Ok(value) = SessionRetention::parse(value) {
+                form.session_retention = value;
+            }
+        },
+        default: "memory",
+    })
+}
+
+fn session_ring_bytes_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Number(NumberSpec {
+        text: text_access!(session_ring_bytes),
+        noun: "Retained screen size",
+        unit: Some("bytes"),
+        min: 4096.,
+        max: crate::config::MAX_SESSION_RING_BYTES as f64,
+        integer: true,
+        step: Step::By(4096.),
+        empty: Empty::Invalid,
+        sentinel: None,
+        default: Some(crate::config::DEFAULT_SESSION_RING_BYTES as f64),
+        start: Start::Value(crate::config::DEFAULT_SESSION_RING_BYTES as f64),
+    })
+}
+
+fn remote_protocol_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Choice(ChoiceSpec {
+        options: &[("ssh", "SSH"), ("zosh", "Zosh")],
+        get: |form| form.remote_session_protocol.name(),
+        set: |form, value| {
+            if let Ok(value) = RemoteSessionProtocol::parse(value) {
+                form.remote_session_protocol = value;
+            }
+        },
+        default: "ssh",
+    })
+}
+
+fn remote_keep_alive_kind() -> SettingKind {
+    use SettingKind as K;
+    K::Number(NumberSpec {
+        text: text_access!(remote_session_keep_alive),
+        noun: "Remote keep-alive",
+        unit: Some("milliseconds"),
+        min: crate::config::REMOTE_KEEP_ALIVE_MIN_MS as f64,
+        max: crate::config::REMOTE_KEEP_ALIVE_MAX_MS as f64,
+        integer: true,
+        step: Step::By(10.),
+        empty: Empty::Null(Placeholder::Text("Mosh default")),
+        sentinel: None,
+        default: None,
+        // An empty field means Mosh's own heartbeat, so stepping
+        // up from it starts at the interval the protocol suggests
+        // rather than at the smallest it allows.
+        start: Start::Value(crate::config::REMOTE_KEEP_ALIVE_DEFAULT_MS as f64),
+    })
+}
+
 impl ConfigSetting {
     pub(crate) fn spec(self) -> SettingSpec {
         use SettingKind as K;
         let (key, kind): (&'static [&'static str], SettingKind) = match self {
-            Self::DefaultProfile => (
-                &["default_profile"],
-                K::Custom(CustomSpec {
-                    encode: |form| json!(form.default_profile),
-                    // The name the file's choice resolved to, spelled as the
-                    // profile spells it rather than as the file did.
-                    decode: |form, _, config| {
-                        form.default_profile = config.profiles[config.default_profile].name.clone();
-                    },
-                    // The first profile is the one used when none is named, and
-                    // the file matches profile names regardless of case.
-                    default: |form| match form.profiles.first() {
-                        Some(first)
-                            if first.name.text.eq_ignore_ascii_case(&form.default_profile) =>
-                        {
-                            json!(form.default_profile)
-                        }
-                        Some(first) => json!(first.name.text),
-                        None => Value::Null,
-                    },
-                }),
-            ),
-            Self::NewTabProfile => (
-                &["new_tab_profile"],
-                K::Choice(ChoiceSpec {
-                    options: &[("default", "Default"), ("inherit", "Inherit")],
-                    get: |form| form.new_tab_profile.as_str(),
-                    set: |form, value| {
-                        if let Ok(value) = NewTabProfile::parse(value) {
-                            form.new_tab_profile = value;
-                        }
-                    },
-                    default: "default",
-                }),
-            ),
-            Self::DefaultTabIcon => (
-                &["default_tab_icon"],
-                K::Custom(CustomSpec {
-                    encode: |form| {
-                        form.default_tab_icon.map_or(Value::Null, |icon| {
-                            let name: &'static str = icon.into();
-                            json!(name)
-                        })
-                    },
-                    decode: |form, value, _| {
-                        form.default_tab_icon = match value {
-                            None => Some(IconName::Terminal),
-                            Some(Value::Null) => None,
-                            Some(value) => value
-                                .as_str()
-                                .and_then(|name| name.parse().ok())
-                                .or(Some(IconName::Terminal)),
-                        };
-                    },
-                    default: |_| json!("terminal"),
-                }),
-            ),
+            Self::DefaultProfile => (&["default_profile"], default_profile_kind()),
+            Self::NewTabProfile => (&["new_tab_profile"], new_tab_profile_kind()),
+            Self::DefaultTabIcon => (&["default_tab_icon"], default_tab_icon_kind()),
             Self::WorkingDirectory => (
                 &["working_directory"],
                 K::Text(TextSpec {
@@ -337,112 +546,16 @@ impl ConfigSetting {
                     },
                 }),
             ),
-            Self::WorkingDirectoryScope => (
-                &["working_directory_scope"],
-                K::Choice(ChoiceSpec {
-                    options: &[("none", "None"), ("pane", "Pane"), ("tab", "Tab")],
-                    get: |form| form.working_directory_scope.as_str(),
-                    set: |form, value| {
-                        if let Ok(value) = WorkingDirectoryScope::parse(value) {
-                            form.working_directory_scope = value;
-                        }
-                    },
-                    default: "tab",
-                }),
-            ),
-            Self::LightTheme => (
-                &["theme"],
-                K::Custom(CustomSpec {
-                    encode: |form| json!(form.theme),
-                    decode: |form, value, _| {
-                        form.theme = value
-                            .and_then(Value::as_str)
-                            .unwrap_or(crate::ZETTA_DEFAULT_THEME)
-                            .to_owned();
-                    },
-                    default: |_| json!(crate::ZETTA_DEFAULT_THEME),
-                }),
-            ),
-            Self::DarkTheme => (
-                &["dark_theme"],
-                K::Custom(CustomSpec {
-                    encode: |form| json!(form.dark_theme),
-                    decode: |form, value, _| {
-                        form.dark_theme = value
-                            .and_then(Value::as_str)
-                            .unwrap_or(crate::ZETTA_DEFAULT_DARK_THEME)
-                            .to_owned();
-                    },
-                    default: |_| json!(crate::ZETTA_DEFAULT_DARK_THEME),
-                }),
-            ),
-            Self::FontSize => (
-                &["terminal_font_size"],
-                K::Number(NumberSpec {
-                    text: text_access!(terminal_font_size),
-                    noun: "Font size",
-                    unit: None,
-                    min: f64::from(crate::config::MIN_TERMINAL_FONT_SIZE),
-                    max: f64::from(crate::config::MAX_TERMINAL_FONT_SIZE),
-                    integer: false,
-                    step: Step::By(1.),
-                    // Unset: the theme's buffer size applies, and follows the
-                    // theme. Writing any number back would pin one.
-                    empty: Empty::Unset(Placeholder::ThemeFontSize),
-                    sentinel: None,
-                    default: None,
-                    start: Start::ThemeFontSize,
-                }),
-            ),
-            Self::FontFamily => (
-                &["terminal_font_family"],
-                K::Custom(CustomSpec {
-                    encode: |form| json!(form.terminal_font_family),
-                    decode: |form, value, _| {
-                        form.terminal_font_family = value
-                            .and_then(Value::as_str)
-                            .filter(|family| !family.trim().is_empty())
-                            .unwrap_or(crate::config::DEFAULT_TERMINAL_FONT_FAMILY)
-                            .to_owned();
-                    },
-                    default: |_| json!(crate::config::DEFAULT_TERMINAL_FONT_FAMILY),
-                }),
-            ),
-            Self::ScrollHistory => (
-                &["max_scroll_history_lines"],
-                K::Number(NumberSpec {
-                    text: text_access!(max_scroll_history_lines),
-                    noun: "Scrollback history",
-                    unit: Some("lines"),
-                    min: 0.,
-                    max: terminal::MAX_SCROLL_HISTORY_LINES as f64,
-                    integer: true,
-                    step: Step::Accelerating,
-                    empty: Empty::Invalid,
-                    sentinel: Some(("Max", terminal::MAX_SCROLL_HISTORY_LINES as f64)),
-                    default: Some(terminal::MAX_SCROLL_HISTORY_LINES as f64),
-                    start: Start::Value(0.),
-                }),
-            ),
+            Self::WorkingDirectoryScope => {
+                (&["working_directory_scope"], working_directory_scope_kind())
+            }
+            Self::LightTheme => (&["theme"], light_theme_kind()),
+            Self::DarkTheme => (&["dark_theme"], dark_theme_kind()),
+            Self::FontSize => (&["terminal_font_size"], font_size_kind()),
+            Self::FontFamily => (&["terminal_font_family"], font_family_kind()),
+            Self::ScrollHistory => (&["max_scroll_history_lines"], scroll_history_kind()),
             Self::MouseClipboard => (&["mouse_clipboard"], switch!(mouse_clipboard, default true)),
-            Self::InactivePaneOpacity => (
-                &["inactive_pane_opacity"],
-                K::Custom(CustomSpec {
-                    encode: |form| json!(two_decimals(f64::from(form.inactive_pane_opacity))),
-                    decode: |form, value, _| {
-                        form.inactive_pane_opacity = value
-                            .and_then(Value::as_f64)
-                            .map_or(crate::config::DEFAULT_INACTIVE_PANE_OPACITY, |opacity| {
-                                opacity as f32
-                            });
-                    },
-                    default: |_| {
-                        json!(two_decimals(f64::from(
-                            crate::config::DEFAULT_INACTIVE_PANE_OPACITY
-                        )))
-                    },
-                }),
-            ),
+            Self::InactivePaneOpacity => (&["inactive_pane_opacity"], inactive_pane_opacity_kind()),
             Self::CompactMode => (&["compact_mode"], switch!(compact_mode, default false)),
             Self::ShowPaneSize => (
                 &["hide_pane_size"],
@@ -465,65 +578,16 @@ impl ConfigSetting {
                 &["hide_project_sidebar"],
                 switch!(hide_project_sidebar, default false, shown_inverted true),
             ),
-            Self::PaneControlsPosition => (
-                &["pane_controls_position"],
-                K::Choice(ChoiceSpec {
-                    options: &[("right", "Right"), ("left", "Left")],
-                    get: |form| form.pane_controls_position.as_str(),
-                    set: |form, value| {
-                        if let Ok(value) = PaneControlsPosition::parse(value) {
-                            form.pane_controls_position = value;
-                        }
-                    },
-                    default: "right",
-                }),
-            ),
-            Self::ConsoleBackend => (
-                &["windows_console_backend"],
-                K::Choice(ChoiceSpec {
-                    options: &[("conpty", "ConPTY"), ("console-server", "Console server")],
-                    get: |form| form.console_backend.as_str(),
-                    set: |form, value| {
-                        if let Some(value) = crate::config::ConsoleBackend::parse(value) {
-                            form.console_backend = value;
-                        }
-                    },
-                    default: "console-server",
-                }),
-            ),
+            Self::PaneControlsPosition => {
+                (&["pane_controls_position"], pane_controls_position_kind())
+            }
+            Self::ConsoleBackend => (&["windows_console_backend"], console_backend_kind()),
             Self::ShowPaneControls => (
                 &["pane_controls_hidden_by_default"],
                 switch!(pane_controls_hidden_by_default, default false, shown_inverted true),
             ),
-            Self::SessionRetention => (
-                &["sessions", "retention"],
-                K::Choice(ChoiceSpec {
-                    options: RETENTION_OPTIONS,
-                    get: |form| form.session_retention.as_str(),
-                    set: |form, value| {
-                        if let Ok(value) = SessionRetention::parse(value) {
-                            form.session_retention = value;
-                        }
-                    },
-                    default: "memory",
-                }),
-            ),
-            Self::SessionRingBytes => (
-                &["sessions", "ring_bytes"],
-                K::Number(NumberSpec {
-                    text: text_access!(session_ring_bytes),
-                    noun: "Retained screen size",
-                    unit: Some("bytes"),
-                    min: 4096.,
-                    max: crate::config::MAX_SESSION_RING_BYTES as f64,
-                    integer: true,
-                    step: Step::By(4096.),
-                    empty: Empty::Invalid,
-                    sentinel: None,
-                    default: Some(crate::config::DEFAULT_SESSION_RING_BYTES as f64),
-                    start: Start::Value(crate::config::DEFAULT_SESSION_RING_BYTES as f64),
-                }),
-            ),
+            Self::SessionRetention => (&["sessions", "retention"], session_retention_kind()),
+            Self::SessionRingBytes => (&["sessions", "ring_bytes"], session_ring_bytes_kind()),
             #[cfg(feature = "session-persistence")]
             Self::DiskRecipients => (
                 &["sessions", "persistence", "recipients"],
@@ -545,37 +609,10 @@ impl ConfigSetting {
                 &["sessions", "persistence", "auto_protect"],
                 switch!(session_persistence_auto_protect, default false),
             ),
-            Self::RemoteProtocol => (
-                &["sessions", "remote", "protocol"],
-                K::Choice(ChoiceSpec {
-                    options: &[("ssh", "SSH"), ("zosh", "Zosh")],
-                    get: |form| form.remote_session_protocol.name(),
-                    set: |form, value| {
-                        if let Ok(value) = RemoteSessionProtocol::parse(value) {
-                            form.remote_session_protocol = value;
-                        }
-                    },
-                    default: "ssh",
-                }),
-            ),
+            Self::RemoteProtocol => (&["sessions", "remote", "protocol"], remote_protocol_kind()),
             Self::RemoteKeepAlive => (
                 &["sessions", "remote", "keep_alive_ms"],
-                K::Number(NumberSpec {
-                    text: text_access!(remote_session_keep_alive),
-                    noun: "Remote keep-alive",
-                    unit: Some("milliseconds"),
-                    min: crate::config::REMOTE_KEEP_ALIVE_MIN_MS as f64,
-                    max: crate::config::REMOTE_KEEP_ALIVE_MAX_MS as f64,
-                    integer: true,
-                    step: Step::By(10.),
-                    empty: Empty::Null(Placeholder::Text("Mosh default")),
-                    sentinel: None,
-                    default: None,
-                    // An empty field means Mosh's own heartbeat, so stepping
-                    // up from it starts at the interval the protocol suggests
-                    // rather than at the smallest it allows.
-                    start: Start::Value(crate::config::REMOTE_KEEP_ALIVE_DEFAULT_MS as f64),
-                }),
+                remote_keep_alive_kind(),
             ),
             Self::ForwardAgent => (
                 &["sessions", "remote", "forward_agent"],

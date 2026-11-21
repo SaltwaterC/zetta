@@ -93,15 +93,9 @@ struct GateTicket<'a> {
 
 impl VerificationGate {
     fn enter(&self, session_id: u64) -> GateTicket<'_> {
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut in_flight = self.in_flight.lock().recover_poison();
         while in_flight.contains(&session_id) || in_flight.len() >= MAX_CONCURRENT_CHECKS {
-            in_flight = self
-                .released
-                .wait(in_flight)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            in_flight = self.released.wait(in_flight).recover_poison();
         }
         in_flight.insert(session_id);
         GateTicket {
@@ -116,7 +110,7 @@ impl Drop for GateTicket<'_> {
         self.gate
             .in_flight
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .remove(&self.session_id);
         // All, not one: the waiter that can proceed may be for a different
         // session than the first one woken.
@@ -159,10 +153,7 @@ pub(super) fn check_session_secret(daemon: &Daemon, session_id: u64, secret: &st
         };
         let verified = authentication.verify(secret);
 
-        let mut sessions = daemon
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut sessions = daemon.sessions.lock().recover_poison();
         let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
             return SecretCheck::NotApplicable;
         };
@@ -232,7 +223,7 @@ pub(super) fn resume_refused(
             .verification_gate
             .resume_failures
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .get(&record_id)
             .is_some_and(|failures| Instant::now() < failures.refuse_until)
 }
@@ -273,7 +264,7 @@ pub(super) fn check_resume_secret(
         .verification_gate
         .resume_failures
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .recover_poison();
     if verified {
         failures.remove(&record_id);
         return ResumeCheck::Verified;
@@ -304,10 +295,7 @@ fn verifier_to_check(
     daemon: &Daemon,
     session_id: u64,
 ) -> Result<SessionAuthentication, SecretCheck> {
-    let sessions = daemon
-        .sessions
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sessions = daemon.sessions.lock().recover_poison();
     let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
         return Err(SecretCheck::NotApplicable);
     };
@@ -362,7 +350,7 @@ pub(super) fn prove_session_secret(
     let session_ids: Vec<u64> = daemon
         .sessions
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .iter()
         .filter(|session| {
             session.authentication.is_some()

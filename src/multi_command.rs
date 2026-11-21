@@ -1,3 +1,7 @@
+//! Multi-command templates: expanding `{{ }}` groups into one command per
+//! value, and the bounded filesystem and executable completion offered while
+//! one is typed.
+
 use super::*;
 
 const MAX_FILESYSTEM_COMPLETION_ENTRIES: usize = 16_384;
@@ -376,34 +380,48 @@ fn cancel_completion_task<T>(task: &mut Option<T>) {
     task.take();
 }
 
+/// Shell quoting while a command is scanned byte by byte for `{{ }}` groups.
+#[derive(Default)]
+struct QuoteState {
+    quote: Option<u8>,
+    escaped: bool,
+}
+
+impl QuoteState {
+    /// Advances past `byte`. True when the byte is quoting syntax or is quoted
+    /// or escaped, so it cannot be part of a brace group.
+    fn consume(&mut self, byte: u8) -> bool {
+        if self.escaped {
+            self.escaped = false;
+            return true;
+        }
+        if byte == b'\\' && self.quote != Some(b'\'') {
+            self.escaped = true;
+            return true;
+        }
+        if matches!(byte, b'\'' | b'"') {
+            if self.quote == Some(byte) {
+                self.quote = None;
+            } else if self.quote.is_none() {
+                self.quote = Some(byte);
+            }
+            return true;
+        }
+        self.quote.is_some()
+    }
+}
+
 fn inside_double_brace_group(text: &str, cursor: usize) -> bool {
     let bytes = &text.as_bytes()[..cursor];
     let mut depth = 0usize;
-    let mut quote = None;
-    let mut escaped = false;
+    let mut quoting = QuoteState::default();
     let mut index = 0;
     while index < bytes.len() {
-        let byte = bytes[index];
-        if escaped {
-            escaped = false;
+        if quoting.consume(bytes[index]) {
             index += 1;
             continue;
         }
-        if byte == b'\\' && quote != Some(b'\'') {
-            escaped = true;
-            index += 1;
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            if quote == Some(byte) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(byte);
-            }
-            index += 1;
-            continue;
-        }
-        if quote.is_none() && index + 1 < bytes.len() {
+        if index + 1 < bytes.len() {
             match &bytes[index..index + 2] {
                 b"{{" => {
                     depth += 1;
@@ -878,31 +896,14 @@ fn expand_multi_command_fragment(fragment: &str, limit: usize) -> Result<Vec<Str
 
 fn has_active_double_brace_opener(command: &str) -> bool {
     let bytes = command.as_bytes();
-    let mut quote = None;
-    let mut escaped = false;
+    let mut quoting = QuoteState::default();
     let mut index = 0;
     while index < bytes.len() {
-        let byte = bytes[index];
-        if escaped {
-            escaped = false;
+        if quoting.consume(bytes[index]) {
             index += 1;
             continue;
         }
-        if byte == b'\\' && quote != Some(b'\'') {
-            escaped = true;
-            index += 1;
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            if quote == Some(byte) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(byte);
-            }
-            index += 1;
-            continue;
-        }
-        if quote.is_none() && index + 1 < bytes.len() && &bytes[index..index + 2] == b"{{" {
+        if index + 1 < bytes.len() && &bytes[index..index + 2] == b"{{" {
             return true;
         }
         index += 1;
@@ -925,33 +926,16 @@ fn first_double_brace_list(command: &str) -> Option<(usize, usize, Vec<&str>)> {
     }
 
     let bytes = command.as_bytes();
-    let mut quote = None;
-    let mut escaped = false;
+    let mut quoting = QuoteState::default();
     let mut groups = Vec::<OpenGroup>::new();
     let mut candidate: Option<Candidate> = None;
     let mut index = 0;
     while index < bytes.len() {
-        let byte = bytes[index];
-        if escaped {
-            escaped = false;
+        if quoting.consume(bytes[index]) {
             index += 1;
             continue;
         }
-        if byte == b'\\' && quote != Some(b'\'') {
-            escaped = true;
-            index += 1;
-            continue;
-        }
-        if matches!(byte, b'\'' | b'"') {
-            if quote == Some(byte) {
-                quote = None;
-            } else if quote.is_none() {
-                quote = Some(byte);
-            }
-            index += 1;
-            continue;
-        }
-        if quote.is_some() || index + 1 >= bytes.len() {
+        if index + 1 >= bytes.len() {
             index += 1;
             continue;
         }
@@ -985,7 +969,7 @@ fn first_double_brace_list(command: &str) -> Option<(usize, usize, Vec<&str>)> {
                 index += 2;
             }
             _ => {
-                if byte == b','
+                if bytes[index] == b','
                     && let Some(group) = groups.last_mut()
                 {
                     group.alternatives.push((group.alternative_start, index));

@@ -31,12 +31,7 @@ fn a_name_somebody_already_holds_is_refused_rather_than_joined() {
         start(pane_id, name, FirstInstance::Create, None).is_none(),
         "the daemon joined a pipe somebody else created"
     );
-    assert!(
-        !LISTENERS
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains_key(&pane_id)
-    );
+    assert!(!LISTENERS.lock().recover_poison().contains_key(&pane_id));
 
     let _ = unsafe { CloseHandle(squatter) };
 }
@@ -94,22 +89,16 @@ fn a_handed_over_instance_keeps_the_name_after_the_listener_stops() {
     let name = test_name();
     let old_instance = create_instance(&wide(&name), &user_only_descriptor().unwrap(), true)
         .expect("the old daemon's instance");
-    LISTENERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(
-            pane_id,
-            PaneListener {
-                name: name.clone(),
-                stop: Arc::new(AtomicBool::new(false)),
-            },
-        );
+    LISTENERS.lock().recover_poison().insert(
+        pane_id,
+        PaneListener {
+            name: name.clone(),
+            stop: Arc::new(AtomicBool::new(false)),
+        },
+    );
 
     let handed_over = hand_over(pane_id, unsafe { GetCurrentProcess() });
-    LISTENERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&pane_id);
+    LISTENERS.lock().recover_poison().remove(&pane_id);
     let (handed_name, instance) = handed_over.expect("the pane's name is handed over");
     let instance = instance.expect("an instance is handed over with it");
     assert_eq!(handed_name, name);

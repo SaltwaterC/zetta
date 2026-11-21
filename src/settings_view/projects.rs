@@ -130,6 +130,26 @@ fn render_project_config(
     let current_icon = form.default_tab_icon;
     let actions = project_config_actions(editor, project, colors, handle);
     let tab_icon_trigger = project_tab_icon_trigger(editor, project, colors, handle);
+    // A dropdown that shows the project's value, or that it inherits one.
+    let inherit_dropdown =
+        |label: &str, id: &str, value: &Option<String>, dropdown: SettingsDropdown| {
+            control_row(
+                editor,
+                label,
+                &[SettingsControl::Dropdown(dropdown)],
+                dropdown_field(
+                    id.to_owned(),
+                    value
+                        .clone()
+                        .unwrap_or_else(|| crate::settings_ui::INHERIT_LABEL.to_owned()),
+                    dropdown,
+                    editor,
+                    colors,
+                    handle,
+                ),
+                colors,
+            )
+        };
     let mut content: Vec<AnyElement> = vec![
         actions.into_any_element(),
         div()
@@ -138,39 +158,17 @@ fn render_project_config(
             .text_color(colors.text_muted)
             .child("Every field left unset inherits the application configuration.")
             .into_any_element(),
-        control_row(
-            editor,
+        inherit_dropdown(
             "Light theme",
-            &[SettingsControl::Dropdown(SettingsDropdown::ProjectTheme)],
-            dropdown_field(
-                "project-theme".to_owned(),
-                form.theme
-                    .clone()
-                    .unwrap_or_else(|| crate::settings_ui::INHERIT_LABEL.to_owned()),
-                SettingsDropdown::ProjectTheme,
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
+            "project-theme",
+            &form.theme,
+            SettingsDropdown::ProjectTheme,
         ),
-        control_row(
-            editor,
+        inherit_dropdown(
             "Dark theme",
-            &[SettingsControl::Dropdown(
-                SettingsDropdown::ProjectDarkTheme,
-            )],
-            dropdown_field(
-                "project-dark-theme".to_owned(),
-                form.dark_theme
-                    .clone()
-                    .unwrap_or_else(|| crate::settings_ui::INHERIT_LABEL.to_owned()),
-                SettingsDropdown::ProjectDarkTheme,
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
+            "project-dark-theme",
+            &form.dark_theme,
+            SettingsDropdown::ProjectDarkTheme,
         ),
         control_row(
             editor,
@@ -188,23 +186,11 @@ fn render_project_config(
             ),
             colors,
         ),
-        control_row(
-            editor,
+        inherit_dropdown(
             "Default profile",
-            &[SettingsControl::Dropdown(
-                SettingsDropdown::ProjectDefaultProfile,
-            )],
-            dropdown_field(
-                "project-default-profile".to_owned(),
-                form.default_profile
-                    .clone()
-                    .unwrap_or_else(|| crate::settings_ui::INHERIT_LABEL.to_owned()),
-                SettingsDropdown::ProjectDefaultProfile,
-                editor,
-                colors,
-                handle,
-            ),
-            colors,
+            "project-default-profile",
+            &form.default_profile,
+            SettingsDropdown::ProjectDefaultProfile,
         ),
         control_row(
             editor,

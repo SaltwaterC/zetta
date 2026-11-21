@@ -1,3 +1,6 @@
+//! The tab icon picker: the icon grid with labels cached for searching,
+//! filtering it, and the tab or profile the chosen icon is for.
+
 use std::sync::{Arc, OnceLock};
 
 use strum::IntoEnumIterator as _;

@@ -116,6 +116,16 @@ impl<T> Default for BackgroundSessionRunner<T> {
     }
 }
 
+impl crate::TabsById for BackgroundSessionRunner<crate::Tab> {
+    fn by_id(&self, tab_id: u64) -> Option<&crate::Tab> {
+        self.iter().find(|tab| tab.id == tab_id)
+    }
+
+    fn by_id_mut(&mut self, tab_id: u64) -> Option<&mut crate::Tab> {
+        self.iter_mut().find(|tab| tab.id == tab_id)
+    }
+}
+
 impl<T> BackgroundSessionRunner<T> {
     pub(crate) fn runner_id(&self) -> u64 {
         self.catalog.runner_id()

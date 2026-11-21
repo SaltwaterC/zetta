@@ -127,7 +127,7 @@ impl Zetta {
     /// rather than always, because a second secret would replace the one
     /// whoever knows it is expecting.
     fn existing_protection(&self, tab_id: u64) -> Option<Option<SessionAuthentication>> {
-        let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
+        let tab = self.tabs.by_id(tab_id)?;
         if let Some(authentication) = tab.close_policy.background_authentication().flatten() {
             return Some(Some(authentication.clone()));
         }
@@ -295,7 +295,7 @@ impl Zetta {
         // reached the multiplexer; a tab wrongly marked only refuses control
         // requests it could have taken.
         if authentication.is_some()
-            && let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id)
+            && let Some(tab) = self.tabs.by_id_mut(tab_id)
         {
             tab.protected = true;
         }
@@ -305,7 +305,7 @@ impl Zetta {
             }
             ProtectedSessionAction::KeepRunning => {
                 let sharing_authentication = authentication.clone();
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                if let Some(tab) = self.tabs.by_id_mut(tab_id) {
                     tab.close_policy = TabClosePolicy::Background { authentication };
                 }
                 if !self.no_mux {
@@ -347,7 +347,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let tab_id = tab.id;
@@ -384,7 +384,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(index) = self.tab_index(tab_id) else {
             return;
         };
         if self.refuse_during_session_handover(tab_id, cx) {
@@ -532,7 +532,7 @@ impl Zetta {
         tab_id: u64,
         cx: &App,
     ) -> Option<(u64, BackgroundSessionSummary, serde_json::Value)> {
-        let tab = self.tabs.iter().find(|tab| tab.id == tab_id)?;
+        let tab = self.tabs.by_id(tab_id)?;
         if !tab.shared {
             return None;
         }
@@ -554,7 +554,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let tab_id = tab.id;
@@ -580,7 +580,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(index) = self.tab_index(tab_id) else {
             return;
         };
         self.active_tab = index;

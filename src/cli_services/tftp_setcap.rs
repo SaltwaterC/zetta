@@ -26,7 +26,7 @@ use std::{
 use anyhow::{Context as _, Result};
 
 use super::CliServiceCommand;
-use crate::startup::format_help_table;
+use crate::startup::{format_help_table, set_flag};
 
 /// TFTP's well-known port, which is what the capability is for.
 const TFTP_PORT: u16 = 69;
@@ -79,8 +79,7 @@ pub(crate) fn parse_tftp_setcap_args(
     for argument in args {
         match argument.to_string_lossy().as_ref() {
             "--check" | "-c" => {
-                anyhow::ensure!(!check_only, "--check may only be specified once");
-                check_only = true;
+                set_flag(&mut check_only, "--check")?;
             }
             option if option.starts_with('-') => {
                 anyhow::bail!("unknown tftp setcap option {option:?}")

@@ -1,3 +1,6 @@
+//! The settings dialog's state: its controls and dropdowns, the profile draft
+//! being edited, and preparing what a save writes.
+
 use super::*;
 
 use crate::project_form::ProjectTextField;

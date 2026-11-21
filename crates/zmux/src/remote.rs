@@ -51,6 +51,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use zetta_sync::RecoverPoison as _;
 
 use crate::{
     messages::{ClientId, Envelope, PROTOCOL_VERSION, Request, Response},
@@ -58,6 +59,17 @@ use crate::{
     transport::{Connection, ENDPOINT_VERSION, Endpoint, Stream},
 };
 use anyhow::{Context as _, Result};
+
+mod registry;
+pub use registry::*;
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+use unix::*;
+mod link;
+use link::*;
+mod ssh_args;
+use ssh_args::*;
 
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(unix)]
@@ -192,7 +204,7 @@ fn capture_output(reader: impl Read + Send + 'static) -> CapturedOutput {
             if count == 0 {
                 break;
             }
-            let mut sink = sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut sink = sink.lock().recover_poison();
             let remaining = MAX_SSH_OUTPUT_BYTES.saturating_sub(sink.len());
             sink.extend_from_slice(&buffer[..count.min(remaining)]);
         }
@@ -201,84 +213,9 @@ fn capture_output(reader: impl Read + Send + 'static) -> CapturedOutput {
 }
 
 fn captured_text(captured: &CapturedOutput) -> String {
-    String::from_utf8_lossy(
-        &captured
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    )
-    .trim()
-    .to_owned()
-}
-
-/// The one SSH login a Unix transport makes, shared by everything else.
-///
-/// The child and its private directory are owned by this value: the control
-/// socket and every forward socket live in that directory, so dropping it
-/// ends the login and removes every local path it exposed.
-#[cfg(unix)]
-struct Master {
-    child: Child,
-    directory: tempfile::TempDir,
-    control_path: PathBuf,
-    stderr: CapturedOutput,
-}
-
-#[cfg(unix)]
-impl Master {
-    fn is_alive(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
-    }
-}
-
-#[cfg(unix)]
-impl Drop for Master {
-    fn drop(&mut self) {
-        terminate_child(&mut self.child);
-        // Keep the field explicit: TempDir removes the sockets and directory
-        // after the child is gone, so no stale endpoint survives a failed SSH
-        // startup or a dropped tab.
-        let _ = &self.directory;
-    }
-}
-
-/// One stream-local forward on the master, to the daemon it last reported.
-#[cfg(unix)]
-struct ForwardState {
-    local_socket: PathBuf,
-    /// The `-L` specification, kept so a refresh can cancel it.
-    forwarding: String,
-    endpoint: Endpoint,
-    agent_holder: Option<Child>,
-    verified_at: Option<Instant>,
-}
-
-#[cfg(unix)]
-impl Drop for ForwardState {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.agent_holder.take() {
-            terminate_child(&mut child);
-        }
-    }
-}
-
-/// `zmux proxy-mux` on the far side: a Windows client's one SSH login, or a
-/// session on a Unix client's master when the host is Windows.
-struct BridgeLink {
-    bridge: crate::mux_bridge::MuxBridge,
-    child: Child,
-    stderr: CapturedOutput,
-}
-
-impl BridgeLink {
-    fn is_alive(&mut self) -> bool {
-        self.bridge.is_alive() && matches!(self.child.try_wait(), Ok(None))
-    }
-}
-
-impl Drop for BridgeLink {
-    fn drop(&mut self) {
-        terminate_child(&mut self.child);
-    }
+    String::from_utf8_lossy(&captured.lock().recover_poison())
+        .trim()
+        .to_owned()
 }
 
 struct RemoteState {
@@ -323,87 +260,6 @@ pub struct RemoteTransport {
     target: RemoteTarget,
     ssh_program: PathBuf,
     state: Mutex<RemoteState>,
-}
-
-static KEEP_IDLE: AtomicBool = AtomicBool::new(false);
-
-/// Keeps shared transports for [`LINGER`] after their last user. Without this,
-/// [`RemoteTransport::shared`] hands out a transport of the caller's own, which
-/// is right for a command that exits as soon as it is done.
-pub fn keep_idle_transports() {
-    KEEP_IDLE.store(true, Ordering::Release);
-}
-
-/// Stops keeping idle transports and ends the SSH logins of those nobody is
-/// using. For a process that called [`keep_idle_transports`], on its way out.
-pub fn release_idle_transports() {
-    KEEP_IDLE.store(false, Ordering::Release);
-    let released = std::mem::take(
-        &mut registry()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .entries,
-    );
-    drop(released);
-}
-
-/// Transports handed out by [`RemoteTransport::shared`], with when each was
-/// last seen without a user.
-struct Registry {
-    entries: HashMap<RemoteTarget, SharedEntry>,
-    reaping: bool,
-}
-
-struct SharedEntry {
-    transport: Arc<RemoteTransport>,
-    released_at: Option<Instant>,
-}
-
-fn registry() -> &'static Mutex<Registry> {
-    static REGISTRY: OnceLock<Mutex<Registry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| {
-        Mutex::new(Registry {
-            entries: HashMap::new(),
-            reaping: false,
-        })
-    })
-}
-
-/// Drops shared transports nobody has used for [`LINGER`], and exits once
-/// there are none left to watch.
-fn reap_shared_transports() {
-    loop {
-        thread::sleep(REAPER_INTERVAL);
-        let mut expired = Vec::new();
-        let finished = {
-            let mut registry = registry()
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let now = Instant::now();
-            registry.entries.retain(|_, entry| {
-                if Arc::strong_count(&entry.transport) > 1 {
-                    entry.released_at = None;
-                    return true;
-                }
-                let released = *entry.released_at.get_or_insert(now);
-                if now.duration_since(released) < LINGER {
-                    return true;
-                }
-                expired.push(entry.transport.clone());
-                false
-            });
-            if registry.entries.is_empty() {
-                registry.reaping = false;
-            }
-            !registry.reaping
-        };
-        // Dropping the last handle ends the SSH login, which waits for the
-        // child; do it outside the registry lock.
-        drop(expired);
-        if finished {
-            return;
-        }
-    }
 }
 
 /// Read a published endpoint only when a daemon still owns its socket. A
@@ -461,9 +317,7 @@ impl RemoteTransport {
         if !KEEP_IDLE.load(Ordering::Acquire) {
             return Ok(Arc::new(Self::for_creation(target)?));
         }
-        let mut registry = registry()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut registry = registry().lock().recover_poison();
         let transport = match registry.entries.get_mut(&target) {
             Some(entry) => {
                 entry.released_at = None;
@@ -501,9 +355,7 @@ impl RemoteTransport {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, RemoteState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock().recover_poison()
     }
 
     /// Whether this host is reached through the bridge rather than a forward:
@@ -511,24 +363,6 @@ impl RemoteTransport {
     /// Windows.
     fn uses_link(&self) -> bool {
         cfg!(windows) || remote_host::learned(&self.target) == Some(HostPlatform::Windows)
-    }
-
-    /// Runs `forward` unless the host is known to need the bridge, and runs
-    /// `link` instead when `forward` is what found that out.
-    #[cfg(unix)]
-    fn forward_or_link<T>(
-        &self,
-        state: &mut RemoteState,
-        forward: impl FnOnce(&mut RemoteState) -> Result<T>,
-        link: impl FnOnce(&mut RemoteState) -> Result<T>,
-    ) -> Result<T> {
-        if !self.uses_link() {
-            match forward(state) {
-                Err(error) if error.is::<WindowsHost>() => {}
-                result => return result,
-            }
-        }
-        link(state)
     }
 
     /// Returns the endpoint the daemon is reached at. Over a forward, its
@@ -636,108 +470,6 @@ impl RemoteTransport {
         self.connect_link(&mut state)
     }
 
-    #[cfg(unix)]
-    fn connect_forward(&self, state: &mut RemoteState) -> Result<(Endpoint, Stream)> {
-        for attempt in 0..2 {
-            self.install_forward(state)?;
-            let forward = state
-                .forward
-                .as_ref()
-                .expect("the remote forward was just installed");
-            let local_socket = forward.local_socket.clone();
-            let endpoint = forward.endpoint.clone();
-            let trusted = is_trusted(forward.verified_at);
-            let opened = if trusted {
-                Stream::connect(&local_socket)
-                    .context("connecting to the SSH forward")
-                    .map_err(|error| (error, "connecting to the SSH forward"))
-            } else {
-                self.probed_connection(&endpoint, || {
-                    Stream::connect(&local_socket).context("connecting to the SSH forward")
-                })
-            };
-            match opened {
-                Ok(stream) => {
-                    if !trusted && let Some(forward) = state.forward.as_mut() {
-                        forward.verified_at = Some(Instant::now());
-                    }
-                    return Ok((endpoint, stream));
-                }
-                Err((error, _)) if attempt == 0 => {
-                    let detail = state
-                        .master
-                        .as_ref()
-                        .map(|master| captured_text(&master.stderr))
-                        .unwrap_or_default();
-                    log::debug!(
-                        "remote SSH connection for {} is unusable: {error:#}; {detail}",
-                        self.target.destination()
-                    );
-                    // A master whose TCP connection went quiet still accepts
-                    // locally, so a failure here does not prove only the
-                    // forward is stale. Start the login over, as a fresh SSH
-                    // process always used to.
-                    state.forward = None;
-                    state.master = None;
-                }
-                Err((error, activity)) => {
-                    return Err(error)
-                        .with_context(|| format!("{activity} for {}", self.target.destination()));
-                }
-            }
-        }
-        anyhow::bail!(
-            "could not connect to the SSH forward for {}",
-            self.target.destination()
-        )
-    }
-
-    fn connect_link(&self, state: &mut RemoteState) -> Result<(Endpoint, Stream)> {
-        for attempt in 0..2 {
-            let endpoint = self.install_link(state)?;
-            let trusted = is_trusted(state.link_verified_at);
-            let (opened, stderr) = {
-                let link = state.link.as_ref().expect("the bridge was just installed");
-                let opened = if trusted {
-                    link.bridge
-                        .open()
-                        .map_err(|error| (error, "opening a stream over the zmux bridge"))
-                } else {
-                    self.probed_connection(&endpoint, || link.bridge.open())
-                };
-                (opened, link.stderr.clone())
-            };
-            match opened {
-                Ok(stream) => {
-                    if !trusted {
-                        state.link_verified_at = Some(Instant::now());
-                    }
-                    return Ok((endpoint, stream));
-                }
-                Err((error, _)) if attempt == 0 => {
-                    log::debug!(
-                        "remote zmux bridge for {} is unusable: {error:#}; {}",
-                        self.target.destination(),
-                        captured_text(&stderr)
-                    );
-                    state.link = None;
-                    state.link_endpoint = None;
-                    state.link_verified_at = None;
-                }
-                Err((error, activity)) => {
-                    let detail = ssh_detail(&captured_text(&stderr));
-                    return Err(error).with_context(|| {
-                        format!("{activity} for {}{detail}", self.target.destination())
-                    });
-                }
-            }
-        }
-        anyhow::bail!(
-            "could not connect to the zmux bridge for {}",
-            self.target.destination()
-        )
-    }
-
     /// Probes the daemon on one connection, then opens the one the caller
     /// will use. Failures say which of the two steps failed.
     fn probed_connection(
@@ -795,323 +527,6 @@ impl RemoteTransport {
         }
         #[cfg(windows)]
         self.refresh_link(&mut state)
-    }
-
-    #[cfg(unix)]
-    fn refresh_forward(&self, state: &mut RemoteState) -> Result<Endpoint> {
-        if let Some(forward) = state.forward.take()
-            && let Some(master) = state.master.as_mut()
-            && master.is_alive()
-        {
-            let arguments = forward_request_arguments(
-                &self.target,
-                &master.control_path,
-                "cancel",
-                &forward.forwarding,
-            );
-            if let Err(error) = run_capture(&self.ssh_program, &arguments, FORWARD_TIMEOUT) {
-                log::debug!(
-                    "could not cancel the previous forward for {}: {error:#}",
-                    self.target.destination()
-                );
-            }
-        }
-        self.ensure_endpoint_locked(state)
-    }
-
-    #[cfg(unix)]
-    fn ensure_endpoint_locked(&self, state: &mut RemoteState) -> Result<Endpoint> {
-        self.install_forward(state)?;
-        Ok(state
-            .forward
-            .as_ref()
-            .expect("the forward was just installed")
-            .endpoint
-            .clone())
-    }
-
-    fn refresh_link(&self, state: &mut RemoteState) -> Result<Endpoint> {
-        state.link_endpoint = None;
-        state.link_verified_at = None;
-        self.install_link(state)
-    }
-
-    /// Makes sure the SSH login is up, returning its control socket.
-    #[cfg(unix)]
-    fn ensure_master(&self, state: &mut RemoteState) -> Result<PathBuf> {
-        if let Some(master) = state.master.as_mut() {
-            if master.is_alive() {
-                return Ok(master.control_path.clone());
-            }
-            log::debug!(
-                "the SSH login for {} ended: {}",
-                self.target.destination(),
-                captured_text(&master.stderr)
-            );
-            state.forward = None;
-            state.master = None;
-        }
-        state.login_connection = None;
-        let master = self.start_master()?;
-        let control_path = master.control_path.clone();
-        state.master = Some(master);
-        Ok(control_path)
-    }
-
-    #[cfg(unix)]
-    fn start_master(&self) -> Result<Master> {
-        let directory = tempfile::Builder::new()
-            .prefix("zetta-zmux-")
-            .tempdir()
-            .context("creating the private SSH control directory")?;
-        restrict_directory(directory.path())?;
-        let control_path = directory.path().join("ctl");
-        let mut child = Command::new(&self.ssh_program)
-            .args(master_arguments(&self.target, &control_path))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("starting SSH for {}", self.target.destination))?;
-        let stderr = capture_output(child.stderr.take().context("SSH stderr was not captured")?);
-
-        // OpenSSH listens on a temporary name and links it into place, so the
-        // control path existing means the login is done and the socket is
-        // accepting.
-        let deadline = Instant::now() + ENDPOINT_TIMEOUT;
-        loop {
-            if let Some(status) = child.try_wait().context("checking SSH status")? {
-                // Give the reader a moment to collect what SSH said last.
-                thread::sleep(POLL_INTERVAL);
-                anyhow::bail!(
-                    "SSH exited with {status} while logging in to {}{}",
-                    self.target.destination,
-                    ssh_detail(&captured_text(&stderr))
-                );
-            }
-            if control_path.exists() {
-                return Ok(Master {
-                    child,
-                    directory,
-                    control_path,
-                    stderr,
-                });
-            }
-            if Instant::now() >= deadline {
-                terminate_child(&mut child);
-                anyhow::bail!(
-                    "SSH did not finish logging in to {} within {ENDPOINT_TIMEOUT:?}{}",
-                    self.target.destination,
-                    ssh_detail(&captured_text(&stderr))
-                );
-            }
-            thread::sleep(POLL_INTERVAL);
-        }
-    }
-
-    /// Makes sure a forward to the daemon exists on a live login.
-    #[cfg(unix)]
-    fn install_forward(&self, state: &mut RemoteState) -> Result<()> {
-        if state
-            .master
-            .as_mut()
-            .is_none_or(|master| !master.is_alive())
-        {
-            state.forward = None;
-        }
-        if state.forward.is_none() {
-            let forward = self.start_forward(state)?;
-            state.forward = Some(forward);
-        }
-        Ok(())
-    }
-
-    #[cfg(unix)]
-    fn start_forward(&self, state: &mut RemoteState) -> Result<ForwardState> {
-        static FORWARDS: AtomicU64 = AtomicU64::new(0);
-
-        let control_path = self.ensure_master(state)?;
-        let directory = state
-            .master
-            .as_ref()
-            .expect("the login was just established")
-            .directory
-            .path()
-            .to_owned();
-        let (program, remote_endpoint) = self.query_endpoint(Some(&control_path))?;
-        state.program = Some(program);
-        let local_socket = directory.join(format!(
-            "mux-{}.sock",
-            FORWARDS.fetch_add(1, Ordering::Relaxed)
-        ));
-        let forwarding = format!(
-            "{}:{}",
-            local_socket.display(),
-            remote_endpoint.socket_path.display()
-        );
-        run_capture(
-            &self.ssh_program,
-            &forward_request_arguments(&self.target, &control_path, "forward", &forwarding),
-            FORWARD_TIMEOUT,
-        )
-        .with_context(|| {
-            format!(
-                "adding the stream-local forward for {}",
-                self.target.destination
-            )
-        })?;
-        anyhow::ensure!(
-            local_socket.exists(),
-            "SSH accepted the stream-local forward for {} but did not create it",
-            self.target.destination
-        );
-        let agent_holder = match (
-            self.target.forward_agent,
-            remote_endpoint.socket_path.parent(),
-        ) {
-            (Some(true), Some(remote_directory)) => {
-                let socket = remote_directory.join("forwarded-agent.sock");
-                let child = Command::new(&self.ssh_program)
-                    .args(agent_holder_arguments(&self.target, &control_path, &socket))
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .context("starting SSH agent forwarding")?;
-                Some(child)
-            }
-            _ => None,
-        };
-        Ok(ForwardState {
-            endpoint: Endpoint {
-                version: remote_endpoint.version,
-                protocol_version: remote_endpoint.protocol_version,
-                process_id: remote_endpoint.process_id,
-                socket_path: local_socket.clone(),
-                token: remote_endpoint.token,
-            },
-            local_socket,
-            forwarding,
-            agent_holder,
-            verified_at: None,
-        })
-    }
-
-    /// Makes sure the bridge is up and knows the daemon's endpoint.
-    ///
-    /// A bridge started while no daemon was running reports no endpoint; it
-    /// is asked again over the same link rather than replaced, so waiting
-    /// for a daemon to start costs a round trip per poll, not a login.
-    fn install_link(&self, state: &mut RemoteState) -> Result<Endpoint> {
-        if state.link.as_mut().is_some_and(|link| !link.is_alive()) {
-            if let Some(link) = state.link.as_ref() {
-                log::debug!(
-                    "the zmux bridge for {} ended: {}",
-                    self.target.destination(),
-                    captured_text(&link.stderr)
-                );
-            }
-            state.link = None;
-            state.link_endpoint = None;
-            state.link_verified_at = None;
-        }
-        if state.link.is_none() {
-            state.login_connection = None;
-            let link = self.start_link(state)?;
-            let info = link.bridge.initial_info().clone();
-            state.link = Some(link);
-            self.apply_bridge_info(state, info)?;
-        }
-        if let Some(endpoint) = state.link_endpoint.clone() {
-            return Ok(endpoint);
-        }
-        let info = state
-            .link
-            .as_ref()
-            .expect("the bridge was just installed")
-            .bridge
-            .query_info(ENDPOINT_TIMEOUT)?;
-        self.apply_bridge_info(state, info)
-    }
-
-    fn apply_bridge_info(
-        &self,
-        state: &mut RemoteState,
-        info: crate::mux_bridge::BridgeInfo,
-    ) -> Result<Endpoint> {
-        if let Some(program) = info.program {
-            state.program = Some(program);
-        }
-        let endpoint = info.endpoint.with_context(|| {
-            info.error
-                .unwrap_or_else(|| "the remote host reported no multiplexer".to_owned())
-        })?;
-        validate_endpoint(&endpoint)?;
-        state.link_endpoint = Some(endpoint.clone());
-        state.link_verified_at = None;
-        Ok(endpoint)
-    }
-
-    /// Starts the bridge in the host's dialect. A Windows client may not know
-    /// it yet: the POSIX bridge failing is what finds out.
-    fn start_link(&self, state: &mut RemoteState) -> Result<BridgeLink> {
-        #[cfg(unix)]
-        let control = Some(self.ensure_master(state)?);
-        #[cfg(windows)]
-        let control: Option<PathBuf> = {
-            let _ = state;
-            None
-        };
-        let known = remote_host::learned(&self.target);
-        let platform = known.unwrap_or(HostPlatform::Posix);
-        match self.spawn_link(control.as_deref(), platform) {
-            Ok(link) => {
-                remote_host::learn(&self.target, platform);
-                Ok(link)
-            }
-            Err(error) if known.is_none() => {
-                let error = self.explain_failure(control.as_deref(), error);
-                if !error.is::<WindowsHost>() {
-                    return Err(error);
-                }
-                self.spawn_link(control.as_deref(), HostPlatform::Windows)
-            }
-            Err(error) => Err(error),
-        }
-    }
-
-    fn spawn_link(&self, control: Option<&Path>, platform: HostPlatform) -> Result<BridgeLink> {
-        let mut child = Command::new(&self.ssh_program)
-            .args(bridge_arguments(&self.target, control, platform))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| format!("starting SSH for {}", self.target.destination))?;
-        let (Some(input), Some(output), Some(errors)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
-            terminate_child(&mut child);
-            anyhow::bail!("SSH did not expose its standard streams");
-        };
-        let stderr = capture_output(errors);
-        match crate::mux_bridge::MuxBridge::connect(output, input, ENDPOINT_TIMEOUT) {
-            Ok(bridge) => Ok(BridgeLink {
-                bridge,
-                child,
-                stderr,
-            }),
-            Err(error) => {
-                terminate_child(&mut child);
-                Err(error).with_context(|| {
-                    format!(
-                        "starting the zmux bridge on {}{}",
-                        self.target.destination,
-                        ssh_detail(&captured_text(&stderr))
-                    )
-                })
-            }
-        }
     }
 
     /// The control socket commands should run over, logging in if nothing
@@ -1274,20 +689,6 @@ impl RemoteTransport {
             }
         }
     }
-
-    /// Asks the remote host where `zmux` is and which daemon it is running.
-    /// Fails with [`WindowsHost`] when the host turns out to need the bridge.
-    #[cfg(unix)]
-    fn query_endpoint(&self, control: Option<&Path>) -> Result<(PathBuf, Endpoint)> {
-        let arguments = endpoint_arguments(&self.target, control);
-        match run_capture(&self.ssh_program, &arguments, ENDPOINT_TIMEOUT) {
-            Ok(output) => {
-                remote_host::learn(&self.target, HostPlatform::Posix);
-                parse_endpoint_output(&output.stdout)
-            }
-            Err(error) => Err(self.explain_failure(control, error)),
-        }
-    }
 }
 
 /// The host is Windows, which a forward cannot reach: use the bridge.
@@ -1408,186 +809,6 @@ struct SshOutput {
     stdout: Vec<u8>,
 }
 
-/// A command on the remote host, over `control` when there is one.
-///
-/// A session on a shared connection also drops the forwards the user's
-/// configuration would add: the login that owns them already has them, and a
-/// second request for the same local port would only fail.
-fn command_arguments(
-    target: &RemoteTarget,
-    control: Option<&Path>,
-    remote_command: String,
-) -> Vec<String> {
-    let mut arguments = vec!["-T".to_owned()];
-    if let Some(control) = control {
-        arguments.extend([
-            "-S".to_owned(),
-            control.display().to_string(),
-            "-o".to_owned(),
-            "ControlMaster=no".to_owned(),
-            "-o".to_owned(),
-            "ClearAllForwardings=yes".to_owned(),
-        ]);
-    }
-    push_target_options(&mut arguments, target);
-    arguments.extend([target.destination.clone(), remote_command]);
-    arguments
-}
-
-#[cfg(any(unix, test))]
-fn endpoint_arguments(target: &RemoteTarget, control: Option<&Path>) -> Vec<String> {
-    command_arguments(target, control, remote_endpoint_command())
-}
-
-fn program_arguments(
-    target: &RemoteTarget,
-    control: Option<&Path>,
-    platform: HostPlatform,
-) -> Vec<String> {
-    let command = match platform {
-        HostPlatform::Posix => remote_program_command(),
-        HostPlatform::Windows => remote_host::program_command(),
-    };
-    command_arguments(target, control, command)
-}
-
-fn profiles_arguments(
-    target: &RemoteTarget,
-    control: Option<&Path>,
-    platform: HostPlatform,
-) -> Vec<String> {
-    let command = match platform {
-        HostPlatform::Posix => REMOTE_PROFILES_COMMAND.to_owned(),
-        HostPlatform::Windows => remote_host::profiles_command(),
-    };
-    command_arguments(target, control, command)
-}
-
-fn start_daemon_arguments(
-    target: &RemoteTarget,
-    control: Option<&Path>,
-    program: &Path,
-    platform: HostPlatform,
-) -> Vec<String> {
-    if platform == HostPlatform::Windows {
-        return command_arguments(target, control, remote_host::start_daemon_command(program));
-    }
-    let program = shell_escape_double_quoted(&program.to_string_lossy());
-    let command = format!(
-        r#"/bin/sh -c 'if command -v zmux >/dev/null 2>&1; then nohup "{program}" --daemon >/dev/null 2>&1 </dev/null & exit; fi; exec "${{SHELL:-/bin/sh}}" -lic "nohup \"{program}\" --daemon >/dev/null 2>&1 </dev/null &"'"#
-    );
-    command_arguments(target, control, command)
-}
-
-/// The login every other Unix command shares. It runs nothing itself (`-N`);
-/// `ControlPersist=no` keeps it in the foreground as this process's child, so
-/// it ends when the transport does rather than lingering on its own.
-#[cfg(any(unix, test))]
-fn master_arguments(target: &RemoteTarget, control_path: &Path) -> Vec<String> {
-    let mut arguments = vec![
-        "-T".to_owned(),
-        "-N".to_owned(),
-        "-M".to_owned(),
-        "-S".to_owned(),
-        control_path.display().to_string(),
-        "-o".to_owned(),
-        "ControlPersist=no".to_owned(),
-        "-o".to_owned(),
-        "ExitOnForwardFailure=yes".to_owned(),
-    ];
-    push_target_options(&mut arguments, target);
-    arguments.push(target.destination.clone());
-    arguments
-}
-
-/// Adds (`forward`) or removes (`cancel`) a stream-local forward on the
-/// master. The master does the work locally; nothing crosses the network.
-#[cfg(any(unix, test))]
-fn forward_request_arguments(
-    target: &RemoteTarget,
-    control_path: &Path,
-    operation: &str,
-    forwarding: &str,
-) -> Vec<String> {
-    vec![
-        "-S".to_owned(),
-        control_path.display().to_string(),
-        "-O".to_owned(),
-        operation.to_owned(),
-        "-L".to_owned(),
-        forwarding.to_owned(),
-        target.destination.clone(),
-    ]
-}
-
-/// A session that keeps the forwarded agent linked where daemon-owned shells
-/// look for it. On a shared connection this asks the master to forward the
-/// agent for this session, which it can because it was started with `-A`.
-#[cfg(any(unix, test))]
-fn agent_holder_arguments(
-    target: &RemoteTarget,
-    control_path: &Path,
-    socket: &Path,
-) -> Vec<String> {
-    command_arguments(target, Some(control_path), agent_holder_command(socket))
-}
-
-/// The multiplexed bridge: a Windows client's one login, or a session on a
-/// Unix client's master.
-fn bridge_arguments(
-    target: &RemoteTarget,
-    control: Option<&Path>,
-    platform: HostPlatform,
-) -> Vec<String> {
-    let link_agent = target.forward_agent == Some(true);
-    let command = match platform {
-        HostPlatform::Posix => remote_bridge_command(link_agent),
-        HostPlatform::Windows => remote_host::bridge_command(link_agent),
-    };
-    let mut arguments = command_arguments(target, control, command);
-    if control.is_none() {
-        // A login of its own drops the configured forwards too: the bridge is
-        // the only thing it carries.
-        arguments.splice(
-            1..1,
-            ["-o".to_owned(), "ClearAllForwardings=yes".to_owned()],
-        );
-    }
-    arguments
-}
-
-fn shell_escape_double_quoted(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('$', "\\$")
-        .replace('`', "\\`")
-}
-
-#[cfg(any(unix, test))]
-fn agent_holder_command(socket: &Path) -> String {
-    let socket = shell_quote(&socket.to_string_lossy());
-    let script = format!(
-        "umask 077; link={socket}; temporary=\"$link.$$\"; if test -n \"$SSH_AUTH_SOCK\"; then rm -f \"$temporary\"; ln -s \"$SSH_AUTH_SOCK\" \"$temporary\" && mv -f \"$temporary\" \"$link\"; fi; exec sleep 2147483647"
-    );
-    format!("/bin/sh -c {}", shell_quote(&script))
-}
-
-#[cfg(any(unix, test))]
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn push_target_options(arguments: &mut Vec<String>, target: &RemoteTarget) {
-    if let Some(forward_agent) = target.forward_agent {
-        arguments.push(if forward_agent { "-A" } else { "-a" }.to_owned());
-    }
-    if let Some(port) = target.port {
-        arguments.push("-p".to_owned());
-        arguments.push(port.to_string());
-    }
-}
-
 /// `Child` does not terminate a process when it is dropped. Every failed
 /// connection attempt must therefore explicitly reap SSH, otherwise repeated
 /// endpoint refreshes leave one zombie (or one live SSH process) per retry.
@@ -1687,13 +908,6 @@ fn read_limited(reader: impl Read) -> Result<Vec<u8>> {
         "SSH output exceeded {MAX_SSH_OUTPUT_BYTES} bytes"
     );
     Ok(bytes)
-}
-
-#[cfg(unix)]
-fn restrict_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("restricting SSH control directory {}", path.display()))
 }
 
 #[cfg(test)]

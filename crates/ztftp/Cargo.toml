@@ -20,6 +20,8 @@ tftp-client = []
 tftp-server = ["dep:time"]
 
 [dependencies]
+zetta_cli_help = { path = "../zetta_cli_help" }
+zetta_sync = { path = "../zetta_sync" }
 anyhow = "1"
 time = { version = "0.3", features = ["formatting", "macros"], optional = true }
 

@@ -5,3 +5,10 @@ version = 4
 [[package]]
 name = "wslx"
 version = "0.1.0"
+dependencies = [
+ "zetta_sync",
+]
+
+[[package]]
+name = "zetta_sync"
+version = "0.1.0"

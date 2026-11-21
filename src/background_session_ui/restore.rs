@@ -47,11 +47,7 @@ impl Zetta {
     /// window's own context is the best guess, and detection still corrects it
     /// if the session's shell turns out to be somewhere else.
     fn inherit_project_for_incoming_panes(&mut self, tab: &Tab) {
-        let Some(source) = self
-            .tabs
-            .get(self.active_tab)
-            .map(|active| active.active_pane)
-        else {
+        let Some(source) = self.current_tab().map(|active| active.active_pane) else {
             return;
         };
         inherit_project_for_panes(&mut self.projects, source, tab, ProjectContextPolicy::Local);
@@ -339,8 +335,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if transferred {
-            let tab_id = self.next_tab_id;
-            self.next_tab_id += 1;
+            let tab_id = take_next_id(&mut self.next_tab_id);
             tab.reassign_ids(tab_id, &mut self.next_pane_id);
         }
         self.next_attention_id = self

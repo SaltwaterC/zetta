@@ -1,3 +1,6 @@
+//! Pane overlays: the text and style a pane shows over its terminal, set from
+//! the command line or edited inline, and the style picker that previews them.
+
 use super::*;
 
 impl Zetta {
@@ -7,7 +10,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+        let Some(pane_id) = self.current_tab().map(|tab| tab.active_pane) else {
             return;
         };
         self.begin_pane_overlay_edit(pane_id, window, cx);
@@ -28,7 +31,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let Some(pane) = tab.pane(pane_id) else {
@@ -56,8 +59,8 @@ impl Zetta {
         color: Option<gpui::Hsla>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let tab_id = self.current_tab().map(|tab| tab.id);
+        let Some(tab) = self.current_tab_mut() else {
             return false;
         };
         let active_pane = tab.active_pane;
@@ -77,8 +80,7 @@ impl Zetta {
 
     /// Whether the overlay-style selector is open for the active tab.
     pub(crate) fn is_picking_overlay_style(&self) -> bool {
-        self.tabs
-            .get(self.active_tab)
+        self.current_tab()
             .is_some_and(|tab| tab.overlay_style_picker.is_some())
     }
 
@@ -93,7 +95,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let Some(pane) = tab.pane(pane_id) else {
@@ -118,7 +120,7 @@ impl Zetta {
         };
         let (hue, saturation, value) = overlay_picker_hsv_from_hsla(current_color);
         picker.set_color(hue, saturation, value);
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+        if let Some(tab) = self.current_tab_mut() {
             tab.overlay_style_picker = Some(picker);
         }
         self.overlay_style_focus.focus(window, cx);
@@ -128,8 +130,8 @@ impl Zetta {
     /// Copies the picker's current font size, colour, and opacity to its
     /// pane, previewing the selection live without committing the picker.
     fn preview_overlay_style(&mut self, cx: &mut Context<Self>) {
-        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let tab_id = self.current_tab().map(|tab| tab.id);
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let Some(picker) = tab.overlay_style_picker.as_mut() else {
@@ -157,8 +159,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -173,8 +174,7 @@ impl Zetta {
     /// Cycles the keyboard-adjusted overlay-style section by `delta` steps.
     pub(crate) fn adjust_overlay_picker_section(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -195,8 +195,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -211,8 +210,7 @@ impl Zetta {
     /// Cycles the overlay font size by `delta` sizes.
     pub(crate) fn adjust_overlay_font_size(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(next) = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(|tab| tab.overlay_style_picker.as_ref())
             .map(|picker| picker.font_size.step(delta))
         else {
@@ -232,8 +230,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -259,8 +256,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -273,8 +269,7 @@ impl Zetta {
     /// pane; does not commit the picker.
     pub(crate) fn set_overlay_color_preset_index(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(index) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
             .map(|picker| {
                 picker.set_preset_index(index);
@@ -298,8 +293,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some((index, changed)) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
             .map(|picker| {
                 let changed = picker.move_preset_cursor(row_delta, column_delta);
@@ -317,8 +311,7 @@ impl Zetta {
     /// Rotates the overlay colour's hue by `delta` turns.
     pub(crate) fn adjust_overlay_hue(&mut self, delta: f32, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -330,8 +323,7 @@ impl Zetta {
     /// Moves the overlay colour's saturation by `delta`.
     pub(crate) fn adjust_overlay_saturation(&mut self, delta: f32, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -343,8 +335,7 @@ impl Zetta {
     /// Moves the overlay colour's brightness by `delta`.
     pub(crate) fn adjust_overlay_value(&mut self, delta: f32, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -357,8 +348,7 @@ impl Zetta {
     /// `#rrggbb` colour is complete it is previewed on the pane.
     pub(crate) fn overlay_hex_input(&mut self, ch: char, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -374,8 +364,7 @@ impl Zetta {
     /// applied to the pane.
     pub(crate) fn overlay_hex_backspace(&mut self, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -391,8 +380,7 @@ impl Zetta {
     /// previews it on the affected pane; does not commit the picker.
     pub(crate) fn set_overlay_opacity_percent(&mut self, percent: usize, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -408,8 +396,7 @@ impl Zetta {
     /// Nudges the highlighted overlay opacity by `delta` percentage points.
     pub(crate) fn adjust_overlay_opacity_percent(&mut self, delta: isize, cx: &mut Context<Self>) {
         let Some(picker) = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.overlay_style_picker.as_mut())
         else {
             return;
@@ -429,11 +416,11 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(tab_id) = self.current_tab().map(|tab| tab.id) else {
             return;
         };
         {
-            let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            let Some(tab) = self.current_tab_mut() else {
                 return;
             };
             let Some(picker) = tab.overlay_style_picker.take() else {
@@ -456,11 +443,11 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(tab_id) = self.current_tab().map(|tab| tab.id) else {
             return;
         };
         {
-            let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            let Some(tab) = self.current_tab_mut() else {
                 return;
             };
             let Some(picker) = tab.overlay_style_picker.take() else {
@@ -487,13 +474,13 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let has_text = text.is_some();
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+        if let Some(tab) = self.current_tab_mut() {
             if let Some(pane) = tab.pane_mut(pane_id) {
                 pane.overlay_text = text;
             }
             tab.overlay_buffer = None;
         }
-        if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+        if let Some(tab_id) = self.current_tab().map(|tab| tab.id) {
             self.sync_shared_tab_state(tab_id, cx);
         }
         if has_text {
@@ -515,8 +502,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let picker = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(|tab| tab.overlay_style_picker.as_ref())?;
         let colors = self.window_theme(cx).colors().clone();
         let handle = cx.entity().downgrade();

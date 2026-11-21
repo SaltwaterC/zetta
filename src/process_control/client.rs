@@ -589,13 +589,7 @@ fn send_run_pane_request(endpoint: &ControlEndpoint, request: &PaneCommand) -> R
             ..Default::default()
         },
     )?;
-    if response.status == "ok" {
-        return Ok(true);
-    }
-    if let Some(error) = response.error {
-        anyhow::bail!("{}: {}", error.code, error.message);
-    }
-    Ok(false)
+    accepted_or_error(response)
 }
 
 fn send_run_shell_command_request(
@@ -610,13 +604,7 @@ fn send_run_shell_command_request(
             ..Default::default()
         },
     )?;
-    if response.status == "ok" {
-        return Ok(true);
-    }
-    if let Some(error) = response.error {
-        anyhow::bail!("{}: {}", error.code, error.message);
-    }
-    Ok(false)
+    accepted_or_error(response)
 }
 
 fn send_open_command_request(
@@ -633,13 +621,7 @@ fn send_open_command_request(
             ..Default::default()
         },
     )?;
-    if response.status == "ok" {
-        return Ok(true);
-    }
-    if let Some(error) = response.error {
-        anyhow::bail!("{}: {}", error.code, error.message);
-    }
-    Ok(false)
+    accepted_or_error(response)
 }
 
 fn send_list_pane_labels_request(
@@ -848,6 +830,18 @@ fn send_control_request(
         },
     )?;
     read_message::<ControlResponse>(&mut stream)
+}
+
+/// Whether the target accepted the command, or the error it refused it with.
+/// A refusal with no error attached reads as "not accepted", as before.
+fn accepted_or_error(response: ControlResponse) -> Result<bool> {
+    if response.status == "ok" {
+        return Ok(true);
+    }
+    if let Some(error) = response.error {
+        anyhow::bail!("{}: {}", error.code, error.message);
+    }
+    Ok(false)
 }
 
 /// [`send_control_request`] for the senders that only care whether the target

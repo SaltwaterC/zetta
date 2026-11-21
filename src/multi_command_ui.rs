@@ -1,3 +1,6 @@
+//! The multi-command overlay: typing a command template, completing it, and
+//! launching each expansion as a pane of its own, tiled or stacked.
+
 use super::*;
 
 /// Whether a tab that already has `existing` panes can hold the `expansions`
@@ -117,7 +120,7 @@ impl Zetta {
             .inherits_for_new_pane();
         let working_directory_configured = self.effective_config().working_directory_configured;
         let project = self.active_project_config().cloned();
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         // The command replaces the active pane and tiles the rest beside it.
@@ -148,31 +151,29 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let application_theme = self.application_theme(cx);
-        let fallback = self.project_context_policy(tab_id).theme_fallback(
+        let terminal_theme = match self.pane_theme(
+            tab_id,
             &profile,
             project.as_deref(),
-            &application_theme,
-        );
-        let terminal_theme =
-            match resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx) {
-                Ok(theme) => theme,
-                Err(error) => {
-                    self.set_multi_command_error(
-                        format!("Could not apply the active profile theme: {error:#}"),
-                        cx,
-                    );
-                    return;
-                }
-            };
+            ThemeOverrides {
+                pane: None,
+                tab: tab_theme_override.as_deref(),
+            },
+            cx,
+        ) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.set_multi_command_error(
+                    format!("Could not apply the active profile theme: {error:#}"),
+                    cx,
+                );
+                return;
+            }
+        };
         let terminal_settings = Arc::new(TerminalSpawnSettings::current(cx));
 
         let new_pane_ids = (0..additional)
-            .map(|_| {
-                let pane_id = self.next_pane_id;
-                self.next_pane_id += 1;
-                pane_id
-            })
+            .map(|_| take_next_id(&mut self.next_pane_id))
             .collect::<Vec<_>>();
         for pane_id in &new_pane_ids {
             self.projects.inherit_pane_root(active_pane_id, *pane_id);
@@ -238,7 +239,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let active_pane_id = tab.active_pane;
@@ -280,12 +281,7 @@ impl Zetta {
 
     fn start_ready_multi_command_launches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         while let Some(launch) = self.multi_command_launches.pop_ready() {
-            let pane_exists = self
-                .tabs
-                .iter()
-                .find(|tab| tab.id == launch.tab_id)
-                .and_then(|tab| tab.pane(launch.pane_id))
-                .is_some();
+            let pane_exists = self.tabs.pane_in(launch.tab_id, launch.pane_id).is_some();
             if !pane_exists {
                 self.multi_command_launches.complete();
                 continue;
@@ -336,8 +332,7 @@ impl Zetta {
     ) {
         if event.keystroke.key == "tab" {
             let working_directory = self
-                .tabs
-                .get(self.active_tab)
+                .current_tab()
                 .and_then(Tab::active_pane)
                 .and_then(|pane| pane.working_directory(cx))
                 .or_else(|| self.working_directory.clone())

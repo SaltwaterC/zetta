@@ -1,3 +1,6 @@
+//! Noticing that a pane is inside a linked git worktree Zetta created, from
+//! git's own worktree metadata, so the tab can show the worktree's name.
+
 use super::*;
 use std::{
     fs,
@@ -248,22 +251,16 @@ impl Zetta {
         pane_id: u64,
         cx: &mut Context<Self>,
     ) {
-        let Some((directory, is_wsl)) = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))
-            .and_then(|tab| {
-                let pane = tab.pane(pane_id)?;
-                let is_wsl = is_wsl_shell(&pane.profile.command);
-                // Any report, authenticated or not: the worktree it finds only
-                // names the tab, and detection reads metadata, never runs Git.
-                let directory = (!is_wsl)
-                    .then(|| pane.reported_current_directory(cx))
-                    .flatten();
-                Some((directory, is_wsl))
-            })
-        else {
+        let Some((directory, is_wsl)) = self.any_tab(tab_id).and_then(|tab| {
+            let pane = tab.pane(pane_id)?;
+            let is_wsl = is_wsl_shell(&pane.profile.command);
+            // Any report, authenticated or not: the worktree it finds only
+            // names the tab, and detection reads metadata, never runs Git.
+            let directory = (!is_wsl)
+                .then(|| pane.reported_current_directory(cx))
+                .flatten();
+            Some((directory, is_wsl))
+        }) else {
             return;
         };
         if is_wsl {
@@ -289,29 +286,18 @@ impl Zetta {
         can_clear: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(generation) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .or_else(|| {
-                self.background_sessions
-                    .iter_mut()
-                    .find(|tab| tab.id == tab_id)
-            })
-            .and_then(|tab| {
-                let pane = tab.pane_mut(pane_id)?;
-                if pane.worktree_detection_directory.as_deref() == Some(directory.as_path())
-                    && (!can_clear || pane.worktree_detection_can_clear)
-                {
-                    return None;
-                }
-                pane.worktree_detection_generation =
-                    pane.worktree_detection_generation.wrapping_add(1);
-                pane.worktree_detection_directory = Some(directory.clone());
-                pane.worktree_detection_can_clear = can_clear;
-                Some(pane.worktree_detection_generation)
-            })
-        else {
+        let Some(generation) = self.any_tab_mut(tab_id).and_then(|tab| {
+            let pane = tab.pane_mut(pane_id)?;
+            if pane.worktree_detection_directory.as_deref() == Some(directory.as_path())
+                && (!can_clear || pane.worktree_detection_can_clear)
+            {
+                return None;
+            }
+            pane.worktree_detection_generation = pane.worktree_detection_generation.wrapping_add(1);
+            pane.worktree_detection_directory = Some(directory.clone());
+            pane.worktree_detection_can_clear = can_clear;
+            Some(pane.worktree_detection_generation)
+        }) else {
             return;
         };
 
@@ -338,21 +324,16 @@ impl Zetta {
         result: Result<Option<String>>,
         cx: &mut Context<Self>,
     ) {
-        let current_state = self
-            .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .or_else(|| self.background_sessions.iter().find(|tab| tab.id == tab_id))
-            .and_then(|tab| {
-                let pane = tab.pane(pane_id)?;
-                Some((
-                    pane.worktree_detection_generation,
-                    pane.worktree_detection_directory.as_deref(),
-                    pane.worktree_detection_can_clear,
-                    pane.reported_current_directory(cx)
-                        .map(|(directory, _)| directory),
-                ))
-            });
+        let current_state = self.any_tab(tab_id).and_then(|tab| {
+            let pane = tab.pane(pane_id)?;
+            Some((
+                pane.worktree_detection_generation,
+                pane.worktree_detection_directory.as_deref(),
+                pane.worktree_detection_can_clear,
+                pane.reported_current_directory(cx)
+                    .map(|(directory, _)| directory),
+            ))
+        });
         let Some((current_generation, scheduled_directory, can_clear, current_directory)) =
             current_state
         else {
@@ -380,7 +361,7 @@ impl Zetta {
         }
         let mut changed = false;
         let mut background = false;
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+        if let Some(tab) = self.tabs.by_id_mut(tab_id) {
             let Some(pane) = tab.pane_mut(pane_id) else {
                 return;
             };
@@ -389,11 +370,7 @@ impl Zetta {
             }
             changed = pane.detected_worktree_title != worktree_title;
             pane.detected_worktree_title = worktree_title;
-        } else if let Some(tab) = self
-            .background_sessions
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-        {
+        } else if let Some(tab) = self.background_sessions.by_id_mut(tab_id) {
             let Some(pane) = tab.pane_mut(pane_id) else {
                 return;
             };

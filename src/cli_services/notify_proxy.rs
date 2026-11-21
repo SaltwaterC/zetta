@@ -8,9 +8,10 @@ use std::{ffi::OsString, path::PathBuf, process::Command};
 
 use anyhow::{Context as _, Result};
 
-use super::{
-    NotificationRequest, NotificationTarget, NotificationTimeout, parse_notification_timeout,
-};
+#[cfg(notify_cleanup_enabled)]
+use super::notification_request::NotifyCleanupCommand;
+use super::notification_request::{self, notification_reexec_args};
+use super::{NotificationRequest, NotificationTarget};
 use crate::startup::format_help_table;
 
 pub(crate) fn notify_help() -> String {
@@ -39,95 +40,14 @@ pub(crate) fn notify_help() -> String {
 }
 
 /// Whether `--help` appears as an option: after `--` it is notification text.
-/// Mirrors `zntfy::requests_help`, which is only linked on macOS.
 pub(crate) fn requests_notify_help(arguments: &[OsString]) -> bool {
-    arguments
-        .iter()
-        .take_while(|argument| *argument != "--")
-        .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
+    notification_request::requests_help(arguments)
 }
 
 pub(crate) fn parse_notify_args(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<NotificationRequest> {
-    let mut app_name = None;
-    let mut icon = None;
-    let mut sound = None;
-    let mut timeout = None;
-    let mut positional = Vec::new();
-    let mut arguments = args.into_iter();
-    while let Some(argument) = arguments.next() {
-        match argument.to_string_lossy().as_ref() {
-            "--app-name" | "-a" => {
-                anyhow::ensure!(app_name.is_none(), "--app-name may only be specified once");
-                app_name = Some(
-                    arguments
-                        .next()
-                        .context("--app-name requires a name")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--icon" | "-i" => {
-                anyhow::ensure!(icon.is_none(), "--icon may only be specified once");
-                icon = Some(
-                    arguments
-                        .next()
-                        .context("--icon requires a path")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--sound" | "-s" => {
-                anyhow::ensure!(sound.is_none(), "--sound may only be specified once");
-                sound = Some(
-                    arguments
-                        .next()
-                        .context("--sound requires a name")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--timeout" | "-t" => {
-                anyhow::ensure!(timeout.is_none(), "--timeout may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--timeout requires default, never, or a number of milliseconds")?
-                    .to_string_lossy()
-                    .into_owned();
-                timeout = Some(parse_notification_timeout(&value)?);
-            }
-            "--help" | "-h" => anyhow::bail!("{}", notify_help()),
-            "--" => {
-                positional.extend(&mut arguments);
-                break;
-            }
-            option if option.starts_with('-') => anyhow::bail!("unknown notify option {option:?}"),
-            _ => positional.push(argument),
-        }
-    }
-    anyhow::ensure!(
-        (1..=2).contains(&positional.len()),
-        "usage: zetta notify [OPTIONS] [--] SUMMARY [BODY]; run `zetta notify --help` for details"
-    );
-    let summary = positional[0].to_string_lossy().into_owned();
-    anyhow::ensure!(!summary.is_empty(), "SUMMARY must not be empty");
-    Ok(NotificationRequest {
-        summary,
-        body: positional
-            .get(1)
-            .map(|value| value.to_string_lossy().into_owned()),
-        app_name,
-        icon,
-        sound,
-        timeout,
-    })
-}
-
-#[cfg(notify_cleanup_enabled)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct NotifyCleanupCommand {
-    pub(crate) dry_run: bool,
+    notification_request::parse_notify_args(args, "zetta notify", notify_help)
 }
 
 #[cfg(notify_cleanup_enabled)]
@@ -148,70 +68,13 @@ pub(crate) fn notify_cleanup_help() -> String {
 pub(crate) fn parse_notify_cleanup_args(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<NotifyCleanupCommand> {
-    let mut dry_run = false;
-    for argument in args {
-        match argument.to_string_lossy().as_ref() {
-            "--dry-run" | "-n" => {
-                anyhow::ensure!(!dry_run, "--dry-run may only be specified once");
-                dry_run = true;
-            }
-            "--help" | "-h" => anyhow::bail!("{}", notify_cleanup_help()),
-            option => anyhow::bail!("unknown notify cleanup option {option:?}"),
-        }
-    }
-    Ok(NotifyCleanupCommand { dry_run })
-}
-
-pub(super) fn notification_target_from_environment() -> Option<NotificationTarget> {
-    let process_id = std::env::var("ZETTA_PROCESS_ID")
-        .ok()?
-        .parse::<u32>()
-        .ok()
-        .filter(|id| *id != 0)?;
-    let attention_id = std::env::var("ZETTA_ATTENTION_ID")
-        .ok()?
-        .parse::<u64>()
-        .ok()
-        .filter(|id| *id != 0)?;
-    Some(NotificationTarget {
-        process_id,
-        attention_id,
-    })
+    notification_request::parse_notify_cleanup_args(args, notify_cleanup_help)
 }
 
 fn notification_helper_executable() -> Result<PathBuf> {
     Ok(std::env::current_exe()
         .context("locating the Zetta executable")?
         .with_file_name(format!("zntfy{}", std::env::consts::EXE_SUFFIX)))
-}
-
-pub(crate) fn notification_reexec_args(notification: &NotificationRequest) -> Vec<OsString> {
-    let mut args = Vec::new();
-    for (option, value) in [
-        ("--app-name", notification.app_name.as_deref()),
-        ("--icon", notification.icon.as_deref()),
-        ("--sound", notification.sound.as_deref()),
-    ] {
-        if let Some(value) = value {
-            args.push(OsString::from(option));
-            args.push(OsString::from(value));
-        }
-    }
-    if let Some(timeout) = notification.timeout {
-        args.push(OsString::from("--timeout"));
-        args.push(OsString::from(match timeout {
-            NotificationTimeout::Default => "default".to_owned(),
-            NotificationTimeout::Never => "never".to_owned(),
-            NotificationTimeout::Milliseconds(milliseconds) => milliseconds.to_string(),
-        }));
-    }
-    // The text is often a program's, so it must never be read as an option.
-    args.push(OsString::from("--"));
-    args.push(OsString::from(&notification.summary));
-    if let Some(body) = &notification.body {
-        args.push(OsString::from(body));
-    }
-    args
 }
 
 pub(crate) fn run_notification_proxy(

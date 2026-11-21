@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(unix)]
+use zetta_sync::RecoverPoison as _;
 
 #[test]
 fn an_acknowledged_upgrade_accepts_peer_disconnects_but_not_other_failures() {
@@ -527,7 +529,10 @@ fn a_shared_attachment_preserves_its_advertised_viewport_without_a_size_report()
         let (stream, _) = listener.accept().unwrap();
         let mut connection = Connection::new(stream);
         let (envelope, _) = connection.receive::<Envelope>().unwrap();
-        assert!(matches!(envelope.request, Request::Attach { .. }));
+        assert!(matches!(
+            envelope.request,
+            Request::Attach(crate::messages::AttachRequest { .. })
+        ));
         connection
             .send(&Response::SharedAttached {
                 pane_id: 2,
@@ -734,7 +739,7 @@ fn a_shared_reader_replays_a_replacement_before_framed_events_without_duplicatio
     replacement
         .sizes
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .push((SessionRevision::INITIAL, 70, 20));
     shared.replace_connection_from(&replacement).unwrap();
     // A reconnection is another attach stream, so its advertised viewport is

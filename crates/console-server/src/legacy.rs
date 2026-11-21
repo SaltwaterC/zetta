@@ -1,3 +1,7 @@
+//! Legacy console attributes and their VT form: `SetConsoleTextAttribute`
+//! colors as SGR, and the column bookkeeping for text written without VT
+//! processing.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

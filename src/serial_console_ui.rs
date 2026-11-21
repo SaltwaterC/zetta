@@ -1,3 +1,6 @@
+//! The serial-console prompt: picking a device and a baud rate, checking them,
+//! and opening the pane.
+
 use super::*;
 use crate::overlay_frame::PRIMARY_MODIFIER;
 use crate::text_edit_ui::field_box;
@@ -36,55 +39,62 @@ fn baud_rate_accepts(key: &str) -> bool {
     key.len() == 1 && key.as_bytes()[0].is_ascii_digit()
 }
 
-impl Zetta {
-    pub(crate) fn render_serial_console_overlay(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
-        let prompt = self.serial_console.as_ref()?;
-        let colors = self.window_theme(cx).colors().clone();
-        let handle = cx.entity().downgrade();
+/// What every section of the serial prompt reads.
+#[derive(Clone, Copy)]
+struct SerialPromptView<'a> {
+    prompt: &'a SerialConsolePrompt,
+    colors: &'a ThemeColors,
+    handle: &'a WeakEntity<Zetta>,
+}
 
-        let field_row = |label: &'static str,
-                         value: gpui::AnyElement,
-                         field: SerialField|
-         -> gpui::AnyElement {
-            let selected = prompt.field == field;
-            let click_handle = handle.clone();
-            field_box(("serial-field", field as usize), selected, &colors)
-                .w_full()
-                .px_3()
-                .justify_between()
-                .cursor_pointer()
-                .child(
-                    Label::new(label)
-                        .size(LabelSize::Small)
-                        .color(Color::Custom(colors.text_muted)),
-                )
-                .child(value)
-                .on_click(move |_, _, cx| {
-                    click_handle
-                        .update(cx, |this, cx| {
-                            if let Some(prompt) = this.serial_console.as_mut() {
-                                let cycle = prompt.field == field && field != SerialField::BaudRate;
-                                prompt.field = field;
-                                if cycle {
-                                    prompt.cycle_current_value(false);
-                                }
-                                cx.notify();
+impl SerialPromptView<'_> {
+    fn text_value(self, value: String) -> gpui::AnyElement {
+        Label::new(value)
+            .size(LabelSize::Small)
+            .color(Color::Custom(self.colors.text))
+            .into_any_element()
+    }
+
+    /// One labelled field. Clicking the selected field again cycles its value,
+    /// except the baud rate, which is typed rather than picked.
+    fn field_row(
+        self,
+        label: &'static str,
+        value: gpui::AnyElement,
+        field: SerialField,
+    ) -> gpui::AnyElement {
+        let selected = self.prompt.field == field;
+        let click_handle = self.handle.clone();
+        field_box(("serial-field", field as usize), selected, self.colors)
+            .w_full()
+            .px_3()
+            .justify_between()
+            .cursor_pointer()
+            .child(
+                Label::new(label)
+                    .size(LabelSize::Small)
+                    .color(Color::Custom(self.colors.text_muted)),
+            )
+            .child(value)
+            .on_click(move |_, _, cx| {
+                click_handle
+                    .update(cx, |this, cx| {
+                        if let Some(prompt) = this.serial_console.as_mut() {
+                            let cycle = prompt.field == field && field != SerialField::BaudRate;
+                            prompt.field = field;
+                            if cycle {
+                                prompt.cycle_current_value(false);
                             }
-                        })
-                        .ok();
-                })
-                .into_any_element()
-        };
-        let text_value = |value: String| {
-            Label::new(value)
-                .size(LabelSize::Small)
-                .color(Color::Custom(colors.text))
-                .into_any_element()
-        };
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+            })
+            .into_any_element()
+    }
 
+    fn fields(self) -> gpui::Div {
+        let prompt = self.prompt;
         let device_value = if prompt.loading {
             "Scanning…".to_owned()
         } else {
@@ -99,11 +109,90 @@ impl Zetta {
         // The one field typed into, so it carries the caret every other field
         // in Zetta draws rather than a `|` in its text.
         let baud_value = if prompt.field == SerialField::BaudRate {
-            field_query_run(&prompt.baud_rate, None, &colors)
+            field_query_run(&prompt.baud_rate, None, self.colors)
                 .text_sm()
                 .into_any_element()
         } else {
-            text_value(prompt.baud_rate.text.clone())
+            self.text_value(prompt.baud_rate.text.clone())
+        };
+        let labelled = |label: &str| self.text_value(label.to_owned());
+        v_flex()
+            .gap_2()
+            .child(self.field_row("Device", self.text_value(device_value), SerialField::Device))
+            .child(self.field_row("Baud rate", baud_value, SerialField::BaudRate))
+            .child(self.field_row(
+                "Data bits",
+                labelled(data_bits_label(prompt.data_bits)),
+                SerialField::DataBits,
+            ))
+            .child(self.field_row(
+                "Parity",
+                labelled(parity_label(prompt.parity)),
+                SerialField::Parity,
+            ))
+            .child(self.field_row(
+                "Stop bits",
+                labelled(stop_bits_label(prompt.stop_bits)),
+                SerialField::StopBits,
+            ))
+            .child(self.field_row(
+                "Flow control",
+                labelled(flow_control_label(prompt.flow_control)),
+                SerialField::FlowControl,
+            ))
+    }
+
+    /// Refresh on the left, Cancel and Connect on the right. The prompt used to
+    /// have no buttons at all, which left a mouse user no way to connect or to
+    /// leave.
+    fn buttons(self) -> gpui::Div {
+        let prompt = self.prompt;
+        let can_connect = !prompt.loading && !prompt.devices.is_empty();
+        let refresh_handle = self.handle.clone();
+        let cancel_handle = self.handle.clone();
+        let connect_handle = self.handle.clone();
+        let refresh = DialogButton::new("refresh-serial-devices", "Refresh", ButtonRole::Secondary)
+            .loading(prompt.loading)
+            .render(self.colors, move |_, _, cx| {
+                refresh_handle
+                    .update(cx, |this, cx| this.refresh_serial_devices(cx))
+                    .ok();
+            });
+        let cancel = DialogButton::new("cancel-serial-console", "Cancel", ButtonRole::Secondary)
+            .key_tooltip("Cancel", SurfaceKey::Escape)
+            .render(self.colors, move |_, window, cx| {
+                cancel_handle
+                    .update(cx, |this, cx| this.dismiss_serial_console(window, cx))
+                    .ok();
+            });
+        let connect = DialogButton::new("connect-serial-console", "Connect", ButtonRole::Primary)
+            .enabled(can_connect)
+            .loading(prompt.connecting)
+            .key_tooltip("Connect to the device", SurfaceKey::Enter)
+            .render(self.colors, move |_, _, cx| {
+                connect_handle
+                    .update(cx, |this, cx| this.submit_serial_console(cx))
+                    .ok();
+            });
+        h_flex()
+            .justify_between()
+            .child(refresh)
+            .child(dialog_buttons().child(cancel).child(connect))
+    }
+}
+
+impl Zetta {
+    pub(crate) fn render_serial_console_overlay(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let prompt = self.serial_console.as_ref()?;
+        let colors = self.window_theme(cx).colors().clone();
+        let handle = cx.entity().downgrade();
+        let view = SerialPromptView {
+            prompt,
+            colors: &colors,
+            handle: &handle,
         };
         let hints = if prompt.connecting {
             "Connecting…".into()
@@ -116,10 +205,6 @@ impl Zetta {
                 ("Esc", "cancel"),
             ])
         };
-        let can_connect = !prompt.loading && !prompt.devices.is_empty();
-        let refresh_handle = handle.clone();
-        let cancel_handle = handle.clone();
-        let connect_handle = handle.clone();
         let error_color = self.window_theme(cx).status().error;
 
         let panel = dialog_panel("serial-console", DIALOG_WIDTH_MEDIUM, &colors)
@@ -137,36 +222,7 @@ impl Zetta {
                         .color(Color::Custom(colors.text_muted)),
                     ),
             )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(field_row(
-                        "Device",
-                        text_value(device_value),
-                        SerialField::Device,
-                    ))
-                    .child(field_row("Baud rate", baud_value, SerialField::BaudRate))
-                    .child(field_row(
-                        "Data bits",
-                        text_value(data_bits_label(prompt.data_bits).to_owned()),
-                        SerialField::DataBits,
-                    ))
-                    .child(field_row(
-                        "Parity",
-                        text_value(parity_label(prompt.parity).to_owned()),
-                        SerialField::Parity,
-                    ))
-                    .child(field_row(
-                        "Stop bits",
-                        text_value(stop_bits_label(prompt.stop_bits).to_owned()),
-                        SerialField::StopBits,
-                    ))
-                    .child(field_row(
-                        "Flow control",
-                        text_value(flow_control_label(prompt.flow_control).to_owned()),
-                        SerialField::FlowControl,
-                    )),
-            )
+            .child(view.fields())
             .when_some(prompt.error.as_ref(), |panel, error| {
                 panel.child(crate::ui_messages::error_message(
                     error.clone(),
@@ -174,64 +230,7 @@ impl Zetta {
                 ))
             })
             .child(hint_line(hints, &colors))
-            // The prompt used to have no buttons at all, which left a mouse
-            // user no way to connect or to leave.
-            .child(
-                h_flex()
-                    .justify_between()
-                    .child(
-                        DialogButton::new(
-                            "refresh-serial-devices",
-                            "Refresh",
-                            ButtonRole::Secondary,
-                        )
-                        .loading(prompt.loading)
-                        .render(&colors, move |_, _, cx| {
-                            refresh_handle
-                                .update(cx, |this, cx| this.refresh_serial_devices(cx))
-                                .ok();
-                        }),
-                    )
-                    .child(
-                        dialog_buttons()
-                            .child(
-                                DialogButton::new(
-                                    "cancel-serial-console",
-                                    "Cancel",
-                                    ButtonRole::Secondary,
-                                )
-                                .key_tooltip("Cancel", SurfaceKey::Escape)
-                                .render(
-                                    &colors,
-                                    move |_, window, cx| {
-                                        cancel_handle
-                                            .update(cx, |this, cx| {
-                                                this.dismiss_serial_console(window, cx);
-                                            })
-                                            .ok();
-                                    },
-                                ),
-                            )
-                            .child(
-                                DialogButton::new(
-                                    "connect-serial-console",
-                                    "Connect",
-                                    ButtonRole::Primary,
-                                )
-                                .enabled(can_connect)
-                                .loading(prompt.connecting)
-                                .key_tooltip("Connect to the device", SurfaceKey::Enter)
-                                .render(
-                                    &colors,
-                                    move |_, _, cx| {
-                                        connect_handle
-                                            .update(cx, |this, cx| this.submit_serial_console(cx))
-                                            .ok();
-                                    },
-                                ),
-                            ),
-                    ),
-            );
+            .child(view.buttons());
 
         Some(modal(
             modal_backdrop(
@@ -314,8 +313,7 @@ impl Zetta {
 
     fn submit_serial_console(&mut self, cx: &mut Context<Self>) {
         if self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .is_some_and(|tab| !can_add_panes(tab.panes.len(), 1))
         {
             if let Some(prompt) = self.serial_console.as_mut() {

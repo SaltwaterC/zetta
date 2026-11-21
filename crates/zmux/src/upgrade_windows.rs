@@ -29,7 +29,6 @@ use std::{
 };
 
 use anyhow::{Context as _, Result};
-use serde::{Deserialize, Serialize};
 use windows::Win32::{
     Foundation::{DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
     Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
@@ -37,21 +36,16 @@ use windows::Win32::{
 };
 use zeroize::Zeroizing;
 
-use crate::messages::ClientId;
-
-/// Bumped whenever the private Windows handover changes incompatibly. Optional
-/// defaulted fields keep the version so an older daemon can upgrade into them.
-pub const HANDOVER_VERSION: u32 = 1;
+#[path = "upgrade_handover.rs"]
+mod handover;
+pub use handover::{
+    AttachmentHandover, HANDOVER_VERSION, Handover, PaneHandover, SessionHandover,
+    SharedClientHandover, accepts_handover_version,
+};
 
 /// The largest handover a replacement reads. Retained output is bounded per
 /// pane, so this only stops a broken sender from exhausting memory.
 const MAX_HANDOVER_BYTES: u64 = 1 << 30;
-
-/// Whether this image can adopt a handover of `version`, which is what
-/// `--resume-check` answers.
-pub fn accepts_handover_version(version: u32) -> bool {
-    version == HANDOVER_VERSION
-}
 
 /// Where a replacement reads its handover from.
 #[derive(Debug)]
@@ -66,115 +60,6 @@ pub enum HandoverSource {
 
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const READY_POLL: Duration = Duration::from_millis(10);
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Handover {
-    pub version: u32,
-    pub generation: u64,
-    pub next_session_id: u64,
-    pub next_pane_id: u64,
-    pub retention: crate::retention::Retention,
-    pub sessions: Vec<SessionHandover>,
-    /// Which recipients each client configured, so a session protected after
-    /// the upgrade is still sealed to its own client's choice. Absent from an
-    /// older image; see `server::sealing::adopted_grants`.
-    #[serde(default)]
-    pub recipient_grants: Option<crate::server::RecipientGrants>,
-    /// The daemon's lifetime lock, as a handle the old daemon duplicated into
-    /// this process (see `server/lifetime_lock.rs`). Never serialized: it is
-    /// announced on stdin after the pipe's handle, so a daemon from before the
-    /// lock, which announces only the pipe, still upgrades into this image, and
-    /// this image still upgrades into one that ignores the extra line.
-    #[serde(skip)]
-    pub lifetime_lock: Option<File>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionHandover {
-    pub id: u64,
-    pub summary: crate::protocol::BackgroundSessionSummary,
-    pub state: serde_json::Value,
-    /// Canonical collaboration state, if this session was shared. Optional so
-    /// a handover from before collaboration can still be upgraded safely.
-    ///
-    /// As [`crate::upgrade::SessionHandover::shared_state`] on Unix. The two
-    /// structures describe the same handover and are read by the same code in
-    /// `server/upgrade.rs`, so a field added to one has to be added to the
-    /// other — this one was missed, and Windows has not compiled since.
-    #[serde(default)]
-    pub shared_state: Option<crate::messages::SharedSessionState>,
-    pub keep: bool,
-    pub offered: bool,
-    #[serde(default)]
-    pub owner: Option<u32>,
-    /// As [`crate::upgrade::SessionHandover::owner_started`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_started: Option<u64>,
-    pub verifier: Option<String>,
-    /// As [`crate::upgrade::SessionHandover::key_envelope`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_envelope: Option<String>,
-    pub failed_authentications: u32,
-    pub refuse_for: Option<Duration>,
-    /// The recipients a protected session's records are pinned to. Carried
-    /// because the replacement cannot tell them from whatever the store was
-    /// last configured with; absent from an older image, which pinned nothing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sealed_to: Option<Vec<String>>,
-    pub panes: Vec<PaneHandover>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PaneHandover {
-    pub id: u64,
-    /// The stable identifier of the console held by the zmux-pty host.
-    pub console_id: u64,
-    pub child_pid: u32,
-    pub attachment: AttachmentHandover,
-    #[serde(default)]
-    pub attachment_client_id: Option<ClientId>,
-    pub columns: u16,
-    pub lines: u16,
-    pub exited: bool,
-    pub exit_status: Option<i32>,
-    pub retained: Vec<u8>,
-    /// The pane's `SSH_AUTH_SOCK` pipe, absent where the previous daemon was
-    /// not serving one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_pipe: Option<String>,
-    /// An instance of [`Self::agent_pipe`] the old daemon duplicated into the
-    /// replacement, as a handle value in the replacement's own table. Holding
-    /// it keeps the name from ever being free for another account to create.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_pipe_instance: Option<u64>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "attachment", rename_all = "snake_case")]
-pub enum AttachmentHandover {
-    None,
-    Exclusive { holder: u32 },
-    Revoking { holder: u32 },
-    Shared { clients: Vec<SharedClientHandover> },
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SharedClientHandover {
-    pub process_id: u32,
-    #[serde(default)]
-    pub client_id: crate::messages::ClientId,
-    #[serde(default)]
-    pub stream_only: bool,
-    #[serde(default)]
-    pub columns: Option<u16>,
-    #[serde(default)]
-    pub lines: Option<u16>,
-    pub input_sent: bool,
-}
 
 /// A fresh path for the replacement's readiness marker in the daemon's private
 /// session directory. It holds nothing but the word "ready".

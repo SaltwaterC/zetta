@@ -7,15 +7,12 @@
 //! reconnect` identical, including their routing when the command is run from
 //! inside a Zetta terminal.
 
-use std::{
-    env,
-    path::{Path, PathBuf},
-};
+use std::{env, path::PathBuf};
 
 use anyhow::{Context as _, Result};
+use serde::Serialize;
 #[cfg(feature = "session-persistence")]
 use serde::Serializer;
-use serde::{Deserialize, Serialize};
 use zeroize::Zeroize as _;
 #[cfg(feature = "session-persistence")]
 use zeroize::Zeroizing;
@@ -25,7 +22,10 @@ use crate::{
     catalog::{parse_session_identifier, read_session_catalogs},
     client::Client,
     paths,
-    protocol::{BackgroundSessionCatalog, CONTROL_VERSION},
+    process_control::{
+        self, ControlEndpoint, ControlResponse, control_endpoint_path, running_control_endpoints,
+    },
+    protocol::BackgroundSessionCatalog,
     remote::RemoteTarget,
 };
 
@@ -419,10 +419,7 @@ fn request_reconnect_session(
     attention_id: Option<u64>,
     secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
-    let directory = paths::session_catalog_dir();
-    crate::private_fs::validate_private_dir(&directory)
-        .with_context(|| format!("checking Zetta's session directory {}", directory.display()))?;
-    let endpoint = read_control_endpoint(&control_endpoint_path(process_id), process_id)?;
+    let endpoint = process_control::endpoint_for_process(process_id)?;
     send_reconnect_session_request(&endpoint, runner_id, session_id, attention_id, secret)
 }
 
@@ -449,7 +446,7 @@ fn request_multiplexer_reconnect(
     // A private backgrounded session belongs to its owner. Sharing changes
     // that state; reconnect is the separate action that opens the session.
     if let Some(owner) = scoped_to {
-        endpoints.retain(|endpoint| endpoint.process_id == owner);
+        endpoints.retain(|endpoint| endpoint.process_id() == owner);
         anyhow::ensure!(
             !endpoints.is_empty(),
             "session {session_id} is scoped to Zetta process {owner}, which is not running. Run \
@@ -457,7 +454,7 @@ fn request_multiplexer_reconnect(
              open it from another window."
         );
     } else if let Some((origin_process, _)) = origin {
-        endpoints.retain(|endpoint| endpoint.process_id == origin_process);
+        endpoints.retain(|endpoint| endpoint.process_id() == origin_process);
         anyhow::ensure!(
             !endpoints.is_empty(),
             "the Zetta process that ran `zmux reconnect` is no longer running"
@@ -467,7 +464,7 @@ fn request_multiplexer_reconnect(
     let mut last_error = None;
     for endpoint in &endpoints {
         let attention_id = origin.and_then(|(process_id, attention_id)| {
-            (endpoint.process_id == process_id).then_some(attention_id)
+            (endpoint.process_id() == process_id).then_some(attention_id)
         });
         match send_reconnect_session_request(endpoint, 0, session_id, attention_id, secret.clone())
         {
@@ -526,7 +523,7 @@ pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf])
             return Ok(false);
         }
         if let Some(origin) = reconnect_origin() {
-            endpoints.retain(|endpoint| endpoint.process_id == origin.process_id);
+            endpoints.retain(|endpoint| endpoint.process_id() == origin.process_id);
             anyhow::ensure!(
                 !endpoints.is_empty(),
                 "the Zetta process that ran `zmux resume` is no longer running"
@@ -633,47 +630,19 @@ fn send_resume_disk_session_request(
     secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
     let identity_payload = Zeroizing::new(identity_payload);
-    let mut stream = ControlStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    let mut request = ControlRequest {
-        token: endpoint.token.clone(),
-        command: "resume_disk_session".to_owned(),
-        runner_id: None,
+    let mut request = ReconnectFields {
         session_id: Some(session_id),
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
-        ssh_target: None,
-        ssh_port: None,
-        remote_protocol: None,
-        remote_keep_alive_ms: None,
-        remote_forward_agent: None,
-        icon: None,
-        pane_theme: None,
-        pane_overlay: None,
-        pane_overlay_font_size: None,
-        pane_overlay_opacity: None,
-        pane_overlay_color: None,
-        attention_id: None,
-        attention_summary: None,
-        attention_body: None,
-        tab_name: None,
-        worktree_name: None,
         config_path: Some(identity_payload.as_str().to_owned()),
-        split: None,
-        profile: None,
-        theme: None,
-        pane_request: None,
+        ..ReconnectFields::default()
     };
-    let result = write_message(&mut stream, &request).and_then(|()| {
-        let response = read_message::<ControlResponse>(&mut stream)?;
-        Ok(match response.status.as_str() {
-            "ok" => ReconnectSessionResult::Reconnected,
-            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
-            "session_not_found" => ReconnectSessionResult::SessionNotFound,
-            "session_starting" => ReconnectSessionResult::StillStarting,
-            _ => ReconnectSessionResult::Rejected,
-        })
-    });
+    let result = process_control::request::<ControlResponse>(
+        endpoint,
+        "resume_disk_session",
+        &request,
+        CONTROL_CLIENT_TIMEOUT,
+    )
+    .map(|response| reconnect_result(&response.status));
     if let Some(payload) = request.config_path.as_mut() {
         payload.zeroize();
     }
@@ -691,47 +660,20 @@ fn send_reconnect_session_request(
     attention_id: Option<u64>,
     secret: Option<SessionSecret>,
 ) -> Result<ReconnectSessionResult> {
-    let mut stream = ControlStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(CONTROL_CLIENT_TIMEOUT))?;
-    let mut request = ControlRequest {
-        token: endpoint.token.clone(),
-        command: "reconnect_session".to_owned(),
+    let mut request = ReconnectFields {
         runner_id: Some(runner_id),
         session_id: Some(session_id),
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
-        ssh_target: None,
-        ssh_port: None,
-        remote_protocol: None,
-        remote_keep_alive_ms: None,
-        remote_forward_agent: None,
-        icon: None,
-        pane_theme: None,
-        pane_overlay: None,
-        pane_overlay_font_size: None,
-        pane_overlay_opacity: None,
-        pane_overlay_color: None,
         attention_id,
-        attention_summary: None,
-        attention_body: None,
-        tab_name: None,
-        worktree_name: None,
-        config_path: None,
-        split: None,
-        profile: None,
-        theme: None,
-        pane_request: None,
+        ..ReconnectFields::default()
     };
-    let result = write_message(&mut stream, &request).and_then(|()| {
-        let response = read_message::<ControlResponse>(&mut stream)?;
-        Ok(match response.status.as_str() {
-            "ok" => ReconnectSessionResult::Reconnected,
-            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
-            "session_not_found" => ReconnectSessionResult::SessionNotFound,
-            "session_starting" => ReconnectSessionResult::StillStarting,
-            _ => ReconnectSessionResult::Rejected,
-        })
-    });
+    let result = process_control::request::<ControlResponse>(
+        endpoint,
+        "reconnect_session",
+        &request,
+        CONTROL_CLIENT_TIMEOUT,
+    )
+    .map(|response| reconnect_result(&response.status));
     if let Some(secret) = request.secret.as_mut() {
         use zeroize::Zeroize as _;
         secret.zeroize();
@@ -756,7 +698,7 @@ fn request_remote_attach(
         "no running Zetta window accepted the remote session; open Zetta first"
     );
     if let Some(origin) = origin {
-        endpoints.sort_by_key(|endpoint| endpoint.process_id != origin.process_id);
+        endpoints.sort_by_key(|endpoint| endpoint.process_id() != origin.process_id);
     }
     let mut last_error = None;
     for endpoint in endpoints {
@@ -785,13 +727,7 @@ fn send_remote_attach_request(
     secret: Option<SessionSecret>,
     protocol: &RemoteProtocolRequest,
 ) -> Result<ReconnectSessionResult> {
-    let mut stream = ControlStream::connect(&endpoint.socket_path)?;
-    stream.set_read_timeout(Some(REMOTE_CONTROL_CLIENT_TIMEOUT))?;
-    stream.set_write_timeout(Some(REMOTE_CONTROL_CLIENT_TIMEOUT))?;
-    let mut request = ControlRequest {
-        token: endpoint.token.clone(),
-        command: "open_remote_session".to_owned(),
-        runner_id: None,
+    let mut request = ReconnectFields {
         session_id: Some(session_id),
         secret: secret.as_ref().map(|secret| secret.expose().to_owned()),
         ssh_target: Some(destination.to_owned()),
@@ -799,33 +735,15 @@ fn send_remote_attach_request(
         remote_protocol: protocol.protocol.clone(),
         remote_keep_alive_ms: protocol.keep_alive_ms,
         remote_forward_agent: protocol.forward_agent,
-        icon: None,
-        pane_theme: None,
-        pane_overlay: None,
-        pane_overlay_font_size: None,
-        pane_overlay_opacity: None,
-        pane_overlay_color: None,
-        attention_id: None,
-        attention_summary: None,
-        attention_body: None,
-        tab_name: None,
-        worktree_name: None,
-        config_path: None,
-        split: None,
-        profile: None,
-        theme: None,
-        pane_request: None,
+        ..ReconnectFields::default()
     };
-    let result = write_message(&mut stream, &request).and_then(|()| {
-        let response = read_message::<ControlResponse>(&mut stream)?;
-        Ok(match response.status.as_str() {
-            "ok" => ReconnectSessionResult::Reconnected,
-            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
-            "session_not_found" => ReconnectSessionResult::SessionNotFound,
-            "session_starting" => ReconnectSessionResult::StillStarting,
-            _ => ReconnectSessionResult::Rejected,
-        })
-    });
+    let result = process_control::request::<ControlResponse>(
+        endpoint,
+        "open_remote_session",
+        &request,
+        REMOTE_CONTROL_CLIENT_TIMEOUT,
+    )
+    .map(|response| reconnect_result(&response.status));
     if let Some(secret) = request.secret.as_mut() {
         secret.zeroize();
     }
@@ -833,123 +751,14 @@ fn send_remote_attach_request(
 }
 
 #[cfg(any(unix, windows))]
-fn read_message<T: serde::de::DeserializeOwned>(stream: &mut ControlStream) -> Result<T> {
-    use std::io::{BufRead as _, BufReader, Read as _};
-    use zeroize::Zeroizing;
-
-    let mut bytes = Zeroizing::new(Vec::new());
-    let mut reader = BufReader::new(&mut *stream).take((MAX_CONTROL_MESSAGE_BYTES + 1) as u64);
-    reader.read_until(b'\n', &mut bytes)?;
-    anyhow::ensure!(
-        bytes.last() == Some(&b'\n'),
-        "process control message is too long or incomplete"
-    );
-    bytes.pop();
-    serde_json::from_slice(&bytes).context("parsing process control message")
-}
-
-#[cfg(any(unix, windows))]
-fn write_message(stream: &mut ControlStream, message: &impl serde::Serialize) -> Result<()> {
-    use std::io::Write as _;
-
-    serde_json::to_writer(&mut *stream, message)?;
-    stream.write_all(b"\n")?;
-    Ok(())
-}
-
-fn control_endpoint_path(process_id: u32) -> PathBuf {
-    paths::session_catalog_dir().join(format!("control-{process_id}.json"))
-}
-
-/// The process a `control-PID.json` file name says published it.
-#[cfg(any(unix, windows))]
-fn control_endpoint_process_id(path: &Path) -> Option<u32> {
-    path.file_name()?
-        .to_str()?
-        .strip_prefix("control-")?
-        .strip_suffix(".json")?
-        .parse()
-        .ok()
-}
-
-/// Reads the control endpoint Zetta process `process_id` published at `path`.
-///
-/// The file is trusted on the same terms as the window's own reader in
-/// `process_control/endpoint.rs`: a private regular file of bounded size, from
-/// the process its name says, naming the socket beside it. A request carries a
-/// session secret, so a socket path the file's contents chose is never used.
-#[cfg(any(unix, windows))]
-fn read_control_endpoint(path: &Path, process_id: u32) -> Result<ControlEndpoint> {
-    let contents =
-        crate::private_fs::read_private_file(path, crate::private_fs::MAX_ENDPOINT_BYTES)
-            .with_context(|| {
-                format!("reading Zetta process control endpoint {}", path.display())
-            })?;
-    let endpoint: ControlEndpoint =
-        serde_json::from_slice(&contents).context("parsing Zetta process control endpoint")?;
-    anyhow::ensure!(
-        endpoint.version == CONTROL_VERSION && endpoint.process_id == process_id,
-        "Zetta process control endpoint is outdated"
-    );
-    anyhow::ensure!(
-        endpoint.socket_path == path.with_extension("sock"),
-        "Zetta process control endpoint {} names a socket that is not its own",
-        path.display()
-    );
-    Ok(endpoint)
-}
-
-/// Every control endpoint in `directory` whose process is still running,
-/// after checking that the directory itself is private.
-#[cfg(any(unix, windows))]
-fn running_control_endpoints(directory: &Path) -> std::io::Result<Vec<ControlEndpoint>> {
-    crate::private_fs::validate_private_dir(directory)?;
-    Ok(std::fs::read_dir(directory)?
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let process_id = control_endpoint_process_id(&path)?;
-            read_control_endpoint(&path, process_id).ok()
-        })
-        .filter(|endpoint| process_is_running(endpoint.process_id))
-        .collect())
-}
-
-#[cfg(any(unix, windows))]
-fn process_is_running(process_id: u32) -> bool {
-    crate::process_status::is_running(process_id)
-}
-
-#[cfg(any(unix, windows))]
-type ControlStream = platform::Stream;
-
-#[cfg(any(unix, windows))]
-mod platform {
-    #[cfg(unix)]
-    pub(super) type Stream = std::os::unix::net::UnixStream;
-    #[cfg(windows)]
-    pub(super) type Stream = uds_windows::UnixStream;
-}
-
-#[cfg(any(unix, windows))]
 const CONTROL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 #[cfg(any(unix, windows))]
 const REMOTE_CONTROL_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-#[cfg(any(unix, windows))]
-const MAX_CONTROL_MESSAGE_BYTES: usize = 256 * 1024;
-
-#[derive(Clone, Deserialize)]
-struct ControlEndpoint {
-    version: u32,
-    process_id: u32,
-    socket_path: PathBuf,
-    token: String,
-}
-
-#[derive(Serialize)]
-struct ControlRequest {
-    token: String,
-    command: String,
+/// What a reconnect, resume or remote-attach request carries beside its
+/// command. Fields without `skip_serializing_if` are sent as `null` when unset,
+/// which is what the window has always been sent.
+#[derive(Default, Serialize)]
+struct ReconnectFields {
     runner_id: Option<u64>,
     session_id: Option<u64>,
     secret: Option<String>,
@@ -984,9 +793,14 @@ struct ControlRequest {
     pane_request: Option<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-struct ControlResponse {
-    status: String,
+fn reconnect_result(status: &str) -> ReconnectSessionResult {
+    match status {
+        "ok" => ReconnectSessionResult::Reconnected,
+        "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
+        "session_not_found" => ReconnectSessionResult::SessionNotFound,
+        "session_starting" => ReconnectSessionResult::StillStarting,
+        _ => ReconnectSessionResult::Rejected,
+    }
 }
 
 #[cfg(test)]

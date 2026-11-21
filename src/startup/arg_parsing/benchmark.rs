@@ -24,19 +24,20 @@ pub(super) fn parse_benchmark_subcommand(arguments: &[OsString]) -> Result<Start
                 std::process::exit(0);
             }
             "--size" | "-s" => {
-                anyhow::ensure!(size_mib.is_none(), "--size may only be specified once");
-                let value = benchmark_arguments
-                    .next()
-                    .context("--size requires a number of MiB")?
-                    .to_string_lossy()
-                    .parse::<usize>()
-                    .context("--size must be a whole number of MiB")?;
-                anyhow::ensure!(value > 0, "--size must be greater than zero");
-                anyhow::ensure!(
-                    value.checked_mul(MIB_BYTES).is_some(),
-                    "--size is too large"
-                );
-                size_mib = Some(value);
+                set_once(&mut size_mib, "--size", || {
+                    let value = benchmark_arguments
+                        .next()
+                        .context("--size requires a number of MiB")?
+                        .to_string_lossy()
+                        .parse::<usize>()
+                        .context("--size must be a whole number of MiB")?;
+                    anyhow::ensure!(value > 0, "--size must be greater than zero");
+                    anyhow::ensure!(
+                        value.checked_mul(MIB_BYTES).is_some(),
+                        "--size is too large"
+                    );
+                    Ok(value)
+                })?;
             }
             "--output-type" | "-t" => {
                 let value = benchmark_arguments

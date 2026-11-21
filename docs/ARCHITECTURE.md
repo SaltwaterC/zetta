@@ -54,7 +54,8 @@ layering rule: every module named here is a sibling under `src/`.
   own privacy identity before opening windows or hosting its daemon),
   `startup/workload.rs` (the deterministic
   producer workloads `zetta benchmark` drives the renderer with), and
-  `startup/wsl.rs` (WSL/MSYS2 profile and working-directory integration)
+  `startup/wsl.rs` (WSL/MSYS2 profile and working-directory integration; the
+  Windows-only MSYS2/Cygwin path and tracker half is `startup/wsl/cygwin_msys.rs`)
 
   `run()` dispatches with one exhaustive `match` over `StartupMode`, so a new
   variant has to name the function that handles it rather than silently
@@ -75,7 +76,9 @@ layering rule: every module named here is a sibling under `src/`.
 - `stacked_panes.rs`: command terminals that share a pane's layout region
   (`PaneStack` entry lifecycle)
 - `rename.rs`: tab and pane rename state
-- `terminal_spawn.rs`: terminal process spawning and its event wiring
+- `terminal_spawn.rs`: terminal process spawning and its event wiring; a
+  shared-session spawn is in `terminal_spawn/shared.rs`, a stacked pane's in
+  `terminal_spawn/stacked.rs`
 - `default_terminal.rs`: registering and detecting Zetta as the system's
   default terminal, and the desktop-environment detection that needs
 - `configuration_reload.rs`: settings/keymap file editing, the Reload action,
@@ -95,7 +98,9 @@ layering rule: every module named here is a sibling under `src/`.
   overlays); delegates to `title_bar_render.rs` and `tab_body_render.rs`
 - `title_bar_render.rs`: title bar composition, its menus (application,
   profile, reconnect), the layout predicates the bar shares with the tab bar,
-  and `title_bar_chrome_height`, which sizes the cached chrome boundary
+  and `title_bar_chrome_height`, which sizes the cached chrome boundary; tab
+  geometry, the menus and the session controls are its `tabs.rs`, `menus.rs`
+  and `controls.rs`
 - `tab_bar_render.rs`: the measured tab row, individual tabs, and the bar
   that hosts them. It draws the active tab group's tabs only, so its
   positions index the view rather than `Zetta::tabs`
@@ -167,7 +172,8 @@ layering rule: every module named here is a sibling under `src/`.
 - `script_open_ui.rs` (macOS): the confirmation before running a shell script
   Finder or `open` asked Zetta to open
 - `session_auth_ui.rs`: the session passphrase/secret prompt, its field model,
-  and the protect/reconnect flows that submit it
+  and the protect/reconnect flows that submit it; unlocking a sealed session,
+  submitting, and drawing are its `sealed.rs`, `submit.rs` and `render.rs`
 - `remote_session_ui.rs`: the remote-session picker; SSH discovery is kept off
   the render path deliberately, see the module docs
 - `serial_console_ui.rs`, `http_server_ui.rs`, `tftp_server_ui.rs`: the
@@ -195,6 +201,9 @@ layering rule: every module named here is a sibling under `src/`.
   *editor* and reached the `fs` crate, which dragged Zed's git and SSH-askpass
   layers into a terminal emulator. Zetta uses four entry points from it and
   owns them here instead; the file format is unchanged
+- `key_passthrough.rs`: one-shot keyboard routing to the focused terminal,
+  ahead of action dispatch, so an armed or held key reaches the terminal
+  instead of a Zetta binding
 - `project_form.rs`: the typed form for a project's `.zetta/config.json` and its
   serialization; every field is optional because the file is an overlay
 - `settings_ui.rs`: settings state and event handling; a module directory —
@@ -259,7 +268,8 @@ keyboard and the mouse came to do different things; do not add one.
   is written against, and converting back to the plain command that crosses a
   machine boundary. The detection itself — Homebrew prefixes, the MSYS2 and
   Cygwin installation roots, WSL distributions, `PATH` resolution — lives in
-  `crates/zetta_profiles`, because the daemon resolves the same names
+  `crates/zetta_profiles`, because the daemon resolves the same names.
+  `config/pane_split.rs` holds the pane split templates and their parsing
 - `project.rs`: `ProjectConfig`, `ProjectRegistry`, and project field
   validation
 - `project_trust.rs`: project command fingerprints and the
@@ -271,6 +281,7 @@ keyboard and the mouse came to do different things; do not add one.
   keymap, project files, the registry and the desktop-entry edits
 - `project_context.rs`: the active project for a window, project detection for
   a directory, and the theme/profile resolution that follows from it
+  (`project_context/state.rs` and `project_context/themes.rs` respectively)
 - `tab_groups.rs`: `TabGroup` (Main, a project, or one of its worktrees),
   which tabs the view shows, the selection rules for closing and switching
   groups, and placing a tab that arrives from a session only when all its pane
@@ -278,6 +289,7 @@ keyboard and the mouse came to do different things; do not add one.
   why
 - `sidebar.rs`: the sidebar's state, its per-frame entry list, and the
   tab-group palette commands
+- `tab_group_ui.rs`: the dialog that names a new tab group or renames one
 - `project_cli.rs`: `zetta project` argument parsing and its non-open commands
 - `project_commands.rs`: registered project commands and their name/command/
   environment validation
@@ -365,12 +377,12 @@ keyboard and the mouse came to do different things; do not add one.
 
 ## Remote sessions and image paste
 
-- `mosh.rs`: the `zetta mosh` compatibility proxy and the Mosh launcher's
-  option table. The full Mosh command belongs to the bundled `zosh`
-  executable, and this process is a transparent handoff so `zosh` sees the same
-  option spelling, target and remote command the user supplied. `parse_mosh_args`
-  lives here rather than beside the other subcommand parsers because two callers
-  need it and only one of them is a command line
+- `mosh.rs`: the `zetta mosh` compatibility proxy. The full Mosh command
+  belongs to the bundled `zosh` executable, and this process is a transparent
+  handoff so `zosh` sees the same option spelling, target and remote command
+  the user supplied. Arguments are checked with `zosh::parse_launcher_args`,
+  which image paste also uses to read a running `zosh`'s command line; there is
+  no second copy of the launcher's option table
 - `ssh_image_paste.rs`: image paste for a foreground OpenSSH or Mosh process.
   A remote application cannot read the desktop clipboard, so this sends a PNG
   through a second, batch-mode SSH connection and pastes the resulting remote
@@ -417,8 +429,9 @@ without that feature, so no call site needs a feature predicate:
   parser with Zetta and keeps `arboard` behind a binary-only backend feature.
   Its `protocol.rs`, `host.rs`, and `remote.rs` own the private OSC transport,
   displaying-window request state, and standalone helper TTY transport.
-  When enabled, the `notify` arm proxies to sibling `zntfy`; its backend and
-  built-in sounds live in `crates/zntfy`
+  When enabled, the `notify` arm proxies to sibling `zntfy` through
+  `cli_services/notify_proxy.rs`; its backend and built-in sounds live in
+  `crates/zntfy`
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
   (HTTP/TFTP server log panes, the serial console)
 - `http_server.rs`: proxy to sibling `zhttp` and engine re-exports for the HTTP
@@ -437,8 +450,15 @@ without that feature, so no call site needs a feature predicate:
   handover; gated to Windows at its `mod` declaration
 - `linux_desktop.rs`: the managed user desktop entry and its profile actions;
   only the executable the entry launches may rewrite it
-- `shell_integration.rs`: the shell integration scripts, their placeholder
-  substitution (including the completion trees), and shell detection
+- `shell_integration.rs`: the shell integration scripts, their feature
+  sections and completion-tree placeholders, and shell detection; where
+  the Windows shells keep their startup files is `shell_integration/windows_shells.rs`
+- `shell_integration/command_tree.rs`: what a command tree is and how it is
+  written out per shell beside a hand-written engine per shell
+  (`command_tree/engine.*`); every completed command — `zetta` and each of its
+  shortcuts — is described once in `command_tree/trees.rs`, which also
+  generates the commands the startup scripts' lazy loaders register for; the
+  templates keep only the helpers a value needs a shell for
 - `worktree_detection.rs`: linked-worktree detection for a pane's shell
   directory
 

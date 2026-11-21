@@ -8,6 +8,13 @@
 
 use super::*;
 
+mod handover;
+pub(super) use handover::*;
+mod relay;
+pub(super) use relay::*;
+mod exclusive;
+pub(super) use exclusive::*;
+
 /// Who is attaching, carried through the phases of one attach.
 #[derive(Clone)]
 pub(super) struct Attacher {
@@ -38,13 +45,24 @@ impl Attacher {
 
 pub(super) fn attach(
     daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: Option<u64>,
-    secret: Option<crate::auth::SessionSecret>,
-    attacher: Attacher,
-    force_shared: bool,
+    request: crate::messages::AttachRequest,
+    caller: Caller<'_>,
     connection: &mut Connection,
 ) -> Result<()> {
+    let crate::messages::AttachRequest {
+        session_id,
+        pane_id,
+        secret,
+        force_shared,
+        relaying_for,
+    } = request;
+    let attacher = Attacher {
+        client_process_id: caller.client_process_id,
+        peer_process_id: caller.peer_process_id,
+        client_id: caller.client_id.clone(),
+        stream_only: caller.stream_only,
+        relaying_for,
+    };
     let client_process_id = attacher.client_process_id;
     let stream_only = attacher.stream_only;
     let mut sessions = match authorize_attach(daemon, session_id, secret.as_deref(), &attacher) {
@@ -210,10 +228,7 @@ fn authorize_attach<'a>(
     let verified_process_id = attacher.verified_process_id();
     let mut proof = None;
     loop {
-        let mut sessions = daemon
-            .sessions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut sessions = daemon.sessions.lock().recover_poison();
         let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
             return Err(Box::new(Response::Error {
                 message: format!("session {session_id} does not exist"),
@@ -294,241 +309,6 @@ fn out_of_scope_refusal(session_id: u64, owner: Option<ProcessIdentity>) -> Resp
     }
 }
 
-/// Whether `client_process_id` is the holder answering a handover the daemon
-/// itself asked for.
-///
-/// That is not a new grant of access: that client is displaying the pane right
-/// now, and was sent `Event::Revoke` a moment ago. Challenging it would make a
-/// protected session impossible to share — the handover carries no secret,
-/// because the user typed it into whichever *other* window is joining.
-///
-/// A process that still holds one of the session's panes is let through for the
-/// same reason. The session is on its screen, not in the background, which is
-/// what the secret protects; and a window whose detach the daemon refused has
-/// already stopped reading its panes, and has to take them back without a
-/// secret it never kept. The owner of a backgrounded session is deliberately
-/// not exempt: reconnecting is exactly what the secret is asked for.
-///
-/// Only ever asked about a process the transport vouched for — see
-/// [`Attacher::verified_process_id`]. Asked about a claimed one, it let any
-/// process naming the holder join a protected session's relay while a
-/// handover was open.
-fn answers_handover(session: &Session, client_process_id: u32) -> bool {
-    session.panes.iter().any(|pane| {
-        // Either half of the handshake: the revoke has been sent and not
-        // answered yet, or it has been answered — which is what
-        // `handed_over` records — and this is the answering client coming
-        // back to join. Any pane of the session counts, because the client
-        // that is mid-handover on one is the client displaying them all.
-        matches!(pane.attachment, Attachment::Revoking { holder } | Attachment::Granting { holder } if holder == client_process_id)
-            || pane
-                .handed_over
-                .as_ref()
-                .is_some_and(|handover| handover.client_process_id == client_process_id)
-    })
-}
-
-/// Sends an error once `sessions` has been released.
-///
-/// A client's connection may be an SSH forward that has stopped reading, and a
-/// write that blocks under the sessions lock blocks every pane the daemon holds.
-fn respond_unlocked(
-    sessions: MutexGuard<'_, Vec<Session>>,
-    connection: &mut Connection,
-    message: String,
-) -> Result<()> {
-    drop(sessions);
-    connection.send(&Response::Error { message })
-}
-
-/// Waits for the client holding pane `pane_id` to hand it over, then attaches
-/// this client to whatever the pane has become.
-///
-/// Entered with the pane's revoke already sent and this request counted in its
-/// `handover_waiters`; every way out releases that count.
-fn await_handover(
-    daemon: &Arc<Daemon>,
-    mut sessions: MutexGuard<'_, Vec<Session>>,
-    session_id: u64,
-    pane_id: u64,
-    attacher: &Attacher,
-    connection: &mut Connection,
-) -> Result<()> {
-    let Attacher {
-        client_process_id,
-        ref client_id,
-        stream_only,
-        ..
-    } = *attacher;
-    let verified_process_id = attacher.verified_process_id();
-    let deadline = Instant::now() + REVOKE_TIMEOUT;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            if let Some(session) = sessions.iter_mut().find(|session| session.id == session_id)
-                && let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id)
-            {
-                finish_handover_waiter(pane, true);
-            }
-            return respond_unlocked(
-                sessions,
-                connection,
-                format!(
-                    "the session's current viewer did not hand over pane {pane_id} within \
-                     {REVOKE_TIMEOUT:?}"
-                ),
-            );
-        }
-        let (guard, _) = match daemon.sessions_condvar.wait_timeout(sessions, remaining) {
-            Ok(result) => result,
-            // A poisoned lock still hands the guard back; nothing panicked
-            // out of the wait that a re-lock would fix.
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        sessions = guard;
-        let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-            return respond_unlocked(
-                sessions,
-                connection,
-                format!("session {session_id} does not exist"),
-            );
-        };
-        // Re-read rather than reusing what was read before the revoke. The
-        // holder of a *live* session republishes its state as part of answering
-        // the revoke, because a session shared while it is on screen goes on
-        // changing — panes are split and closed, tabs are renamed — long after it
-        // was first offered. Using the stale copy handed a joining client the
-        // layout as of whenever sharing was switched on.
-        let state = session.state.clone();
-        let summary = Box::new(catalog_summary(session));
-        let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-            return respond_unlocked(
-                sessions,
-                connection,
-                format!("session {session_id} has no pane {pane_id}"),
-            );
-        };
-        if pane.exited {
-            finish_handover_waiter(pane, true);
-            return respond_unlocked(
-                sessions,
-                connection,
-                format!("session {session_id} pane {pane_id} has ended"),
-            );
-        }
-        match pane.attachment {
-            Attachment::Shared(_) => {
-                finish_handover_waiter(pane, false);
-                return attach_shared(
-                    daemon,
-                    sessions,
-                    session_id,
-                    pane_id,
-                    attacher.clone(),
-                    state,
-                    summary,
-                    connection,
-                    None,
-                );
-            }
-            Attachment::None => {
-                finish_handover_waiter(pane, true);
-                if stream_only {
-                    pane.attachment = Attachment::Shared(Vec::new());
-                    pane.attachment_client_id = None;
-                    return attach_shared(
-                        daemon,
-                        sessions,
-                        session_id,
-                        pane_id,
-                        attacher.clone(),
-                        state,
-                        summary,
-                        connection,
-                        None,
-                    );
-                }
-                return attach_exclusive(
-                    daemon,
-                    sessions,
-                    session_id,
-                    pane_id,
-                    client_process_id,
-                    client_id,
-                    state,
-                    summary,
-                    connection,
-                );
-            }
-            Attachment::Exclusive(holder) => {
-                // Reachable, and it used to panic here. A revoking pane whose
-                // holder died is reset to unheld — by this loop or by the
-                // liveness sweep — and whichever waiter wakes first takes it
-                // exclusively, so a second waiter finds it exclusive again. That
-                // is another client holding the pane, which is exactly the case
-                // `attach` already handles from the top, so start over rather
-                // than treating it as impossible.
-                if !stream_only && Some(holder) == verified_process_id {
-                    finish_handover_waiter(pane, true);
-                    return attach_exclusive(
-                        daemon,
-                        sessions,
-                        session_id,
-                        pane_id,
-                        client_process_id,
-                        client_id,
-                        state,
-                        summary,
-                        connection,
-                    );
-                }
-                pane.attachment = Attachment::Revoking { holder };
-                let revoke = Event::Revoke {
-                    session_id,
-                    pane_id,
-                };
-                if let Some(subscriber) = subscriber_relay_for_process(daemon, holder) {
-                    enqueue_subscriber_event(daemon, &subscriber, &revoke);
-                }
-            }
-            // A grant whose taker died leaves nobody holding the descriptor: the
-            // reply either never went out or went to a process that has gone.
-            Attachment::Granting { holder } | Attachment::Revoking { holder }
-                if !crate::process_status::is_running(holder) =>
-            {
-                pane.attachment = Attachment::None;
-                pane.attachment_client_id = None;
-                finish_handover_waiter(pane, true);
-                return attach_exclusive(
-                    daemon,
-                    sessions,
-                    session_id,
-                    pane_id,
-                    client_process_id,
-                    client_id,
-                    state,
-                    summary,
-                    connection,
-                );
-            }
-            Attachment::Revoking { .. } | Attachment::Granting { .. } => {}
-        }
-    }
-}
-
-/// Releases one attach request waiting for a revoke.
-pub(super) fn finish_handover_waiter(pane: &mut Pane, collapse_empty_shared: bool) {
-    pane.handover_waiters = pane.handover_waiters.saturating_sub(1);
-    if collapse_empty_shared
-        && pane.handover_waiters == 0
-        && matches!(&pane.attachment, Attachment::Shared(clients) if clients.is_empty())
-    {
-        pane.attachment = Attachment::None;
-        pane.attachment_client_id = None;
-        pane.handed_over = None;
-    }
-}
-
 /// An exclusive attach: the client takes the descriptor and reads it directly.
 ///
 /// The daemon stops reading before handing the descriptor over, and sends
@@ -604,13 +384,7 @@ pub(super) fn attach_exclusive(
         },
         &handles.attachments,
     ) {
-        release_failed_handover(
-            daemon,
-            daemon.sessions.lock().unwrap(),
-            session_id,
-            pane_id,
-            client_id,
-        );
+        release_failed_handover(daemon, daemon.sessions(), session_id, pane_id, client_id);
         return Err(error);
     }
     if !replay.is_empty() {
@@ -785,720 +559,6 @@ pub(super) fn attach_shared(
     result
 }
 
-/// One shared client's relay: the queue its frames go on, and how far behind it
-/// is in bytes.
-///
-/// The backlog is measured in bytes rather than frames, because a frame count
-/// punishes a viewer for the *shape* of the output instead of how far behind it
-/// has fallen — a burst arriving as many small frames hit a frame limit while
-/// barely a kilobyte outstanding, and the viewer was dropped for being slow for
-/// an instant.
-/// Hands out [`SharedClient::attachment`] identities. Process-wide and never
-/// reused, so no two attachments the daemon has served compare equal.
-fn next_shared_attachment() -> u64 {
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_add(1, Ordering::Relaxed)
-}
-
-pub(super) struct Relay {
-    pub(super) frames: async_channel::Sender<Arc<[u8]>>,
-    /// Set when the daemon gives up on this viewer rather than the viewer
-    /// leaving. Read by the relay thread once its queue closes, to decide how
-    /// the stream ends: see [`relay_loop`].
-    pub(super) evicted: Arc<AtomicBool>,
-    pub(super) queued: Arc<AtomicUsize>,
-    /// Bytes this relay has actually written, ever increasing.
-    ///
-    /// This, and not the size of the backlog, is what says whether a viewer is
-    /// making progress. A viewer slower than the program has a backlog that *grows*
-    /// while it writes steadily, so "the backlog shrank" reads as no progress and
-    /// evicted exactly the viewer that had to be waited for; a viewer whose socket
-    /// is full writes nothing at all, which this shows plainly.
-    pub(super) written: Arc<AtomicUsize>,
-}
-
-impl Relay {
-    /// Marks this viewer as dropped by the daemon, before its queue is closed
-    /// by removing it from the shared set.
-    pub(super) fn evict(&self) {
-        self.evicted.store(true, Ordering::Release);
-    }
-}
-
-/// How far behind a viewer may fall before its pane stops being read.
-///
-/// Small on purpose: a backpressure threshold, not a buffer budget. Past it the
-/// pane is left unread so the *program* waits, which is the rate limit a client
-/// reading its own pty provides for free.
-pub(super) const RELAY_BACKPRESSURE_BYTES: usize = 512 * 1024;
-
-/// How long a viewer may accept nothing at all before the daemon gives up on it.
-///
-/// Deliberately far longer than anything a working window does. This is not a
-/// performance policy — a viewer that is merely slow is *waited for*, which is what
-/// backpressure is — it is a last resort for a window that has hung with a pane
-/// still attached, so one frozen window cannot hold a session for ever.
-///
-/// It was one second, and that was a bad mistake: a window laying out a full-screen
-/// redraw goes that long without draining its socket as a matter of course, so the
-/// daemon dropped viewers that were working perfectly well and left them frozen
-/// mid-repaint. Slowness is normal; not reading for half a minute is not.
-pub(super) const RELAY_STALL_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Starts a shared client's relay: a queue, and a thread that writes it.
-///
-/// The thread owns a clone of the client's connection, so the serve loop keeps
-/// reading input on the original while output goes out on the clone.
-pub(super) fn spawn_relay(
-    connection: &Connection,
-    session_id: u64,
-    pane_id: u64,
-    client_process_id: u32,
-    drain: std::sync::Weak<Daemon>,
-) -> Result<Relay> {
-    let writer = connection.try_clone()?;
-    #[cfg(unix)]
-    {
-        writer
-            .stream()
-            .set_write_timeout(Some(RELAY_WRITE_TIMEOUT))
-            .ok();
-    }
-    // Unbounded, with `queued` as the only bound: the limit that matters is how
-    // many bytes are outstanding, and a channel can only count entries.
-    let (sender, frames) = async_channel::unbounded::<Arc<[u8]>>();
-    let queued = Arc::new(AtomicUsize::new(0));
-    let written = Arc::new(AtomicUsize::new(0));
-    let evicted = Arc::new(AtomicBool::new(false));
-    let (loop_queued, loop_written, loop_evicted) =
-        (queued.clone(), written.clone(), evicted.clone());
-    std::thread::Builder::new()
-        .name("zmux relay".to_owned())
-        .spawn(move || {
-            relay_loop(
-                writer,
-                frames,
-                RelayProgress {
-                    queued: loop_queued,
-                    written: loop_written,
-                    evicted: loop_evicted,
-                    drain,
-                },
-                session_id,
-                pane_id,
-            )
-        })
-        .with_context(|| format!("starting the relay for client {client_process_id}"))?;
-    Ok(Relay {
-        frames: sender,
-        evicted,
-        queued,
-        written,
-    })
-}
-
-/// The relay thread's half of the counters in [`Relay`].
-pub(super) struct RelayProgress {
-    drain: std::sync::Weak<Daemon>,
-    pub(super) queued: Arc<AtomicUsize>,
-    pub(super) written: Arc<AtomicUsize>,
-    pub(super) evicted: Arc<AtomicBool>,
-}
-
-/// Writes one shared client's frames, off the sessions lock.
-///
-/// Ends when the client leaves the pane's shared set — dropping its
-/// `SharedClient` drops the sender — or when the socket refuses a write, which
-/// is what a viewer that has gone away looks like. [`RELAY_WRITE_TIMEOUT`] still
-/// bounds a wedged write, but it now stalls this one client's relay and nothing
-/// else.
-///
-/// How it ends is what the client acts on. [`Event::SharedClosed`] is a clean
-/// end of stream — the pane was handed back, the client left, the pane went —
-/// and a terminal reading it finishes. Anything else is a broken stream, which
-/// a client recovers by attaching again. A viewer the daemon *evicted* is the
-/// second kind even though its queue simply closed: it did not ask to go, and
-/// telling it the stream ended cleanly is what left a pane with no reader and
-/// its replacement stream unread.
-pub(super) fn relay_loop(
-    mut writer: Connection,
-    frames: async_channel::Receiver<Arc<[u8]>>,
-    progress: RelayProgress,
-    session_id: u64,
-    pane_id: u64,
-) {
-    let RelayProgress {
-        queued,
-        written,
-        evicted,
-        drain,
-    } = progress;
-    let mut failed = false;
-    while let Ok(frame) = frames.recv_blocking() {
-        let result = writer.write_all(&frame);
-        if result.is_ok() {
-            written.fetch_add(frame.len(), Ordering::Relaxed);
-        }
-        let before = queued.fetch_sub(frame.len(), Ordering::Relaxed);
-        // The drain leaves this pane's output unregistered under pressure.
-        // Wake only when it can resume, not on every relayed frame.
-        if before >= RELAY_BACKPRESSURE_BYTES
-            && before - frame.len() < RELAY_BACKPRESSURE_BYTES
-            && let Some(daemon) = drain.upgrade()
-        {
-            wake_drain(&daemon);
-        }
-        if let Err(error) = result {
-            log::warn!("a shared client stopped accepting output: {error:#}");
-            failed = true;
-            break;
-        }
-    }
-    // However this relay ended — retired with the pane, or given up on — the
-    // client has to be able to tell that nothing more is coming.
-    //
-    // Dropping the connection is not enough: the serve loop holds a clone of the
-    // same socket, so the client goes on waiting for output that will never
-    // arrive. Returning early on a write error skipped this, which is how a viewer
-    // the daemon had given up on was left with a half-drawn screen, no message and
-    // no end of stream — a pane frozen with nothing to say why.
-    let evicted = evicted.load(Ordering::Acquire);
-    if evicted {
-        log::warn!(
-            "shared viewer of session {session_id} pane {pane_id} was evicted; ending its \
-             stream so it reattaches"
-        );
-    }
-    if failed || evicted {
-        // The serve loop owns another clone of this socket; closing only the
-        // write half would leave it blocked forever waiting for a request, so
-        // it could never remove the failed viewer or announce the recoverable
-        // stream event on the subscription. For an evicted viewer that is the
-        // point: the serve loop ending is what reports the stream failed, so
-        // the client recovers now rather than on its next keystroke.
-        let _ = writer.stream().shutdown(std::net::Shutdown::Both);
-    } else {
-        // A normal retirement has to be distinguishable from a broken relay.
-        // The marker follows every queued output, so the reader can finish
-        // cleanly while the daemon still reserves WouldBlock for recovery.
-        if let Err(error) = writer.send(&Event::SharedClosed {
-            session_id,
-            pane_id,
-        }) {
-            log::debug!("could not mark a shared relay closed: {error:#}");
-        }
-        let _ = writer.stream().shutdown(std::net::Shutdown::Write);
-    }
-}
-
-/// Serves one client's shared connection: its input is written to the pane
-/// and its size reports feed the pane's size arbitration.
-/// Which shared stream a serve loop is serving.
-#[derive(Clone, Copy)]
-pub(super) struct SharedStream {
-    pub(super) session_id: u64,
-    pub(super) pane_id: u64,
-    pub(super) client_process_id: u32,
-    /// The [`SharedClient::attachment`] this stream is, which is what its
-    /// input and size reports are attributed to.
-    pub(super) attachment: u64,
-}
-
-pub(super) fn serve_shared(
-    daemon: &Arc<Daemon>,
-    stream: SharedStream,
-    connection: &mut Connection,
-) -> Result<()> {
-    let SharedStream {
-        session_id,
-        pane_id,
-        client_process_id,
-        attachment,
-    } = stream;
-    loop {
-        let (request, _) = connection.receive::<Request>()?;
-        match request {
-            Request::Input { length } => {
-                let bytes = connection.read_exact(length)?;
-                let mut sessions = daemon.sessions.lock().unwrap();
-                let Some(pane) = sessions
-                    .iter_mut()
-                    .find(|session| session.id == session_id)
-                    .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
-                else {
-                    anyhow::bail!("pane {pane_id} no longer exists");
-                };
-                match &mut pane.attachment {
-                    Attachment::Shared(clients) => {
-                        let Some(client) = clients
-                            .iter_mut()
-                            .find(|client| client.attachment == attachment)
-                        else {
-                            anyhow::bail!("client {client_process_id} is not shared on {pane_id}");
-                        };
-                        // Attribution: which clients typed into this pane is
-                        // reported with its exit, because no single shared
-                        // client can know what the others typed.
-                        client.input_sent = true;
-                    }
-                    _ => anyhow::bail!("pane {pane_id} is no longer shared"),
-                }
-                // Queued rather than written outright. The master is
-                // non-blocking, so a terminal whose buffer is full accepts part
-                // of a write and refuses the rest; `write_all` reports that as
-                // an error having already consumed some of the bytes, so
-                // logging and moving on silently ate a shared client's
-                // keystrokes — reliably, for anything larger than the buffer's
-                // free space, such as a paste.
-                pane.pending_input.extend_from_slice(&bytes);
-                flush_pending_input(pane);
-                drop(sessions);
-                // Input is what the child reacts to; wake the drain so its
-                // reply is relayed promptly rather than on the idle timer, and
-                // so it finishes any input the terminal could not take yet.
-                wake_drain(daemon);
-            }
-            Request::Resize {
-                revision,
-                columns,
-                lines,
-                ..
-            } => {
-                let mut sessions = daemon.sessions.lock().unwrap();
-                let Some(session) = sessions.iter_mut().find(|session| session.id == session_id)
-                else {
-                    anyhow::bail!("session {session_id} no longer exists");
-                };
-                let current_revision = session
-                    .shared_state
-                    .as_ref()
-                    .map_or(crate::messages::SessionRevision::INITIAL, |state| {
-                        state.revision
-                    });
-                // A relay is exempt: what it reports is the size of a real
-                // terminal, not a measurement of some layout, and it reports
-                // again only when Mosh resizes that terminal. Dropping a report
-                // that lost a race with an edit left it unmeasured for good.
-                let relay = session
-                    .panes
-                    .iter()
-                    .find(|pane| pane.id == pane_id)
-                    .and_then(|pane| match &pane.attachment {
-                        Attachment::Shared(clients) => clients
-                            .iter()
-                            .find(|client| client.attachment == attachment),
-                        _ => None,
-                    })
-                    .is_some_and(|client| client.relaying_for.is_some());
-                if revision != Some(current_revision) && !relay {
-                    // Dropped rather than refused: the reporter has no reply
-                    // channel here, and the size it measured belongs to a
-                    // layout this session has moved on from. It is logged
-                    // because nothing else says so, and a client that never
-                    // learns the new revision goes silently deaf to resizing.
-                    log::debug!(
-                        "dropping a size report for pane {pane_id} of session {session_id} at \
-                         revision {:?}; the session is on {}",
-                        revision.map(|revision| revision.0),
-                        current_revision.0
-                    );
-                    continue;
-                }
-                let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-                    anyhow::bail!("pane {pane_id} no longer exists");
-                };
-                let reported = if let Attachment::Shared(clients) = &mut pane.attachment {
-                    if let Some(client) = clients
-                        .iter_mut()
-                        .find(|client| client.attachment == attachment)
-                    {
-                        client.size = Some((columns, lines));
-                        Some((columns, lines))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some(reported) = reported {
-                    let (columns, lines) = effective_size(pane);
-                    let applied = (pane.size.columns, pane.size.lines);
-                    if (columns, lines) != applied {
-                        apply_size(daemon, pane, columns, lines);
-                    }
-                    if should_broadcast_size(reported, (columns, lines), applied) {
-                        broadcast_size(
-                            session_id,
-                            pane_id,
-                            current_revision,
-                            &mut pane.attachment,
-                            pane.handover_waiters,
-                            columns,
-                            lines,
-                        );
-                    }
-                }
-            }
-            // A shared client that wants to leave the relay without touching
-            // the session's state can detach: the connection closes and this
-            // client is dropped from the shared set. Unlike [`crate::messages::DetachRequest`],
-            // no summary or snapshots are exchanged, because the session
-            // belongs to no single client any more.
-            Request::Detach(_) => return connection.send(&Response::Detached),
-            other => anyhow::bail!("unexpected request on a shared connection: {other:?}"),
-        }
-    }
-}
-
-/// How long to wait for a granted pane's last relayed frames to reach the client
-/// before giving up on the handover.
-///
-/// The wait exists because those frames have to arrive *before* the descriptor
-/// does: the client starts reading the terminal itself the moment it has it, and
-/// output that was still queued would then arrive after output that came later.
-pub(super) const GRANT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Hands a shared pane's terminal back to its last remaining viewer.
-///
-/// The reverse of the revoke handover, and the reason it exists: a pane with one
-/// viewer is being read by the daemon and relayed over a socket for no benefit,
-/// which costs a quarter of the throughput of the client reading it itself.
-///
-/// The ordering is the whole difficulty. Everything already read has been queued
-/// to this very client, so none of it may be replayed — but all of it has to land
-/// before the descriptor does. So the pane stops being read, the queue is allowed
-/// to empty, this end of the relay is shut down so the client's reader sees the
-/// end of it, and only then does the descriptor go out.
-///
-/// Only the viewer itself may ask, and that is decided on the process the
-/// transport vouched for, against the one it vouched for when the viewer
-/// attached. Nothing else authorizes this: the viewer's attach was where any
-/// secret was checked, so being that viewer is what being allowed means, and
-/// the pane's terminal is what a protected session's secret protects. Matched
-/// on a claimed process or client ID instead, any process holding the endpoint
-/// token could take a protected pane from a relay viewer.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the request's two IDs, the envelope's three identity fields, the \
-              transport's peer, and the daemon and connection; the identity \
-              fields are only bundled as an `Attacher` on the attach path"
-)]
-pub(super) fn take_exclusive(
-    daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: u64,
-    client_process_id: u32,
-    peer_process_id: Option<u32>,
-    client_id: ClientId,
-    stream_only: bool,
-    connection: &mut Connection,
-) -> Result<()> {
-    if stream_only {
-        return connection.send(&Response::Error {
-            message: "stream-only clients cannot take an exclusive pane".to_owned(),
-        });
-    }
-    let Some(caller) = verified_process_id(client_process_id, peer_process_id) else {
-        return connection.send(&Response::Error {
-            message: format!(
-                "could not confirm that process {client_process_id} is the one asking for \
-                 pane {pane_id}"
-            ),
-        });
-    };
-    let mut sessions = daemon.sessions.lock().unwrap();
-    let Some(pane) = sessions
-        .iter_mut()
-        .find(|session| session.id == session_id)
-        .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
-    else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} has no pane {pane_id}"),
-        });
-    };
-    if !matches!(&pane.attachment, Attachment::Shared(clients) if is_sole_viewer(clients, caller)) {
-        return connection.send(&Response::Error {
-            message: format!("pane {pane_id} is not shared with client {client_process_id} alone"),
-        });
-    }
-    if let Err(error) = pause_pane_reader(pane) {
-        return connection.send(&Response::Error {
-            message: format!("could not stop the pane reader before taking it: {error:#}"),
-        });
-    }
-    // Only the *sole* viewer may take it. With anybody else still attached the
-    // pane has to keep being relayed, and handing the descriptor over would stop
-    // the others being read to.
-    let relay = match &mut pane.attachment {
-        Attachment::Shared(clients) if is_sole_viewer(clients, caller) => {
-            let Attachment::Shared(mut clients) = std::mem::replace(
-                &mut pane.attachment,
-                Attachment::Granting {
-                    holder: client_process_id,
-                },
-            ) else {
-                unreachable!("the attachment was just matched as shared");
-            };
-            pane.attachment_client_id = Some(client_id.clone());
-            clients.pop().expect("exactly one client was matched")
-        }
-        _ => {
-            #[cfg(windows)]
-            pane.pty.resume_reader();
-            return connection.send(&Response::Error {
-                message: format!(
-                    "pane {pane_id} is not shared with client {client_process_id} alone"
-                ),
-            });
-        }
-    }
-    .relay;
-    // Released while the queue drains: the relay thread is what empties it, and
-    // it must not be waiting on this lock. Nothing more is queued meanwhile —
-    // `drain_reads` is false for a granting pane, and the size broadcast only
-    // queues to a shared one.
-    drop(sessions);
-
-    let deadline = Instant::now() + GRANT_FLUSH_TIMEOUT;
-    while relay.queued.load(Ordering::Relaxed) > 0 && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(1));
-    }
-    let flushed = relay.queued.load(Ordering::Relaxed) == 0;
-    // Ends the relay: dropping the sender stops its thread, and closing this end
-    // of the socket is what tells the client's reader it has everything.
-    drop(relay);
-
-    let mut sessions = daemon.sessions.lock().unwrap();
-    let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} went away mid-handover"),
-        });
-    };
-    let summary = Box::new(session.summary.clone());
-    let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} pane {pane_id} went away mid-handover"),
-        });
-    };
-    if !flushed {
-        // The client never drained what it was already sent, so it cannot be
-        // trusted to read the terminal either. Leave the pane unheld rather than
-        // handing the descriptor to a client that is not reading.
-        pane.attachment = Attachment::None;
-        pane.attachment_client_id = None;
-        #[cfg(windows)]
-        pane.pty.resume_reader();
-        drop(sessions);
-        daemon.sessions_condvar.notify_all();
-        publish(daemon);
-        wake_drain(daemon);
-        return connection.send(&Response::Error {
-            message: format!("client {client_process_id} did not drain pane {pane_id}'s relay"),
-        });
-    }
-    pane.attachment = exclusive_attachment(client_process_id);
-    pane.attachment_client_id = Some(client_id.clone());
-    // Deliberately no replay. Everything read so far went to this client over the
-    // relay; sending it again would print the pane's recent output twice. What is
-    // left is still in the terminal, which the client now reads itself.
-    pane.retained.clear();
-    pane.handed_over = None;
-    let child_pid = pane.pty.child_pid();
-    let handles = match handover_handles(daemon, pane, client_process_id) {
-        Ok(handles) => handles,
-        Err(error) => {
-            release_failed_handover(daemon, sessions, session_id, pane_id, &client_id);
-            return Err(error);
-        }
-    };
-    // Neither is read on this path: the client already has the tab this pane
-    // belongs to and is only swapping what feeds it. They travel because the
-    // exclusive attach's reply is the shape that carries a descriptor.
-    let state = serde_json::Value::Null;
-    drop(sessions);
-    #[cfg(feature = "session-persistence")]
-    if let Err(error) = forget_persisted_session(daemon, session_id) {
-        log::warn!("could not remove the attached session's persisted record: {error:#}");
-    }
-    if let Err(error) = connection.send_with(
-        &Response::Attached {
-            pane_id,
-            child_pid,
-            replay_length: 0,
-            state,
-            summary,
-            handles: handles.values,
-        },
-        &handles.attachments,
-    ) {
-        release_failed_handover(
-            daemon,
-            daemon.sessions.lock().unwrap(),
-            session_id,
-            pane_id,
-            &client_id,
-        );
-        return Err(error);
-    }
-    daemon.sessions_condvar.notify_all();
-    publish(daemon);
-    wake_drain(daemon);
-    Ok(())
-}
-
-/// Whether `clients` is a single local viewer whose attach was vouched for as
-/// coming from `caller`.
-fn is_sole_viewer(clients: &[SharedClient], caller: u32) -> bool {
-    matches!(clients, [client] if !client.stream_only && client.peer_process_id == Some(caller))
-}
-
-/// Gives a taken pane back, at the request of the client that took it.
-///
-/// The other half of [`release_failed_handover`]: that one covers a handover
-/// this daemon could not finish sending, and this one covers a handover the
-/// client could not finish receiving — its terminal would not adopt the
-/// descriptor, or the window it belonged to closed as the answer arrived.
-/// Either way a live process holds a pane it does not read, which nothing else
-/// here can detect: the liveness sweep only recovers a pane whose holder has
-/// died.
-pub(super) fn release_exclusive(
-    daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: u64,
-    client_process_id: u32,
-    client_id: ClientId,
-    peer_process_id: Option<u32>,
-    connection: &mut Connection,
-) -> Result<()> {
-    let sessions = daemon.sessions.lock().unwrap();
-    let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
-        drop(sessions);
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} has no pane {pane_id}"),
-        });
-    };
-    // Releasing a protected pane knocks its window off it, so the claim alone
-    // is not enough there: the holder has to be the process the transport
-    // vouched for. Elsewhere it is the inconvenience `control_process_id`
-    // describes, and an unattested client keeps working.
-    let caller_process_id = if session.authentication.is_some() {
-        verified_process_id(client_process_id, peer_process_id)
-    } else {
-        Some(control_process_id(client_process_id, peer_process_id))
-    };
-    let Some(pane) = session.panes.iter().find(|pane| pane.id == pane_id) else {
-        drop(sessions);
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} has no pane {pane_id}"),
-        });
-    };
-    // A handover that was never answered leaves the pane granting or revoking
-    // rather than exclusive, and that client is the one this request is for:
-    // a revoke it could not carry out strands the pane just as surely, because
-    // it has already stopped reading the pty by the time it finds out.
-    let holder = match pane.attachment {
-        Attachment::Exclusive(holder)
-        | Attachment::Granting { holder }
-        | Attachment::Revoking { holder } => holder,
-        Attachment::None | Attachment::Shared(_) => {
-            drop(sessions);
-            return connection.send(&Response::Error {
-                message: format!("session {session_id} pane {pane_id} is not held exclusively"),
-            });
-        }
-    };
-    if Some(holder) != caller_process_id {
-        drop(sessions);
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} pane {pane_id} is held by another client"),
-        });
-    }
-    if pane
-        .attachment_client_id
-        .as_ref()
-        .is_some_and(|attachment_client_id| attachment_client_id != &client_id)
-    {
-        drop(sessions);
-        return connection.send(&Response::Error {
-            message: format!("session {session_id} pane {pane_id} is held by a newer attachment"),
-        });
-    }
-    release_failed_handover(daemon, sessions, session_id, pane_id, &client_id);
-    connection.send(&Response::Ok)
-}
-
-/// Puts a pane back under the drain thread after a handover that did not
-/// complete.
-///
-/// The pane was marked exclusive before the descriptor was sent, because that
-/// is the order the send needs. If the send then fails — the client died as it
-/// was being answered — the pane is left attached to a client that does not
-/// have it, and `drain_reads` skips a pane whose holder is supposed to be
-/// reading it. Nobody reads the pty, it fills, the shell blocks on its own
-/// output and stops reading input: one keystroke lands and every viewer of
-/// that pane is stuck for good. Marking it unheld is what puts it back in the
-/// drain's hands.
-fn release_failed_handover(
-    daemon: &Arc<Daemon>,
-    mut sessions: std::sync::MutexGuard<'_, Vec<Session>>,
-    session_id: u64,
-    pane_id: u64,
-    attachment_client_id: &ClientId,
-) {
-    if let Some(pane) = sessions
-        .iter_mut()
-        .find(|session| session.id == session_id)
-        .and_then(|session| session.panes.iter_mut().find(|pane| pane.id == pane_id))
-        .filter(|pane| {
-            pane.attachment_client_id
-                .as_ref()
-                .is_none_or(|current| current == attachment_client_id)
-        })
-    {
-        pane.attachment = Attachment::None;
-        pane.attachment_client_id = None;
-        #[cfg(windows)]
-        pane.pty.resume_reader();
-    }
-    drop(sessions);
-    daemon.sessions_condvar.notify_all();
-    publish(daemon);
-    wake_drain(daemon);
-}
-
-/// Offers a pane back to its viewer when a *departure* has left it the only one.
-///
-/// Called where a viewer leaves, and deliberately not from a scan of how many
-/// viewers a pane has. A revoke handover passes through one viewer on its way to
-/// two — the holder re-attaches before the client that triggered the revoke joins —
-/// so a count-based offer raced it: the grant went to the holder mid-handover, and
-/// the transition that mattered a moment later was then treated as already offered
-/// and never announced at all.
-///
-/// An offer rather than an instruction: a client that cannot take a pty ignores it
-/// and stays shared, which is also what makes it safe to send more than once.
-pub(super) fn offer_exclusive_if_alone(daemon: &Arc<Daemon>, session_id: u64, pane: &Pane) {
-    let Attachment::Shared(clients) = &pane.attachment else {
-        return;
-    };
-    let [client] = clients.as_slice() else {
-        return;
-    };
-    // A stream-only viewer must remain shared forever. It cannot receive a
-    // descriptor or complete the exclusive grant handshake.
-    if client.stream_only {
-        return;
-    }
-    let client_id = client.client_id.clone();
-    let grant = Event::Grant {
-        session_id,
-        pane_id: pane.id,
-    };
-    if let Some(subscriber) = subscriber_relay(daemon, &client_id, client.process_id) {
-        enqueue_subscriber_event(daemon, &subscriber, &grant);
-    }
-}
-
 /// Finds the subscription for a client event. Logical IDs are the primary key
 /// for remote clients, whose forwarded socket peer process is shared by every
 /// connection. Local ownership remains PID-based, though: a local process can
@@ -1509,10 +569,7 @@ pub(super) fn subscriber_relay(
     client_id: &ClientId,
     process_id: u32,
 ) -> Option<Arc<SubscriberRelay>> {
-    let subscribers = daemon
-        .subscribers
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let subscribers = daemon.subscribers.lock().recover_poison();
     subscribers
         .get(client_id)
         .or_else(|| {
@@ -1533,7 +590,7 @@ pub(super) fn subscriber_relay_for_process(
     daemon
         .subscribers
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .values()
         .find(|subscriber| subscriber.process_id == process_id)
         .map(|subscriber| Arc::clone(&subscriber.relay))
@@ -1548,7 +605,7 @@ pub(super) fn remove_shared_attachment(
     pane_id: u64,
     attachment: u64,
 ) {
-    let mut sessions = daemon.sessions.lock().unwrap();
+    let mut sessions = daemon.sessions();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return;
     };
@@ -1627,28 +684,30 @@ pub(super) fn settle_shared_departure(
 /// attach waiting on the handover is woken to join. During a live share, the
 /// exclusive attachment remains in place; the following share request then
 /// persists the checkpoint while the original client keeps reading the PTY.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the snapshot request's seven decoded fields, plus the daemon and \
-              the connection to answer on"
-)]
 pub(super) fn snapshot(
     daemon: &Arc<Daemon>,
-    session_id: u64,
-    pane_id: u64,
-    length: usize,
-    columns: u16,
-    lines: u16,
-    client_process_id: u32,
-    peer_process_id: Option<u32>,
+    request: crate::messages::SnapshotRequest,
+    caller: Caller<'_>,
     connection: &mut Connection,
 ) -> Result<()> {
+    let crate::messages::SnapshotRequest {
+        session_id,
+        pane_id,
+        length,
+        columns,
+        lines,
+    } = request;
+    let Caller {
+        client_process_id,
+        peer_process_id,
+        ..
+    } = caller;
     // The raw bytes can be large; read them before taking the lock, and
     // within the same limits as a detach's.
     let mut received = read_snapshots(&daemon.snapshot_budget, connection, &[(pane_id, length)])?;
     let bytes = received.bytes.remove(&pane_id).unwrap_or_default();
 
-    let mut sessions = daemon.sessions.lock().unwrap();
+    let mut sessions = daemon.sessions();
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return connection.send(&Response::Error {
             message: format!("session {session_id} does not exist"),

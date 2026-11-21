@@ -1,3 +1,7 @@
+//! Composing the window: every floating layer above the tab body in paint
+//! order, the banners for feedback and persistent errors, and registering the
+//! root view's actions.
+
 use super::*;
 use crate::configuration_reload::CONFIGURATION_RELOAD_SUCCESS_MESSAGE;
 

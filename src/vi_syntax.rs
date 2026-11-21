@@ -1,3 +1,7 @@
+//! Syntax highlighting for `zetta vi`: the Tree-sitter grammars bundled
+//! natively or by extensions, their compiled configurations, and following the
+//! pane's theme.
+
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -12,6 +16,7 @@ use std::{
     thread,
     time::Duration,
 };
+use zetta_sync::RecoverPoison as _;
 
 #[cfg(test)]
 use std::rc::Rc;
@@ -153,10 +158,7 @@ impl GrammarConfiguration {
         if let Some(configuration) = self.ready.get() {
             return Ok(Arc::clone(configuration));
         }
-        let _initializing = self
-            .initializing
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _initializing = self.initializing.lock().recover_poison();
         // Another caller may have finished while we waited for this grammar.
         if let Some(configuration) = self.ready.get() {
             return Ok(Arc::clone(configuration));
@@ -260,10 +262,7 @@ impl SyntaxThemeWatcher {
     }
 
     fn latest(&self) -> Option<Arc<SyntaxTheme>> {
-        let receiver = self
-            .updates
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let receiver = self.updates.lock().recover_poison();
         let mut latest = None;
         loop {
             match receiver.try_recv() {
@@ -310,10 +309,7 @@ impl SyntaxThemeHandle {
             return Arc::clone(theme);
         }
 
-        let mut pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut pending = self.pending.lock().recover_poison();
         if self.theme.get().is_none() {
             // Fall back to loading inline when the worker could not be spawned
             // or panicked; vi must never lose highlighting over a thread error.
@@ -482,10 +478,7 @@ impl GrammarSet {
 
     /// The capture-name to style table, resolved once the theme is available.
     fn styles(&self) -> Arc<[Option<HighlightStyle>]> {
-        let mut styles = self
-            .styles
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut styles = self.styles.lock().recover_poison();
         Arc::clone(styles.get_or_insert_with(|| self.styles_for_theme(&self.theme.get())))
     }
 
@@ -504,10 +497,7 @@ impl GrammarSet {
         else {
             return false;
         };
-        *self
-            .styles
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(self.styles_for_theme(&theme));
+        *self.styles.lock().recover_poison() = Some(self.styles_for_theme(&theme));
         true
     }
 

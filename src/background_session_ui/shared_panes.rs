@@ -386,9 +386,7 @@ impl Zetta {
     ) -> bool {
         let terminal = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
+            .pane_in(tab_id, pane_id)
             .and_then(TerminalPane::selected_terminal);
         terminal.is_none_or(|terminal| {
             apply_shared_terminal_viewport(&terminal, columns, lines, window, cx)
@@ -409,9 +407,7 @@ impl Zetta {
     ) {
         let terminal = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
+            .pane_in(tab_id, pane_id)
             .and_then(|pane| pane.terminal.clone());
         let entry = self.shared_panes.remove(&pane_id);
         let zosh_entry = self.zosh_panes.remove(&pane_id);
@@ -516,8 +512,7 @@ impl Zetta {
     pub(crate) fn report_all_shared_pane_sizes(&mut self, tab_id: u64, cx: &mut Context<Self>) {
         let panes = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
+            .by_id(tab_id)
             .into_iter()
             .flat_map(|tab| &tab.panes)
             .filter_map(|pane| pane.selected_terminal().map(|terminal| (pane.id, terminal)))
@@ -594,9 +589,7 @@ impl Zetta {
         }
         let Some(terminal) = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
+            .pane_in(tab_id, pane_id)
             .and_then(|pane| pane.terminal.clone())
         else {
             return;
@@ -679,9 +672,7 @@ impl Zetta {
     ) -> Option<terminal::AttachedOptions> {
         let profile = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
+            .pane_in(tab_id, pane_id)
             .map(|pane| pane.profile.clone())?;
         let settings = TerminalSpawnSettings::current(cx);
         Some(terminal::AttachedOptions {
@@ -761,9 +752,7 @@ impl Zetta {
     /// what a handover that waited has to confirm before committing.
     fn pane_still_shows(&self, ids: MuxPaneIds, terminal: &Entity<Terminal>) -> bool {
         self.tabs
-            .iter()
-            .find(|tab| tab.id == ids.tab_id)
-            .and_then(|tab| tab.pane(ids.pane_id))
+            .pane_in(ids.tab_id, ids.pane_id)
             .and_then(|pane| pane.terminal.as_ref())
             .is_some_and(|shown| shown == terminal)
     }
@@ -804,9 +793,7 @@ impl Zetta {
         // to ask. Giving it back is what releases both.
         let Some(terminal) = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
+            .pane_in(tab_id, pane_id)
             .and_then(|pane| pane.terminal.clone())
         else {
             let client = runtime.client().clone();

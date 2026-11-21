@@ -1,3 +1,6 @@
+//! The keymap page's state: capturing a keystroke, searching bindings, and the
+//! rows derived from the effective keymap.
+
 use super::*;
 use smallvec::SmallVec;
 use ui::StickyCandidate;

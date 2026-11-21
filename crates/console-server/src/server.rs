@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::mem::size_of;
 use std::thread::JoinHandle;
+use zetta_sync::RecoverPoison as _;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Object {
@@ -464,11 +465,7 @@ impl Server {
     /// A theme change replaces the color table and the default colors, as
     /// ConPTY's palette helper does through SetConsoleScreenBufferInfoEx.
     fn apply_pending_palette(&mut self) {
-        let pending = self
-            .pending_palette
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        let pending = self.pending_palette.lock().recover_poison().take();
         if let Some(palette) = pending {
             if self.attributes == self.state.palette.attributes {
                 self.attributes = palette.attributes;

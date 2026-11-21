@@ -80,7 +80,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let tab_id = tab.id;

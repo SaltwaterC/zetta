@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 
 use crate::format_help_table;
+use zetta_cli_help::set_flag;
 
 pub fn tftp_server_help() -> String {
     format!(
@@ -41,12 +42,11 @@ pub fn parse_server_args(args: impl IntoIterator<Item = OsString>) -> Result<Ser
     while let Some(argument) = args.next() {
         match argument.to_string_lossy().as_ref() {
             "--root" | "-r" => {
-                anyhow::ensure!(!root_set, "--root may only be specified once");
+                set_flag(&mut root_set, "--root")?;
                 command.root = args.next().context("--root requires a directory")?.into();
-                root_set = true;
             }
             "--port" | "-p" => {
-                anyhow::ensure!(!port_set, "--port may only be specified once");
+                set_flag(&mut port_set, "--port")?;
                 command.port = args
                     .next()
                     .context("--port requires a port number")?
@@ -54,11 +54,9 @@ pub fn parse_server_args(args: impl IntoIterator<Item = OsString>) -> Result<Ser
                     .parse()
                     .context("--port must be a number from 1 to 65535")?;
                 anyhow::ensure!(command.port != 0, "--port must be a number from 1 to 65535");
-                port_set = true;
             }
             "--writable" | "-w" => {
-                anyhow::ensure!(!command.writable, "--writable may only be specified once");
-                command.writable = true;
+                set_flag(&mut command.writable, "--writable")?;
             }
             "--help" | "-h" => anyhow::bail!("{}", tftp_server_help()),
             value => anyhow::bail!("unknown TFTP server argument {value:?}"),

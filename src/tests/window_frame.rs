@@ -29,7 +29,7 @@ fn custom_window_border_matches_platform_conventions() {
 }
 
 #[test]
-#[cfg(any(target_os = "windows", linux_like))]
+#[cfg(drawn_window_controls)]
 fn window_controls_respect_window_capabilities() {
     let supported = WindowControls::default();
 

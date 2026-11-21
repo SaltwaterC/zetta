@@ -21,7 +21,20 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 mod process_control;
+mod request;
 mod sounds;
+
+#[cfg(notify_cleanup_enabled)]
+mod cleanup;
+#[cfg(notify_cleanup_enabled)]
+pub use cleanup::{notify_cleanup_help, parse_notify_cleanup_args, run_notify_cleanup};
+#[cfg(notify_cleanup_enabled)]
+pub use request::NotifyCleanupCommand;
+pub use request::{
+    NotificationOptions, NotificationRequest, NotificationTarget, NotificationTimeout,
+    notification_reexec_args, notification_target_from_environment, parse_notification_target,
+    parse_notification_timeout, requests_help,
+};
 
 use process_control::request_process_focus_tab;
 use process_control::request_process_silent_mode;
@@ -41,83 +54,7 @@ pub enum CommandLine {
     Cleanup(NotifyCleanupCommand),
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum NotificationTimeout {
-    #[default]
-    Default,
-    Never,
-    Milliseconds(u32),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NotificationRequest {
-    pub summary: String,
-    pub body: Option<String>,
-    pub app_name: Option<String>,
-    pub icon: Option<String>,
-    pub sound: Option<String>,
-    pub timeout: Option<NotificationTimeout>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NotificationTarget {
-    pub process_id: u32,
-    pub attention_id: u64,
-}
-
-pub fn parse_notification_timeout(value: &str) -> Result<NotificationTimeout> {
-    match value {
-        "default" => Ok(NotificationTimeout::Default),
-        "never" => Ok(NotificationTimeout::Never),
-        value => value
-            .parse::<u32>()
-            .map(NotificationTimeout::Milliseconds)
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "--timeout must be default, never, or a whole number of milliseconds, got {value:?}"
-                )
-            }),
-    }
-}
-
-fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {
-    let rows = rows
-        .as_ref()
-        .iter()
-        .map(|&(label, description)| (label.trim_end(), description))
-        .collect::<Vec<_>>();
-    let label_width = rows
-        .iter()
-        .map(|(label, _)| label.chars().count())
-        .max()
-        .unwrap_or(0);
-    rows.into_iter()
-        .map(|(label, description)| {
-            let mut lines = description.split('\n');
-            let first_line = lines.next().unwrap_or("").trim_end();
-            let mut formatted = String::new();
-            formatted.push_str("  ");
-            formatted.push_str(label);
-            formatted.push_str(&" ".repeat(label_width - label.chars().count()));
-            if !first_line.is_empty() {
-                formatted.push_str("  ");
-                formatted.push_str(first_line);
-            }
-            for line in lines {
-                formatted.push('\n');
-                let line = line.trim_end();
-                if !line.is_empty() {
-                    formatted.push_str("  ");
-                    formatted.push_str(&" ".repeat(label_width));
-                    formatted.push_str("  ");
-                    formatted.push_str(line);
-                }
-            }
-            formatted
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+use zetta_cli_help::format_help_table;
 
 const NOTIFICATION_WORKER_ENV: &str = "ZETTA_NOTIFICATION_WORKER";
 const NOTIFICATION_TARGET_PROCESS_ID_ENV: &str = "ZETTA_NOTIFICATION_TARGET_PROCESS_ID";
@@ -180,25 +117,6 @@ const MACOS_TARGETED_NOTIFICATION_PREFIX: &str = "zetta-target";
 #[cfg(target_os = "macos")]
 static NEXT_MACOS_TARGETED_NOTIFICATION_ID: AtomicU64 = AtomicU64::new(1);
 
-pub fn parse_notification_target(
-    process_id: &str,
-    attention_id: &str,
-) -> Option<NotificationTarget> {
-    let process_id = process_id.parse::<u32>().ok().filter(|id| *id != 0)?;
-    let attention_id = attention_id.parse::<u64>().ok().filter(|id| *id != 0)?;
-    Some(NotificationTarget {
-        process_id,
-        attention_id,
-    })
-}
-
-pub fn notification_target_from_environment() -> Option<NotificationTarget> {
-    parse_notification_target(
-        &std::env::var("ZETTA_PROCESS_ID").ok()?,
-        &std::env::var("ZETTA_ATTENTION_ID").ok()?,
-    )
-}
-
 fn notification_target_from_worker_environment() -> Result<NotificationTarget> {
     let process_id = std::env::var(NOTIFICATION_TARGET_PROCESS_ID_ENV)
         .context("notification worker is missing its target process ID")?;
@@ -234,79 +152,7 @@ pub fn notify_help() -> String {
 }
 
 pub fn parse_notify_args(args: impl IntoIterator<Item = OsString>) -> Result<NotificationRequest> {
-    let mut app_name = None;
-    let mut icon = None;
-    let mut sound = None;
-    let mut timeout = None;
-    let mut positional = Vec::new();
-    let mut arguments = args.into_iter();
-    while let Some(argument) = arguments.next() {
-        match argument.to_string_lossy().as_ref() {
-            "--app-name" | "-a" => {
-                anyhow::ensure!(app_name.is_none(), "--app-name may only be specified once");
-                app_name = Some(
-                    arguments
-                        .next()
-                        .context("--app-name requires a name")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--icon" | "-i" => {
-                anyhow::ensure!(icon.is_none(), "--icon may only be specified once");
-                icon = Some(
-                    arguments
-                        .next()
-                        .context("--icon requires a path")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--sound" | "-s" => {
-                anyhow::ensure!(sound.is_none(), "--sound may only be specified once");
-                sound = Some(
-                    arguments
-                        .next()
-                        .context("--sound requires a name")?
-                        .to_string_lossy()
-                        .into_owned(),
-                );
-            }
-            "--timeout" | "-t" => {
-                anyhow::ensure!(timeout.is_none(), "--timeout may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--timeout requires default, never, or a number of milliseconds")?
-                    .to_string_lossy()
-                    .into_owned();
-                timeout = Some(parse_notification_timeout(&value)?);
-            }
-            "--help" | "-h" => anyhow::bail!("{}", notify_help()),
-            "--" => {
-                positional.extend(&mut arguments);
-                break;
-            }
-            option if option.starts_with('-') => anyhow::bail!("unknown notify option {option:?}"),
-            _ => positional.push(argument),
-        }
-    }
-    anyhow::ensure!(
-        (1..=2).contains(&positional.len()),
-        "usage: zntfy [OPTIONS] [--] SUMMARY [BODY]; run `zntfy --help` for details"
-    );
-    let summary = positional[0].to_string_lossy().into_owned();
-    anyhow::ensure!(!summary.is_empty(), "SUMMARY must not be empty");
-    let body = positional
-        .get(1)
-        .map(|value| value.to_string_lossy().into_owned());
-    Ok(NotifyCommand {
-        summary,
-        body,
-        app_name,
-        icon,
-        sound,
-        timeout,
-    })
+    request::parse_notify_args(args, "zntfy", notify_help)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -633,140 +479,6 @@ fn spawn_notification_response_watchdog(timeout: Option<NotificationTimeout>) {
 /// [`spawn_notification_response_watchdog`] existed (or from a build that
 /// predates it). It is a plain CLI maintenance command, not a background
 /// service: it scans, reports, and exits.
-#[cfg(notify_cleanup_enabled)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct NotifyCleanupCommand {
-    pub dry_run: bool,
-}
-
-#[cfg(notify_cleanup_enabled)]
-pub fn notify_cleanup_help() -> String {
-    format!(
-        "Reap stale desktop notification worker processes\n\nUsage: zntfy cleanup [OPTIONS]\n\nA `zntfy` invocation that targets a pane spawns a detached worker that waits for the notification to be clicked or dismissed, so it can focus the originating tab. Some notification servers (GNOME Shell in particular) do not reliably signal when a notification expires, which can leave a worker running indefinitely with nothing left to click. This command finds Zetta notification workers that have outlived their notification's own timeout and terminates them.\n\nOptions:\n{}",
-        format_help_table([
-            (
-                "-n, --dry-run",
-                "List stale workers without terminating them"
-            ),
-            ("-h, --help", "Print help"),
-        ])
-    )
-}
-
-#[cfg(notify_cleanup_enabled)]
-pub fn parse_notify_cleanup_args(
-    args: impl IntoIterator<Item = OsString>,
-) -> Result<NotifyCleanupCommand> {
-    let mut dry_run = false;
-    for argument in args {
-        match argument.to_string_lossy().as_ref() {
-            "--dry-run" | "-n" => {
-                anyhow::ensure!(!dry_run, "--dry-run may only be specified once");
-                dry_run = true;
-            }
-            "--help" | "-h" => anyhow::bail!("{}", notify_cleanup_help()),
-            option => anyhow::bail!("unknown notify cleanup option {option:?}"),
-        }
-    }
-    Ok(NotifyCleanupCommand { dry_run })
-}
-
-#[cfg(notify_cleanup_enabled)]
-struct StaleNotificationWorker {
-    process_id: sysinfo::Pid,
-    age: std::time::Duration,
-    expiry: std::time::Duration,
-}
-
-/// Recovers the `--timeout` a notification worker was launched with by
-/// reparsing its argv the same way it parsed it at startup. The previous
-/// `zetta notify` worker had an extra `notify` argument; accept that spelling
-/// as well so the standalone cleanup command can reap old workers.
-#[cfg(notify_cleanup_enabled)]
-fn worker_notification_timeout(cmd: &[OsString]) -> Option<Option<NotificationTimeout>> {
-    let executable = std::path::Path::new(cmd.first()?).file_stem()?.to_str()?;
-    let arguments = match executable {
-        "zntfy" => &cmd[1..],
-        "zetta" if cmd.get(1)?.to_str()? == "notify" => &cmd[2..],
-        _ => return None,
-    };
-    let command = parse_notify_args(arguments.iter().cloned()).ok()?;
-    Some(command.timeout)
-}
-
-#[cfg(notify_cleanup_enabled)]
-fn stale_notification_workers(system: &sysinfo::System) -> Vec<StaleNotificationWorker> {
-    let worker_marker = OsString::from(format!("{NOTIFICATION_WORKER_ENV}=1"));
-    system
-        .processes()
-        .values()
-        .filter(|process| process.environ().contains(&worker_marker))
-        .filter_map(|process| {
-            let timeout = worker_notification_timeout(process.cmd())?;
-            let expiry = notification_expiry_duration(timeout)?;
-            let age = std::time::Duration::from_secs(process.run_time());
-            (age > expiry).then_some(StaleNotificationWorker {
-                process_id: process.pid(),
-                age,
-                expiry,
-            })
-        })
-        .collect()
-}
-
-#[cfg(notify_cleanup_enabled)]
-pub fn run_notify_cleanup(command: &NotifyCleanupCommand) -> Result<()> {
-    let mut system = sysinfo::System::new();
-    system.refresh_processes_specifics(
-        sysinfo::ProcessesToUpdate::All,
-        true,
-        sysinfo::ProcessRefreshKind::nothing()
-            .with_environ(sysinfo::UpdateKind::Always)
-            .with_cmd(sysinfo::UpdateKind::Always),
-    );
-
-    let stale = stale_notification_workers(&system);
-    if stale.is_empty() {
-        println!("No stale desktop notification workers found.");
-        return Ok(());
-    }
-
-    for worker in &stale {
-        let verb = if command.dry_run {
-            "would reap"
-        } else {
-            "reaping"
-        };
-        println!(
-            "{verb} pid {} (running {}s, past its {}s notification timeout)",
-            worker.process_id,
-            worker.age.as_secs(),
-            worker.expiry.as_secs(),
-        );
-    }
-    if command.dry_run {
-        return Ok(());
-    }
-
-    let mut reaped = 0;
-    for worker in &stale {
-        match system.process(worker.process_id) {
-            Some(process) if process.kill_with(sysinfo::Signal::Term) == Some(true) => {
-                reaped += 1;
-            }
-            _ => eprintln!(
-                "zetta: failed to terminate notification worker pid {}",
-                worker.process_id
-            ),
-        }
-    }
-    println!(
-        "Reaped {reaped} of {} stale desktop notification worker(s).",
-        stale.len()
-    );
-    Ok(())
-}
-
 #[cfg(not(target_os = "macos"))]
 fn notify_rust_timeout(timeout: NotificationTimeout) -> notify_rust::Timeout {
     match timeout {
@@ -776,38 +488,6 @@ fn notify_rust_timeout(timeout: NotificationTimeout) -> notify_rust::Timeout {
             notify_rust::Timeout::Milliseconds(milliseconds)
         }
     }
-}
-
-/// Re-enter the notification-only startup mode when a platform requires a
-/// child process. In particular, an `attention --notify` request must not be
-/// replayed as `attention`, or the child would route the badge a second time.
-pub fn notification_reexec_args(command: &NotificationRequest) -> Vec<OsString> {
-    let mut args = Vec::new();
-    for (option, value) in [
-        ("--app-name", command.app_name.as_deref()),
-        ("--icon", command.icon.as_deref()),
-        ("--sound", command.sound.as_deref()),
-    ] {
-        if let Some(value) = value {
-            args.push(OsString::from(option));
-            args.push(OsString::from(value));
-        }
-    }
-    if let Some(timeout) = command.timeout {
-        args.push(OsString::from("--timeout"));
-        args.push(OsString::from(match timeout {
-            NotificationTimeout::Default => "default".to_owned(),
-            NotificationTimeout::Never => "never".to_owned(),
-            NotificationTimeout::Milliseconds(milliseconds) => milliseconds.to_string(),
-        }));
-    }
-    // The text is often a program's, so it must never be read as an option.
-    args.push(OsString::from("--"));
-    args.push(OsString::from(&command.summary));
-    if let Some(body) = &command.body {
-        args.push(OsString::from(body));
-    }
-    args
 }
 
 // Without an explicit `App User Model ID`, notify-rust's Windows backend
@@ -1263,14 +943,6 @@ pub fn run_command_line(command: &CommandLine) -> Result<()> {
         #[cfg(notify_cleanup_enabled)]
         CommandLine::Cleanup(command) => run_notify_cleanup(command),
     }
-}
-
-/// Whether `--help` appears as an option: after `--` it is notification text.
-pub fn requests_help(arguments: &[OsString]) -> bool {
-    arguments
-        .iter()
-        .take_while(|argument| *argument != "--")
-        .any(|argument| matches!(argument.to_string_lossy().as_ref(), "--help" | "-h"))
 }
 
 pub fn standalone_main() {

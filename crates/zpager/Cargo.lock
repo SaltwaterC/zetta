@@ -368,10 +368,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zetta_cli_help"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "zpager"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "crossterm",
  "unicode-width",
+ "zetta_cli_help",
 ]

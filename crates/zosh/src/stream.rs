@@ -30,6 +30,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::{Context as _, Result};
 use mosh_rs::{Base64Key, DisplayPreference, MoshSession};
@@ -183,9 +184,7 @@ impl PaneSession {
                     };
                     let result = drive(session, (columns, rows), agent_settings, ends);
                     let failure = result.err().map(|failure| format!("{failure:#}"));
-                    *error
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = failure.clone();
+                    *error.lock().recover_poison() = failure.clone();
                     finished.store(true, Ordering::SeqCst);
                     answer.end();
                     output.close(failure);
@@ -252,10 +251,7 @@ impl PaneSession {
 
     /// Why the session ended, when it ended in a failure.
     pub fn error(&self) -> Option<String> {
-        self.error
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.error.lock().recover_poison().clone()
     }
 
     /// Asks the remote side to end the session and stops the loop. The reader
@@ -298,10 +294,7 @@ struct AnswerState {
 
 impl Answer {
     fn heard(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().recover_poison();
         if !state.heard {
             state.heard = true;
             self.changed.notify_all();
@@ -310,29 +303,19 @@ impl Answer {
 
     /// The loop is gone, so nothing will be heard any more.
     fn end(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().recover_poison();
         state.ended = true;
         self.changed.notify_all();
     }
 
     fn wait(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().recover_poison();
         while !state.heard && !state.ended {
             let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 break;
             };
-            state = self
-                .changed
-                .wait_timeout(state, left)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .0;
+            state = self.changed.wait_timeout(state, left).recover_poison().0;
         }
         state.heard
     }
@@ -575,15 +558,9 @@ struct OutputState {
 
 impl OutputPipe {
     fn write(&self, bytes: &[u8]) -> io::Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().recover_poison();
         while state.bytes.len() >= OUTPUT_CAPACITY && !state.abandoned {
-            state = self
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = self.changed.wait(state).recover_poison();
         }
         if state.abandoned {
             return Err(io::Error::new(
@@ -601,15 +578,9 @@ impl OutputPipe {
         if buffer.is_empty() {
             return Ok(0);
         }
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().recover_poison();
         while state.bytes.is_empty() && !state.closed {
-            state = self
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = self.changed.wait(state).recover_poison();
         }
         if state.bytes.is_empty()
             && let Some(failure) = state.failure.take()
@@ -632,10 +603,7 @@ impl OutputPipe {
     }
 
     fn close(&self, failure: Option<String>) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = self.state.lock().recover_poison();
         state.failure = failure;
         state.closed = true;
         drop(state);
@@ -643,10 +611,7 @@ impl OutputPipe {
     }
 
     fn abandon(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .abandoned = true;
+        self.state.lock().recover_poison().abandoned = true;
         self.changed.notify_all();
     }
 }

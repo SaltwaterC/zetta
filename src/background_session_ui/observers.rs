@@ -84,21 +84,11 @@ impl Zetta {
         pane_id: u64,
         command: Option<String>,
     ) {
-        if let Some(pane) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-        {
+        if let Some(pane) = self.tabs.pane_in_mut(tab_id, pane_id) {
             pane.active_command = command;
             return;
         }
-        if let Some(pane) = self
-            .background_sessions
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-        {
+        if let Some(pane) = self.background_sessions.pane_in_mut(tab_id, pane_id) {
             pane.active_command = command;
         }
     }
@@ -138,12 +128,7 @@ impl Zetta {
             return;
         }
         let run_identity = self.background_sessions.iter().find_map(|tab| {
-            let entry = tab
-                .pane(pane_id)?
-                .stack
-                .entries
-                .iter()
-                .find(|entry| entry.id == entry_id)?;
+            let entry = tab.pane(pane_id)?.stack.entry(entry_id)?;
             Some(crate::run_command::RunPaneIdentity::new(
                 tab.attention_id,
                 entry.routing_id,
@@ -156,38 +141,18 @@ impl Zetta {
             }
             match event {
                 TerminalEvent::TaskFinished { exit_code } => {
-                    let Some(tab_id) = this
-                        .background_sessions
-                        .iter()
-                        .find(|tab| {
-                            tab.pane(pane_id).is_some_and(|pane| {
-                                pane.stack.entries.iter().any(|entry| entry.id == entry_id)
-                            })
-                        })
-                        .map(|tab| tab.id)
-                    else {
+                    let Some(tab_id) = this.background_tab_holding(pane_id, entry_id) else {
                         return;
                     };
                     this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
                 }
                 TerminalEvent::CloseTerminal => {
-                    let Some(tab_id) = this
-                        .background_sessions
-                        .iter()
-                        .find(|tab| {
-                            tab.pane(pane_id).is_some_and(|pane| {
-                                pane.stack.entries.iter().any(|entry| entry.id == entry_id)
-                            })
-                        })
-                        .map(|tab| tab.id)
-                    else {
+                    let Some(tab_id) = this.background_tab_holding(pane_id, entry_id) else {
                         return;
                     };
                     let removed = this
                         .background_sessions
-                        .iter_mut()
-                        .find(|tab| tab.id == tab_id)
-                        .and_then(|tab| tab.pane_mut(pane_id))
+                        .pane_in_mut(tab_id, pane_id)
                         .and_then(|pane| pane.stack.remove(entry_id));
                     if removed.is_some() {
                         if let Some(identity) = run_identity {
@@ -201,6 +166,17 @@ impl Zetta {
             }
         })
         .detach();
+    }
+
+    /// The background tab whose pane `pane_id` stacks entry `entry_id`.
+    fn background_tab_holding(&self, pane_id: u64, entry_id: u64) -> Option<u64> {
+        self.background_sessions
+            .iter()
+            .find(|tab| {
+                tab.pane(pane_id)
+                    .is_some_and(|pane| pane.stack.entry(entry_id).is_some())
+            })
+            .map(|tab| tab.id)
     }
 
     fn reap_background_pane(&mut self, pane_id: u64, cx: &mut Context<Self>) {
@@ -391,7 +367,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         self.configure_terminal_view_silent_mode(tab_id, &view, cx);
-        let visible = self.tabs.get(self.active_tab).is_some_and(|tab| {
+        let visible = self.current_tab().is_some_and(|tab| {
             tab.id == tab_id
                 && tab.pane_is_visible(pane_id)
                 && tab
@@ -436,9 +412,7 @@ impl Zetta {
 
         let pane_label = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane(pane_id))
+            .pane_in(tab_id, pane_id)
             .and_then(|pane| pane.generated_label.as_deref());
         let is_http_server = cfg!(feature = "http-server")
             && pane_label.is_some_and(|label| label.starts_with("HTTP: "));
@@ -473,8 +447,7 @@ impl Zetta {
         cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
             if let Some(tab) = this
                 .tabs
-                .iter_mut()
-                .find(|tab| tab.id == tab_id)
+                .by_id_mut(tab_id)
                 .filter(|tab| tab.pane(pane_id).is_some_and(|pane| !pane.base_exited))
             {
                 tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
@@ -488,16 +461,10 @@ impl Zetta {
             || is_tftp_server
             || self
                 .tabs
-                .iter()
-                .find(|tab| tab.id == tab_id)
+                .by_id(tab_id)
                 .is_some_and(|tab| tab.broadcast_input);
         view.update(cx, |view, _| view.set_emit_input_events(emit_input_events));
-        if let Some(pane) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-        {
+        if let Some(pane) = self.tabs.pane_in_mut(tab_id, pane_id) {
             pane.view = Some(view);
             pane.error = None;
             pane.exit = None;
@@ -519,7 +486,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         self.configure_terminal_view_silent_mode(tab_id, &view, cx);
-        let visible = self.tabs.get(self.active_tab).is_some_and(|tab| {
+        let visible = self.current_tab().is_some_and(|tab| {
             tab.id == tab_id
                 && tab.pane_is_visible(pane_id)
                 && tab.pane(pane_id).is_some_and(|pane| {
@@ -533,61 +500,22 @@ impl Zetta {
         if let Some(identity) = run_identity {
             run_registry.pane_reopened(identity);
         }
-        cx.subscribe_in(
+        self.subscribe_stacked_entry(
+            crate::stacked_panes::StackEntryAddress {
+                tab_id,
+                pane_id,
+                entry_id,
+            },
             &terminal,
-            window,
-            move |this, _terminal, event: &TerminalEvent, _window, cx| {
-                if let Some(identity) = run_identity {
-                    run_registry.observe_terminal_event(identity, event);
-                }
-                if let TerminalEvent::TaskFinished { exit_code } = event {
-                    this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
-                }
-            },
-        )
-        .detach();
-        cx.subscribe_in(
             &view,
+            run_identity,
             window,
-            move |this, _, event, window, cx| match event {
-                TerminalViewEvent::Close => {
-                    this.stacked_terminal_closed(tab_id, pane_id, entry_id, window, cx);
-                }
-                TerminalViewEvent::TitleChanged => cx.notify(),
-                TerminalViewEvent::PasteError(error) => this.show_error_notice(error.clone(), cx),
-                TerminalViewEvent::Input(_) => {}
-                TerminalViewEvent::OpenEditor(request) => {
-                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
-                }
-            },
-        )
-        .detach();
-        let input_enabled = self.terminal_input_enabled();
-        view.update(cx, |view, cx| {
-            view.set_emit_input_events(false);
-            view.set_input_enabled(input_enabled, cx);
-        });
-        let focus_handle = view.focus_handle(cx);
-        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
-            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                tab.activate_stack_entry(pane_id, PaneStackSelection::Stacked(entry_id));
-                cx.notify();
-            }
-            this.activate_current_project(window, cx);
-            this.clear_active_tab_attention_if_focused(window, cx);
-        })
-        .detach();
+            cx,
+        );
         if let Some(entry) = self
             .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-            .and_then(|pane| {
-                pane.stack
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.id == entry_id)
-            })
+            .pane_in_mut(tab_id, pane_id)
+            .and_then(|pane| pane.stack.entry_mut(entry_id))
         {
             entry.view = Some(view);
         }

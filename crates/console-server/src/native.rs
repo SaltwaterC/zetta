@@ -1,3 +1,6 @@
+//! The Windows objects the server works through: owned handles, the ConDrv
+//! device and its IOCTLs, and launching the child inside a kill-on-close job.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

@@ -1,3 +1,6 @@
+//! Panes that show a byte stream rather than a shell: the server and
+//! serial-console panes, and what their input does.
+
 use super::*;
 
 /// Shared by the HTTP and TFTP server panes: Ctrl-C stops the server instead
@@ -52,7 +55,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<u64> {
-        let tab = self.tabs.get(self.active_tab)?;
+        let tab = self.current_tab()?;
         if self.has_shared_tab_binding(tab.id) {
             self.show_notice(
                 "Serial, HTTP, and TFTP panes cannot be opened in a shared tab; open them in a local tab instead."
@@ -69,24 +72,25 @@ impl Zetta {
         let active_pane_id = tab.active_pane;
         let profile = tab.active_profile().cloned()?;
         let project = self.active_project_config().cloned();
-        let application_theme = self.application_theme(cx);
-        let fallback = self.project_context_policy(tab_id).theme_fallback(
+        let terminal_theme = match self.pane_theme(
+            tab_id,
             &profile,
             project.as_deref(),
-            &application_theme,
-        );
-        let terminal_theme =
-            match resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx) {
-                Ok(theme) => theme,
-                Err(error) => {
-                    self.configuration_error =
-                        Some(format!("Could not apply profile theme: {error:#}"));
-                    cx.notify();
-                    return None;
-                }
-            };
-        let pane_id = self.next_pane_id;
-        self.next_pane_id += 1;
+            ThemeOverrides {
+                pane: None,
+                tab: tab_theme_override.as_deref(),
+            },
+            cx,
+        ) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.configuration_error =
+                    Some(format!("Could not apply profile theme: {error:#}"));
+                cx.notify();
+                return None;
+            }
+        };
+        let pane_id = take_next_id(&mut self.next_pane_id);
         self.projects.inherit_pane_root(active_pane_id, pane_id);
 
         let tab = &mut self.tabs[self.active_tab];
@@ -153,7 +157,7 @@ impl Zetta {
         .detach();
         let focus_handle = view.focus_handle(cx);
         cx.on_focus(&focus_handle, window, move |this, window, cx| {
-            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            if let Some(tab) = this.tabs.by_id_mut(tab_id) {
                 tab.activate_pane(pane_id);
                 cx.notify();
             }

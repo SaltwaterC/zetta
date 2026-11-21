@@ -432,6 +432,8 @@ dependencies = [
  "alacritty_terminal",
  "unicode-width",
  "windows-sys 0.59.0",
+ "zetta_cli_help",
+ "zetta_sync",
 ]
 
 [[package]]
@@ -3206,6 +3208,7 @@ dependencies = [
  "memchr",
  "tempfile",
  "windows",
+ "zetta_cli_help",
 ]
 
 [[package]]
@@ -3304,6 +3307,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zetta_cli_help"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "zetta_profiles"
 version = "0.1.0"
 dependencies = [
@@ -3312,6 +3322,10 @@ dependencies = [
  "serde_json",
  "windows",
 ]
+
+[[package]]
+name = "zetta_sync"
+version = "0.1.0"
 
 [[package]]
 name = "zmij"
@@ -3348,6 +3362,8 @@ dependencies = [
  "windows",
  "zclip",
  "zeroize",
+ "zetta_cli_help",
  "zetta_profiles",
+ "zetta_sync",
  "zmux",
 ]

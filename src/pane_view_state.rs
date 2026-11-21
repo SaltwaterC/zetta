@@ -1,3 +1,7 @@
+//! How panes are shown rather than what runs in them: maximizing and
+//! minimizing, moving focus between neighbours, and the font size of the
+//! terminal and of each pane.
+
 use super::*;
 
 impl Zetta {
@@ -7,7 +11,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let tab_id = tab.id;
@@ -24,7 +28,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+        let Some(pane_id) = self.current_tab().map(|tab| tab.active_pane) else {
             return;
         };
         self.toggle_maximize_pane_by_id(pane_id, window, cx);
@@ -36,7 +40,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let tab_id = tab.id;
@@ -53,7 +57,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(pane_id) = self.tabs.get(self.active_tab).map(|tab| tab.active_pane) else {
+        let Some(pane_id) = self.current_tab().map(|tab| tab.active_pane) else {
             return;
         };
         self.minimize_pane_by_id(pane_id, window, cx);
@@ -65,7 +69,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let tab_id = tab.id;
@@ -82,7 +86,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let tab_id = tab.id;
@@ -100,11 +104,10 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let selected = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .is_some_and(Tab::select_previous_minimized);
         if selected {
-            if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+            if let Some(tab_id) = self.current_tab().map(|tab| tab.id) {
                 self.sync_shared_tab_state(tab_id, cx);
             }
             cx.notify();
@@ -118,11 +121,10 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let selected = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .is_some_and(Tab::select_next_minimized);
         if selected {
-            if let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) {
+            if let Some(tab_id) = self.current_tab().map(|tab| tab.id) {
                 self.sync_shared_tab_state(tab_id, cx);
             }
             cx.notify();
@@ -198,7 +200,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = self.tabs.get(self.active_tab).and_then(Tab::active_view) {
+        if let Some(view) = self.current_tab().and_then(Tab::active_view) {
             view.update(cx, TerminalView::increase_font_size);
         }
     }
@@ -209,7 +211,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = self.tabs.get(self.active_tab).and_then(Tab::active_view) {
+        if let Some(view) = self.current_tab().and_then(Tab::active_view) {
             view.update(cx, TerminalView::decrease_font_size);
         }
     }
@@ -220,7 +222,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(view) = self.tabs.get(self.active_tab).and_then(Tab::active_view) {
+        if let Some(view) = self.current_tab().and_then(Tab::active_view) {
             view.update(cx, TerminalView::reset_font_size);
         }
     }

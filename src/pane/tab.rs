@@ -129,6 +129,36 @@ pub(crate) struct Tab {
     pub(crate) group: crate::tab_groups::TabGroup,
 }
 
+/// Finds a tab by its id in any collection of tabs: the window's visible
+/// `Zetta::tabs`, a `&[Tab]`, or the background-session runner.
+///
+/// A trait on the collection rather than a method on `Zetta`, so a lookup
+/// borrows only the field it searches and the caller can still touch the rest
+/// of `Zetta` while it holds the tab.
+pub(crate) trait TabsById {
+    fn by_id(&self, tab_id: u64) -> Option<&Tab>;
+    fn by_id_mut(&mut self, tab_id: u64) -> Option<&mut Tab>;
+
+    /// Pane `pane_id` of tab `tab_id`.
+    fn pane_in(&self, tab_id: u64, pane_id: u64) -> Option<&TerminalPane> {
+        self.by_id(tab_id).and_then(|tab| tab.pane(pane_id))
+    }
+
+    fn pane_in_mut(&mut self, tab_id: u64, pane_id: u64) -> Option<&mut TerminalPane> {
+        self.by_id_mut(tab_id).and_then(|tab| tab.pane_mut(pane_id))
+    }
+}
+
+impl TabsById for [Tab] {
+    fn by_id(&self, tab_id: u64) -> Option<&Tab> {
+        self.iter().find(|tab| tab.id == tab_id)
+    }
+
+    fn by_id_mut(&mut self, tab_id: u64) -> Option<&mut Tab> {
+        self.iter_mut().find(|tab| tab.id == tab_id)
+    }
+}
+
 impl Tab {
     /// Applies a user choice to both the effective icon and its precedence
     /// marker. Project resolution must never be able to replace this choice.
@@ -155,8 +185,7 @@ impl Tab {
             .iter_mut()
             .map(|pane| {
                 let old_id = pane.id;
-                pane.id = *next_pane_id;
-                *next_pane_id += 1;
+                pane.id = take_next_id(next_pane_id);
                 (old_id, pane.id)
             })
             .collect::<HashMap<_, _>>();
@@ -164,8 +193,7 @@ impl Tab {
             for pane in &mut self.panes {
                 for entry in &mut pane.stack.entries {
                     let old_id = entry.id;
-                    entry.id = *next_pane_id;
-                    *next_pane_id += 1;
+                    entry.id = take_next_id(next_pane_id);
                     if pane.stack.selected == PaneStackSelection::Stacked(old_id) {
                         pane.stack.selected = PaneStackSelection::Stacked(entry.id);
                     }

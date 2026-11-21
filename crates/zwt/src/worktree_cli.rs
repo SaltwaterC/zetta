@@ -1,3 +1,6 @@
+//! `zwt` and `zetta wt`: creating, finishing and syncing a git worktree, and
+//! the invocation that names the command in its help and diagnostics.
+
 use std::{
     env,
     ffi::OsString,

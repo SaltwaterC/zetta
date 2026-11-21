@@ -26,6 +26,8 @@ name = "fthost"
 required-features = ["harness"]
 
 [target.'cfg(windows)'.dependencies]
+zetta_cli_help = { path = "../zetta_cli_help" }
+zetta_sync = { path = "../zetta_sync" }
 alacritty_terminal = { path = "../alacritty_terminal", default-features = false, optional = true }
 unicode-width = "0.2.0"
 vte = { path = "../vte", default-features = false, features = ["std", "ansi"], optional = true }

@@ -1,3 +1,6 @@
+//! Asking before a tab closes with something still running in it: the prompt,
+//! its keys, and what confirming does.
+
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,7 +98,7 @@ impl Zetta {
     ) -> Option<AnyElement> {
         let confirmation = self.close_tab_confirmation.as_ref()?;
         let colors = self.window_theme(cx).colors().clone();
-        let tab = self.tabs.iter().find(|tab| tab.id == confirmation.tab_id);
+        let tab = self.tabs.by_id(confirmation.tab_id);
         let title = tab.map_or_else(
             || "this tab".into(),
             |tab| tab_overflow_entry_label(tab, cx),

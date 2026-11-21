@@ -280,11 +280,7 @@ impl Zetta {
             .collect::<Vec<_>>();
         let terminal_settings = TerminalSpawnSettings::current(cx);
 
-        let new_pane_ids = (0..new_pane_count).map(|_| {
-            let pane_id = self.next_pane_id;
-            self.next_pane_id += 1;
-            pane_id
-        });
+        let new_pane_ids = (0..new_pane_count).map(|_| take_next_id(&mut self.next_pane_id));
         let existing_active_wsl_cwd_file = active_pane.and_then(|pane| pane.wsl_cwd_file.clone());
         let new_panes = new_pane_ids
             .enumerate()
@@ -495,8 +491,7 @@ impl Zetta {
         for (leaf_index, pane_id) in stacked_leaves {
             let leaf = &leaves[leaf_index];
             for command in &leaf.stack {
-                let entry_id = self.next_pane_id;
-                self.next_pane_id += 1;
+                let entry_id = take_next_id(&mut self.next_pane_id);
                 let entry = StackedPane::new(
                     entry_id,
                     command.clone(),
@@ -603,7 +598,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return false;
         };
         let tab_id = tab.id;
@@ -632,16 +627,14 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let application_theme = self.application_theme(cx);
-        let fallback = self.project_context_policy(tab_id).theme_fallback(
+        let terminal_theme = match self.pane_theme(
+            tab_id,
             &profile,
             self.active_project_config().map(AsRef::as_ref),
-            &application_theme,
-        );
-        let terminal_theme = match resolve_terminal_theme(
-            pane_theme_override.as_deref(),
-            tab_theme_override.as_deref(),
-            fallback,
+            ThemeOverrides {
+                pane: pane_theme_override.as_deref(),
+                tab: tab_theme_override.as_deref(),
+            },
             cx,
         ) {
             Ok(theme) => theme,
@@ -658,8 +651,7 @@ impl Zetta {
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, active_pane_id);
 
         let replaced_stack_ids = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(|tab| tab.pane(active_pane_id))
             .map(|pane| {
                 pane.stack

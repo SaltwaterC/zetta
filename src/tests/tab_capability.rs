@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use super::*;
 use crate::{
     Config, IconName, PaneLayout, Profile, ProfileIcon, Shell, Tab, TabClosePolicy,
-    TabIconOverride, TerminalPane, background_sessions::SessionAuthentication,
+    TabIconOverride, TerminalPane, background_sessions::SessionAuthentication, take_next_id,
 };
 
 fn window(cx: &mut gpui::TestAppContext) -> (gpui::Entity<Zetta>, &mut gpui::VisualTestContext) {
@@ -42,10 +42,8 @@ fn open_stand_in_tab(zetta: &gpui::Entity<Zetta>, cx: &mut gpui::VisualTestConte
             dark_theme: None,
             icon: ProfileIcon::Zetta,
         };
-        let pane_id = zetta.next_pane_id;
-        zetta.next_pane_id += 1;
-        let tab_id = zetta.next_tab_id;
-        zetta.next_tab_id += 1;
+        let pane_id = take_next_id(&mut zetta.next_pane_id);
+        let tab_id = take_next_id(&mut zetta.next_tab_id);
         zetta.tabs.push(Tab {
             id: tab_id,
             attention_id: tab_id,

@@ -1,7 +1,8 @@
-use std::time::Duration;
+//! Silent mode: whether notifications and attention requests stay quiet,
+//! combining the user's manual toggle with the desktop's own do-not-disturb
+//! state where it exposes one.
 
-#[cfg(target_os = "linux")]
-use std::process::Command;
+use std::time::Duration;
 
 #[cfg(not(target_os = "macos"))]
 use gpui::AppContext;
@@ -12,6 +13,22 @@ use crate::{
     RequestFocusStatusAccess, TerminalPane, ToggleSilentMode, ToggleTabSilentMode, Zetta,
     ZettaProcessState, process_zetta_entities,
 };
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
+
+#[cfg(target_os = "linux")]
+pub(crate) use linux::LinuxSilentSource;
+#[cfg(target_os = "linux")]
+use linux::{detect_linux_system_silent_state_with_source, spawn_gnome_settings_watcher};
+#[cfg(target_os = "macos")]
+use macos::{detect_macos_focus_observation, request_focus_status_authorization};
+#[cfg(target_os = "windows")]
+use windows::detect_windows_system_silent_state;
 
 /// Fallback cadence for desktops whose silence state has no change signal this
 /// code can subscribe to.
@@ -192,12 +209,7 @@ impl Zetta {
         view: &Entity<TerminalView>,
         cx: &mut Context<Self>,
     ) {
-        let tab_silent_mode = self
-            .tabs
-            .iter()
-            .chain(self.background_sessions.iter())
-            .find(|tab| tab.id == tab_id)
-            .is_some_and(|tab| tab.silent_mode);
+        let tab_silent_mode = self.any_tab(tab_id).is_some_and(|tab| tab.silent_mode);
         let enabled = combined_silent_mode(effective_silent_mode(cx), tab_silent_mode);
         view.update(cx, |view, cx| {
             view.set_system_bell_enabled(!enabled, cx);
@@ -211,7 +223,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let global_silent_mode = effective_silent_mode(cx);
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let tab_silent_mode = toggle_tab_silent_mode_value(&mut tab.silent_mode);
@@ -377,56 +389,11 @@ fn detect_system_silent_state() -> SystemSilentState {
     {
         return detect_macos_focus_observation().1;
     }
-    #[allow(unreachable_code)]
+    #[allow(
+        unreachable_code,
+        reason = "unreachable on Windows, Linux and macOS; the result everywhere else"
+    )]
     SystemSilentState::Unknown
-}
-
-#[cfg(target_os = "windows")]
-#[repr(C)]
-struct WnfStateName {
-    data: [u32; 2],
-}
-
-#[cfg(target_os = "windows")]
-type NtQueryWnfStateData = unsafe extern "system" fn(
-    state_name: *const WnfStateName,
-    type_id: *const std::ffi::c_void,
-    explicit_scope: *const std::ffi::c_void,
-    change_stamp: *mut u32,
-    buffer: *mut std::ffi::c_void,
-    buffer_size: *mut u32,
-) -> i32;
-
-// This state is updated by the Windows shell whenever the live Do Not Disturb
-// profile changes. Its four-byte payload is 0 for off, 1 for priority-only,
-// and 2 for alarms-only.
-#[cfg(target_os = "windows")]
-const WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED: WnfStateName = WnfStateName {
-    data: [0xA3BF_1C75, 0x0D83_063E],
-};
-
-#[cfg(target_os = "windows")]
-fn detect_windows_system_silent_state() -> SystemSilentState {
-    let Some(query) = nt_query_wnf_state_data() else {
-        return SystemSilentState::Unknown;
-    };
-    let mut change_stamp = 0;
-    let mut profile = 0_u32;
-    let mut buffer_size = size_of::<u32>() as u32;
-    // SAFETY: The cached address is resolved from ntdll under the exact
-    // NtQueryWnfStateData ABI. Every pointer is either null for an optional
-    // parameter or points to writable storage of the advertised size.
-    let status = unsafe {
-        query(
-            &WNF_SHEL_QUIETHOURS_ACTIVE_PROFILE_CHANGED,
-            std::ptr::null(),
-            std::ptr::null(),
-            &mut change_stamp,
-            std::ptr::addr_of_mut!(profile).cast(),
-            &mut buffer_size,
-        )
-    };
-    classify_windows_dnd_query(Some((status, buffer_size, profile)))
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -443,77 +410,6 @@ fn classify_windows_dnd_query(result: Option<(i32, u32, u32)>) -> SystemSilentSt
         _ => SystemSilentState::Unknown,
     }
 }
-
-#[cfg(target_os = "windows")]
-fn nt_query_wnf_state_data() -> Option<NtQueryWnfStateData> {
-    use std::sync::OnceLock;
-
-    static QUERY: OnceLock<Option<NtQueryWnfStateData>> = OnceLock::new();
-    *QUERY.get_or_init(|| {
-        use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
-        use windows::core::{s, w};
-
-        // SAFETY: ntdll is loaded for every Windows process. GetProcAddress
-        // returns None when this private API is absent, which is cached as a
-        // conservative Unknown result by the caller.
-        let module = unsafe { GetModuleHandleW(w!("ntdll.dll")) }.ok()?;
-        let address = unsafe { GetProcAddress(module, s!("NtQueryWnfStateData")) }?;
-        // SAFETY: The named ntdll export has the NtQueryWnfStateData ABI
-        // declared above. The pointer remains valid because ntdll cannot be
-        // unloaded during the process lifetime.
-        Some(unsafe {
-            std::mem::transmute::<unsafe extern "system" fn() -> isize, NtQueryWnfStateData>(
-                address,
-            )
-        })
-    })
-}
-
-/// Which desktop mechanism answered, so the observer knows whether a change
-/// notification exists for it or whether it has to keep polling.
-#[cfg(target_os = "linux")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LinuxSilentSource {
-    /// A D-Bus property that this code has no subscription for.
-    DbusProperty,
-    /// The `org.gnome.desktop.notifications show-banners` GSettings key, whose
-    /// writes are announced by dconf.
-    GnomeShowBanners,
-}
-
-#[cfg(target_os = "linux")]
-fn detect_linux_system_silent_state_with_source() -> (SystemSilentState, LinuxSilentSource) {
-    futures::executor::block_on(async {
-        if let Some(inhibited) = query_kde_inhibited().await {
-            return (
-                if inhibited {
-                    SystemSilentState::Active
-                } else {
-                    SystemSilentState::Inactive
-                },
-                LinuxSilentSource::DbusProperty,
-            );
-        }
-        if let Some(inhibited) = query_xfce_inhibited().await {
-            return (
-                if inhibited {
-                    SystemSilentState::Active
-                } else {
-                    SystemSilentState::Inactive
-                },
-                LinuxSilentSource::DbusProperty,
-            );
-        }
-        (
-            gnome_show_banners_state(),
-            LinuxSilentSource::GnomeShowBanners,
-        )
-    })
-}
-
-/// The dconf key backing GNOME's Do Not Disturb switch.
-#[cfg(target_os = "linux")]
-const GNOME_SHOW_BANNERS_PATH: &str = "/org/gnome/desktop/notifications/show-banners";
 
 /// dconf announces writes as `Notify(prefix, changes, tag)`. A single-key write
 /// sends the whole key path as `prefix` with one empty change; a directory write
@@ -535,106 +431,6 @@ pub(crate) fn dconf_notify_affects(prefix: &str, changes: &[String], key: &str) 
         .any(|change| overlaps(&format!("{prefix}{change}"), key))
 }
 
-/// Subscribes to dconf's change signal so the observer can park instead of
-/// re-reading the setting on a timer.
-///
-/// The returned channel closes if the subscription cannot be established or is
-/// later lost, which the caller treats as "resume polling".
-#[cfg(target_os = "linux")]
-fn spawn_gnome_settings_watcher(cx: &App) -> async_channel::Receiver<()> {
-    use futures::StreamExt as _;
-
-    // A single slot is enough: the observer re-reads the current value on wake,
-    // so coalesced notifications lose nothing.
-    let (changes_tx, changes_rx) = async_channel::bounded(1);
-    cx.background_executor()
-        .spawn(async move {
-            let Ok(connection) = zbus::Connection::session().await else {
-                return;
-            };
-            let Ok(rule) = zbus::MatchRule::builder()
-                .msg_type(zbus::message::Type::Signal)
-                .interface("ca.desrt.dconf.Writer")
-                .and_then(|builder| builder.member("Notify"))
-                .and_then(|builder| builder.path("/ca/desrt/dconf/Writer/user"))
-                .map(|builder| builder.build())
-            else {
-                return;
-            };
-            let Ok(mut messages) =
-                zbus::MessageStream::for_match_rule(rule, &connection, Some(1)).await
-            else {
-                return;
-            };
-
-            while let Some(Ok(message)) = messages.next().await {
-                let Ok((prefix, changed_keys, _tag)) = message
-                    .body()
-                    .deserialize::<(String, Vec<String>, String)>()
-                else {
-                    continue;
-                };
-                if !dconf_notify_affects(&prefix, &changed_keys, GNOME_SHOW_BANNERS_PATH) {
-                    continue;
-                }
-                // A full slot already means "re-read pending"; dropping the
-                // duplicate is correct. A closed channel means the observer is
-                // gone, so the watcher can stop.
-                match changes_tx.try_send(()) {
-                    Ok(()) | Err(async_channel::TrySendError::Full(())) => {}
-                    Err(async_channel::TrySendError::Closed(())) => break,
-                }
-            }
-        })
-        .detach();
-
-    changes_rx
-}
-
-#[cfg(target_os = "linux")]
-async fn query_kde_inhibited() -> Option<bool> {
-    query_dbus_bool(
-        "org.freedesktop.Notifications",
-        "/org/freedesktop/Notifications",
-        "org.freedesktop.DBus.Properties",
-        "Get",
-        &("org.freedesktop.Notifications", "Inhibited"),
-    )
-    .await
-}
-
-#[cfg(target_os = "linux")]
-async fn query_xfce_inhibited() -> Option<bool> {
-    query_dbus_bool(
-        "org.xfce.Xfconf",
-        "/org/xfce/Xfconf",
-        "org.xfce.Xfconf",
-        "GetProperty",
-        &("xfce4-notifyd", "/do-not-disturb"),
-    )
-    .await
-}
-
-#[cfg(target_os = "linux")]
-async fn query_dbus_bool<B>(
-    destination: &str,
-    path: &str,
-    interface: &str,
-    method: &str,
-    body: &B,
-) -> Option<bool>
-where
-    B: serde::Serialize + zbus::zvariant::DynamicType,
-{
-    let connection = zbus::Connection::session().await.ok()?;
-    let reply = connection
-        .call_method(Some(destination), path, Some(interface), method, body)
-        .await
-        .ok()?;
-    let (value,): (zbus::zvariant::OwnedValue,) = reply.body().deserialize().ok()?;
-    bool::try_from(value).ok()
-}
-
 #[cfg(any(target_os = "linux", test))]
 fn parse_gnome_show_banners(value: &str) -> Option<SystemSilentState> {
     match value.trim().to_ascii_lowercase().as_str() {
@@ -642,66 +438,6 @@ fn parse_gnome_show_banners(value: &str) -> Option<SystemSilentState> {
         "false" => Some(SystemSilentState::Active),
         _ => None,
     }
-}
-
-#[cfg(target_os = "linux")]
-fn gnome_show_banners_state() -> SystemSilentState {
-    let output = Command::new("gsettings")
-        .args(["get", "org.gnome.desktop.notifications", "show-banners"])
-        .output();
-    output
-        .ok()
-        .filter(|output| output.status.success())
-        .and_then(|output| parse_gnome_show_banners(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or(SystemSilentState::Unknown)
-}
-
-#[cfg(target_os = "macos")]
-fn is_packaged_gui_launch() -> bool {
-    let Some(executable) = std::env::current_exe()
-        .ok()
-        .and_then(|executable| executable.canonicalize().ok())
-    else {
-        return false;
-    };
-    let Some(macos) = executable.parent() else {
-        return false;
-    };
-    let Some(contents) = macos.parent() else {
-        return false;
-    };
-    let Some(bundle) = contents.parent() else {
-        return false;
-    };
-    macos.file_name().and_then(|name| name.to_str()) == Some("MacOS")
-        && contents.file_name().and_then(|name| name.to_str()) == Some("Contents")
-        && bundle.extension().and_then(|extension| extension.to_str()) == Some("app")
-}
-
-#[cfg(target_os = "macos")]
-fn request_focus_status_authorization() -> Option<FocusStatusAccess> {
-    use block2::RcBlock;
-    use objc2_intents::{INFocusStatusAuthorizationStatus, INFocusStatusCenter};
-
-    if !is_packaged_gui_launch() {
-        return None;
-    }
-    let center = unsafe { INFocusStatusCenter::defaultCenter() };
-    let status = unsafe { center.authorizationStatus() };
-    let access = focus_status_access(status);
-    if status == INFocusStatusAuthorizationStatus::NotDetermined {
-        let completion = RcBlock::new(|status: INFocusStatusAuthorizationStatus| {
-            eprintln!("zetta: macOS Focus status authorization result: {status:?}");
-        });
-        unsafe {
-            center.requestAuthorizationWithCompletionHandler(Some(&completion));
-        }
-    }
-    Some(if access == FocusStatusAccess::Authorized {
-        detect_macos_focus_observation().0
-    } else {
-        access
-    })
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -714,46 +450,6 @@ fn macos_focus_status(access: FocusStatusAccess, focused: Option<bool>) -> Syste
         Some(false) => SystemSilentState::Inactive,
         None => SystemSilentState::Unknown,
     }
-}
-
-#[cfg(target_os = "macos")]
-fn focus_status_access(
-    status: objc2_intents::INFocusStatusAuthorizationStatus,
-) -> FocusStatusAccess {
-    use objc2_intents::INFocusStatusAuthorizationStatus;
-
-    if status == INFocusStatusAuthorizationStatus::NotDetermined {
-        FocusStatusAccess::NotDetermined
-    } else if status == INFocusStatusAuthorizationStatus::Denied {
-        FocusStatusAccess::Denied
-    } else if status == INFocusStatusAuthorizationStatus::Restricted {
-        FocusStatusAccess::Restricted
-    } else if status == INFocusStatusAuthorizationStatus::Authorized {
-        FocusStatusAccess::Authorized
-    } else {
-        FocusStatusAccess::Unknown
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn detect_macos_focus_observation() -> (FocusStatusAccess, SystemSilentState) {
-    use objc2_intents::INFocusStatusCenter;
-
-    if !is_packaged_gui_launch() {
-        return (FocusStatusAccess::Unknown, SystemSilentState::Unknown);
-    }
-    let center = unsafe { INFocusStatusCenter::defaultCenter() };
-    let access = focus_status_access(unsafe { center.authorizationStatus() });
-    if access != FocusStatusAccess::Authorized {
-        return (access, SystemSilentState::Unknown);
-    }
-    let Some(focused) = (unsafe { center.focusStatus().isFocused() }) else {
-        return (
-            FocusStatusAccess::AuthorizedButUnavailable,
-            SystemSilentState::Unknown,
-        );
-    };
-    (access, macos_focus_status(access, Some(focused.as_bool())))
 }
 
 #[cfg(test)]

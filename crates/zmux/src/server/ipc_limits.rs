@@ -127,10 +127,7 @@ impl SnapshotBudget {
             "{bytes} bytes of pane snapshots exceed the {} the multiplexer reads at once",
             self.capacity
         );
-        let mut reserved = self
-            .reserved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut reserved = self.reserved.lock().recover_poison();
         while *reserved + bytes > self.capacity {
             let remaining = deadline.saturating_duration_since(Instant::now());
             anyhow::ensure!(
@@ -140,7 +137,7 @@ impl SnapshotBudget {
             reserved = self
                 .released
                 .wait_timeout(reserved, remaining)
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .recover_poison()
                 .0;
         }
         *reserved += bytes;
@@ -152,10 +149,7 @@ impl SnapshotBudget {
 
     #[cfg(test)]
     pub(super) fn reserved(&self) -> usize {
-        *self
-            .reserved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        *self.reserved.lock().recover_poison()
     }
 }
 
@@ -167,11 +161,7 @@ pub(super) struct SnapshotReservation<'a> {
 
 impl Drop for SnapshotReservation<'_> {
     fn drop(&mut self) {
-        let mut reserved = self
-            .budget
-            .reserved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut reserved = self.budget.reserved.lock().recover_poison();
         *reserved -= self.bytes;
         drop(reserved);
         self.budget.released.notify_all();

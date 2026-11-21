@@ -51,8 +51,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some(target) = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(Tab::active_pane)
             .and_then(TerminalPane::selected_view)
             .filter(|view| {

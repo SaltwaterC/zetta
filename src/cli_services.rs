@@ -1,3 +1,7 @@
+//! The command-line services the `zetta` binary runs itself, each behind its
+//! feature: the serial console, the HTTP and TFTP servers, notifications and
+//! the clipboard.
+
 #[cfg(feature = "serial-console")]
 mod raw_terminal;
 #[cfg(feature = "serial-console")]
@@ -22,7 +26,7 @@ pub(crate) use tftp_setcap::{TFTP_SETCAP_HINT, parse_tftp_setcap_args, tftp_setc
 #[cfg(feature = "notifications")]
 mod notify_proxy;
 #[cfg(all(test, notify_cleanup_enabled))]
-pub(crate) use notify_proxy::NotifyCleanupCommand;
+pub(crate) use notification_request::NotifyCleanupCommand;
 #[cfg(all(target_os = "macos", feature = "notifications"))]
 pub(crate) use notify_proxy::macos_notification_target_for_response;
 #[cfg(notify_cleanup_enabled)]
@@ -37,46 +41,26 @@ mod clipboard;
 #[cfg(feature = "clipboard")]
 pub(crate) use clipboard::{copy_help, parse_copy_args, parse_paste_args, paste_help};
 
+#[cfg(cli_services)]
 use anyhow::Result;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum NotificationTimeout {
-    #[default]
-    Default,
-    Never,
-    Milliseconds(u32),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NotificationRequest {
-    pub(crate) summary: String,
-    pub(crate) body: Option<String>,
-    pub(crate) app_name: Option<String>,
-    pub(crate) icon: Option<String>,
-    pub(crate) sound: Option<String>,
-    pub(crate) timeout: Option<NotificationTimeout>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct NotificationTarget {
-    pub(crate) process_id: u32,
-    pub(crate) attention_id: u64,
-}
-
-pub(crate) fn parse_notification_timeout(value: &str) -> Result<NotificationTimeout> {
-    match value {
-        "default" => Ok(NotificationTimeout::Default),
-        "never" => Ok(NotificationTimeout::Never),
-        value => value
-            .parse::<u32>()
-            .map(NotificationTimeout::Milliseconds)
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "--timeout must be default, never, or a whole number of milliseconds, got {value:?}"
-                )
-            }),
-    }
-}
+// `zntfy` owns what a notification request is; Zetta includes that one file
+// rather than linking the crate, whose notification backends it does not use
+// on Linux or Windows.
+#[cfg_attr(
+    not(feature = "notifications"),
+    allow(
+        dead_code,
+        reason = "without the notify subcommand only the request types are used"
+    )
+)]
+#[path = "../crates/zntfy/src/request.rs"]
+mod notification_request;
+#[cfg(feature = "notifications")]
+pub(crate) use notification_request::NotificationTimeout;
+pub(crate) use notification_request::{
+    NotificationOptions, NotificationRequest, NotificationTarget,
+};
 
 #[cfg(cli_services)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -92,7 +76,7 @@ pub(crate) enum CliServiceCommand {
     #[cfg(feature = "notifications")]
     Notify(NotificationRequest),
     #[cfg(notify_cleanup_enabled)]
-    NotifyCleanup(notify_proxy::NotifyCleanupCommand),
+    NotifyCleanup(notification_request::NotifyCleanupCommand),
     #[cfg(feature = "clipboard")]
     Copy(clipboard::CopyCommand),
     #[cfg(feature = "clipboard")]
@@ -114,7 +98,7 @@ impl CliServiceCommand {
             #[cfg(feature = "notifications")]
             Self::Notify(command) => notify_proxy::run_notification_proxy(
                 command,
-                notify_proxy::notification_target_from_environment(),
+                notification_request::notification_target_from_environment(),
             ),
             #[cfg(notify_cleanup_enabled)]
             Self::NotifyCleanup(command) => notify_proxy::run_notification_cleanup_proxy(command),

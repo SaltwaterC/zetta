@@ -1,3 +1,6 @@
+//! Console aliases, the doskey macros cmd.exe expands: kept per executable and
+//! matched case-insensitively, as conhost keeps them.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

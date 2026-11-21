@@ -664,7 +664,10 @@ fn remote_attach_uses_the_transport_probe_as_its_only_readiness_check() {
         let (stream, _) = listener.accept().unwrap();
         let mut request = Connection::new(stream);
         let (envelope, _) = request.receive::<Envelope>().unwrap();
-        assert!(matches!(envelope.request, Request::Attach { .. }));
+        assert!(matches!(
+            envelope.request,
+            Request::Attach(crate::messages::AttachRequest { .. })
+        ));
         request
             .send(&Response::SharedAttached {
                 pane_id: 2,

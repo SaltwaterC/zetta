@@ -12,6 +12,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
+use zetta_sync::RecoverPoison as _;
 
 pub type SharedOutput = Arc<Mutex<Box<dyn ConsoleOutput>>>;
 pub(crate) struct Request {
@@ -80,9 +81,7 @@ struct Shared {
 #[derive(Clone)]
 pub(crate) struct Input(Arc<Shared>);
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex.lock().recover_poison()
 }
 impl Input {
     pub fn new(
@@ -328,11 +327,7 @@ impl Input {
                     for request in &mut state.requests {
                         request.waited = true;
                     }
-                    state = self
-                        .0
-                        .changed
-                        .wait(state)
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    state = self.0.changed.wait(state).recover_poison();
                 }
             };
             let Some(mut request) = request else {
@@ -363,11 +358,7 @@ impl Input {
                         && !state.alert.any()
                         && state.records.len() == old
                     {
-                        state = self
-                            .0
-                            .changed
-                            .wait(state)
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        state = self.0.changed.wait(state).recover_poison();
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::InvalidInput => {

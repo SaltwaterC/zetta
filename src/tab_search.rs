@@ -60,7 +60,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if self.tab_search.is_none() {
-            let Some(tab) = self.tabs.get(self.active_tab) else {
+            let Some(tab) = self.current_tab() else {
                 return;
             };
             let tab_id = tab.id;
@@ -106,8 +106,7 @@ impl Zetta {
         let tab_id = search.tab_id;
         let terminals = self
             .tabs
-            .iter()
-            .find(|tab| tab.id == tab_id)
+            .by_id(tab_id)
             .into_iter()
             .flat_map(|tab| tab.panes.iter())
             .flat_map(|pane| {
@@ -149,7 +148,7 @@ impl Zetta {
         }) else {
             return;
         };
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+        let Some(tab) = self.tabs.by_id_mut(tab_id) else {
             return;
         };
         tab.restore_minimized(pane_id);

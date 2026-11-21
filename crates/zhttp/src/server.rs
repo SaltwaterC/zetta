@@ -50,11 +50,14 @@ use std::{
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
-        mpsc::{self, Receiver, Sender},
+        mpsc::{self, Sender},
     },
     thread,
     time::{Duration, Instant},
 };
+use zetta_sync::RecoverPoison as _;
+
+use crate::log_reader::LogReader;
 
 use anyhow::{Context as _, Result};
 use time::{OffsetDateTime, macros::format_description};
@@ -69,7 +72,6 @@ const HEADER_DEADLINE: Duration = Duration::from_secs(10);
 const RESPONSE_GRACE: Duration = Duration::from_secs(30);
 /// Slowest sustained rate a response may be read at once the grace is spent.
 const RESPONSE_MIN_BYTES_PER_SECOND: u64 = 16 * 1024;
-const LOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_REQUEST_SIZE: usize = 64 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 32;
 const MAX_REQUESTS_PER_PEER: usize = 8;
@@ -171,11 +173,7 @@ fn start_http_server_with_limits(
         .context("starting HTTP server worker")?;
 
     Ok(OpenHttpServer {
-        reader: Box::new(LogReader {
-            receiver: log_rx,
-            pending: Vec::new(),
-            offset: 0,
-        }),
+        reader: Box::new(LogReader::new(log_rx, "no HTTP log data")),
         writer: Box::new(ServerControl { active, address }),
         address,
         root,
@@ -189,39 +187,6 @@ struct ServerContext {
     hosts: HostPolicy,
     limits: ServerLimits,
     logs: Sender<Vec<u8>>,
-}
-
-struct LogReader {
-    receiver: Receiver<Vec<u8>>,
-    pending: Vec<u8>,
-    offset: usize,
-}
-
-impl Read for LogReader {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if output.is_empty() {
-            return Ok(0);
-        }
-        if self.offset == self.pending.len() {
-            match self.receiver.recv_timeout(LOG_POLL_INTERVAL) {
-                Ok(message) => {
-                    self.pending = message;
-                    self.offset = 0;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "no HTTP log data",
-                    ));
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
-            }
-        }
-        let count = output.len().min(self.pending.len() - self.offset);
-        output[..count].copy_from_slice(&self.pending[self.offset..self.offset + count]);
-        self.offset += count;
-        Ok(count)
-    }
 }
 
 struct ServerControl {
@@ -289,10 +254,7 @@ impl RequestSlots {
     }
 
     fn acquire(self: &Arc<Self>, peer: IpAddr) -> std::result::Result<SlotGuard, SlotRefusal> {
-        let mut counts = self
-            .in_use
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut counts = self.in_use.lock().recover_poison();
         if counts.total >= self.max_total {
             return Err(SlotRefusal::ServerBusy);
         }
@@ -309,10 +271,7 @@ impl RequestSlots {
     }
 
     fn release(&self, peer: IpAddr) {
-        let mut counts = self
-            .in_use
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut counts = self.in_use.lock().recover_poison();
         counts.total = counts.total.saturating_sub(1);
         if let Some(count) = counts.per_peer.get_mut(&peer) {
             *count -= 1;

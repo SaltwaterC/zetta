@@ -59,6 +59,7 @@ fn main() {
 /// declared to `rustc-check-cfg` or `cargo check` reports it as unexpected.
 fn emit_cfg_aliases() {
     println!("cargo::rustc-check-cfg=cfg(linux_like)");
+    println!("cargo::rustc-check-cfg=cfg(drawn_window_controls)");
     println!("cargo::rustc-check-cfg=cfg(servers_enabled)");
     println!("cargo::rustc-check-cfg=cfg(tftp_enabled)");
     println!("cargo::rustc-check-cfg=cfg(byte_stream_panes)");
@@ -72,6 +73,11 @@ fn emit_cfg_aliases() {
     );
     if linux_like {
         println!("cargo::rustc-cfg=linux_like");
+    }
+    if linux_like || env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        // The platforms whose window buttons Zetta draws itself, and so has to
+        // know the window's capabilities for. macOS draws its own traffic lights.
+        println!("cargo::rustc-cfg=drawn_window_controls");
     }
     if linux_like && feature_enabled("NOTIFICATIONS") {
         // The leaked-worker bug behind `notify cleanup` reaps only reproduces on the

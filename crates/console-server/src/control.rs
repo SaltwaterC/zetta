@@ -1,3 +1,6 @@
+//! Delivering control events (Ctrl+C, Ctrl+Break, close) to attached clients,
+//! the way OpenConsole does through `ConsoleControl`.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

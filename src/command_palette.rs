@@ -1,3 +1,6 @@
+//! The command palette's model: the commands it lists for this launch mode and
+//! project, matching them against the query, and moving the selection.
+
 use std::path::{Path, PathBuf};
 
 use gpui::{Action, ScrollStrategy, UniformListScrollHandle};

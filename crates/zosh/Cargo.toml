@@ -15,6 +15,7 @@ name = "zosh"
 path = "src/main.rs"
 
 [dependencies]
+zetta_sync = { path = "../zetta_sync" }
 anyhow = "1"
 # The scrollback rows the server carries ride inside an OSC string, so they
 # are Base64 there; see PROTOCOL.md.

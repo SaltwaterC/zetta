@@ -1,3 +1,6 @@
+//! Panes that run a command: `zetta pane`'s request, quoting the command for
+//! the profile's shell, and finding the pane it targets by label.
+
 use super::*;
 use std::collections::BTreeMap;
 
@@ -575,7 +578,7 @@ impl Zetta {
                         .iter()
                         .find(|tab| tab.attention_id == attention_id)
                 }),
-            None => self.tabs.get(self.active_tab),
+            None => self.current_tab(),
         };
         tab.map(|tab| tab.panes.iter().map(TerminalPane::label).collect())
             .unwrap_or_default()
@@ -671,20 +674,22 @@ impl Zetta {
         );
         let shell =
             exact_pane_command_shell(&profile.command, &request.command, wsl_directory.as_deref())?;
-        let application_theme = self.application_theme(cx);
-        let fallback = self.project_context_policy(tab_id).theme_fallback(
-            &profile,
-            project.as_deref(),
-            &application_theme,
-        );
-        let terminal_theme =
-            resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx)
-                .context("could not resolve the active profile theme")?;
+        let terminal_theme = self
+            .pane_theme(
+                tab_id,
+                &profile,
+                project.as_deref(),
+                ThemeOverrides {
+                    pane: None,
+                    tab: tab_theme_override.as_deref(),
+                },
+                cx,
+            )
+            .context("could not resolve the active profile theme")?;
         let mut settings = TerminalSpawnSettings::current(cx);
         let path_hyperlink_regexes = settings.path_hyperlink_regexes(true);
-        let pane_id = self.next_pane_id;
+        let pane_id = take_next_id(&mut self.next_pane_id);
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
-        self.next_pane_id += 1;
         self.projects.inherit_pane_root(active_pane_id, pane_id);
         self.pane_controls_hidden_for
             .extend(default_hidden_pane_controls(
@@ -732,10 +737,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let (pane_id, view, profile) = {
-            let tab = self
-                .tabs
-                .get(self.active_tab)
-                .context("there is no active tab")?;
+            let tab = self.current_tab().context("there is no active tab")?;
             let pane_id = resolve_pane_id(tab, request.pane.as_deref())?;
             let pane = tab.pane(pane_id).context("target pane no longer exists")?;
             anyhow::ensure!(
@@ -746,10 +748,7 @@ impl Zetta {
             (pane_id, pane.view.clone(), pane.profile.command.clone())
         };
         let command = quote_pane_command_for_shell(&profile, &request.command)?;
-        let tab = self
-            .tabs
-            .get_mut(self.active_tab)
-            .context("there is no active tab")?;
+        let tab = self.current_tab_mut().context("there is no active tab")?;
         tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
         if let Some(pane) = tab.pane_mut(pane_id)
             && view.is_none()
@@ -774,10 +773,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> Result<()> {
         let (pane_id, view, profile) = {
-            let tab = self
-                .tabs
-                .get(self.active_tab)
-                .context("there is no active tab")?;
+            let tab = self.current_tab().context("there is no active tab")?;
             let pane = tab
                 .active_pane()
                 .context("the active tab has no active pane")?;
@@ -788,10 +784,7 @@ impl Zetta {
             (pane.id, pane.view.clone(), pane.profile.command.clone())
         };
         let command = shell_command_for_profile(&profile, &request)?;
-        let tab = self
-            .tabs
-            .get_mut(self.active_tab)
-            .context("there is no active tab")?;
+        let tab = self.current_tab_mut().context("there is no active tab")?;
         tab.activate_stack_entry(pane_id, PaneStackSelection::Base);
         if let Some(pane) = tab.pane_mut(pane_id)
             && view.is_none()
@@ -825,10 +818,7 @@ impl Zetta {
             inherited_working_directory,
             inherited_wsl_directory,
         ) = {
-            let tab = self
-                .tabs
-                .get(self.active_tab)
-                .context("there is no active tab")?;
+            let tab = self.current_tab().context("there is no active tab")?;
             let pane_id = resolve_pane_id(tab, request.pane.as_deref())?;
             let host = tab.pane(pane_id).context("target pane no longer exists")?;
             anyhow::ensure!(
@@ -856,18 +846,20 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let application_theme = self.application_theme(cx);
-        let fallback = self.project_context_policy(tab_id).theme_fallback(
-            &profile,
-            project.as_deref(),
-            &application_theme,
-        );
-        let terminal_theme =
-            resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx)
-                .context("could not resolve the target profile theme")?;
+        let terminal_theme = self
+            .pane_theme(
+                tab_id,
+                &profile,
+                project.as_deref(),
+                ThemeOverrides {
+                    pane: None,
+                    tab: tab_theme_override.as_deref(),
+                },
+                cx,
+            )
+            .context("could not resolve the target profile theme")?;
         let command = quote_pane_command_for_shell(&profile.command, &request.command)?;
-        let entry_id = self.next_pane_id;
-        self.next_pane_id += 1;
+        let entry_id = take_next_id(&mut self.next_pane_id);
         let mut settings = TerminalSpawnSettings::current(cx);
         let entry = StackedPane::new(
             entry_id,
@@ -877,8 +869,7 @@ impl Zetta {
             wsl_directory.clone(),
         );
         let inserted = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.pane_mut(pane_id))
             .is_some_and(|pane| pane.stack.push(entry));
         anyhow::ensure!(inserted, "could not add the stacked command");

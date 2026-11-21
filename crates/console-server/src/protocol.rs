@@ -1,3 +1,6 @@
+//! The ConDrv wire protocol: API numbers, IOCTL codes, NTSTATUS results, and
+//! the layouts packets and their buffers arrive in.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

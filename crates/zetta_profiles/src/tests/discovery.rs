@@ -450,7 +450,7 @@ fn normalizes_cygwin_registry_installation_paths() {
 #[cfg(windows)]
 #[test]
 fn msys2_launcher_command_supports_custom_paths_with_spaces() {
-    use std::os::windows::process::CommandExt as _;
+    use std::{os::windows::process::CommandExt as _, process::Command};
 
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().join("custom MSYS2 installation");

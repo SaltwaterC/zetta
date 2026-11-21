@@ -1,3 +1,6 @@
+//! `GenerateConsoleCtrlEvent`, `GetConsoleWindow`, and ending every client when
+//! the console goes away.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.
@@ -40,9 +43,7 @@ impl Server {
             let output = self.window_output.clone();
             let visibility: crate::window::Visibility = std::sync::Arc::new(move |shown| {
                 if let Some(output) = &output {
-                    let mut output = output
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let mut output = output.lock().recover_poison();
                     let _ = output.write(
                         if shown { b"\x1b[1t" } else { b"\x1b[2t" },
                         crate::output::OutputMode {

@@ -512,6 +512,7 @@ pub(crate) mod verification_probe {
         },
         time::Duration,
     };
+    use zetta_sync::RecoverPoison as _;
 
     #[derive(Default)]
     pub(crate) struct Probe {
@@ -544,17 +545,13 @@ pub(crate) mod verification_probe {
         });
         PROBES
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .insert(verifier.to_owned(), Arc::clone(&probe));
         probe
     }
 
     pub(super) fn observe(verifier: &str, check: impl FnOnce() -> bool) -> bool {
-        let probe = PROBES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(verifier)
-            .cloned();
+        let probe = PROBES.lock().recover_poison().get(verifier).cloned();
         let Some(probe) = probe else {
             return check();
         };

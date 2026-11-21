@@ -1,3 +1,6 @@
+//! `zetta profile`: listing profiles and changing a profile's theme, icon or
+//! visibility in `config.json`, writing the file only when something changed.
+
 use std::{
     collections::BTreeSet,
     fs,
@@ -8,7 +11,7 @@ use anyhow::{Context as _, Result};
 use gpui::AssetSource as _;
 use serde_json::{Map, Value, json};
 
-use crate::startup::format_help_table;
+use crate::startup::{format_help_table, set_flag, set_once};
 use crate::{
     config::{Config, Profile, themes_dir},
     process_control::request_existing_process_configuration_reload,
@@ -158,8 +161,7 @@ fn parse_theme_command(arguments: &[String]) -> Result<ProfileCommand> {
     for argument in arguments {
         match argument.as_str() {
             "--reset" | "-r" => {
-                anyhow::ensure!(!reset, "--reset may only be specified once");
-                reset = true;
+                set_flag(&mut reset, "--reset")?;
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown zetta profile theme option {value:?}")
@@ -188,8 +190,7 @@ fn parse_dark_theme_command(arguments: &[String]) -> Result<ProfileCommand> {
     for argument in arguments {
         match argument.as_str() {
             "--reset" | "-r" => {
-                anyhow::ensure!(!reset, "--reset may only be specified once");
-                reset = true;
+                set_flag(&mut reset, "--reset")?;
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown zetta profile dark-theme option {value:?}")
@@ -221,8 +222,7 @@ fn parse_icon_command(arguments: &[String]) -> Result<ProfileCommand> {
     for argument in arguments {
         match argument.as_str() {
             "--reset" | "-r" => {
-                anyhow::ensure!(!reset, "--reset may only be specified once");
-                reset = true;
+                set_flag(&mut reset, "--reset")?;
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown zetta profile icon option {value:?}")
@@ -255,41 +255,34 @@ fn parse_add_command(arguments: &[String]) -> Result<ProfileCommand> {
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--program" | "-p" => {
-                anyhow::ensure!(program.is_none(), "--program may only be specified once");
-                program = Some(
-                    arguments
+                set_once(&mut program, "--program", || {
+                    Ok(arguments
                         .next()
                         .context("--program requires an executable")?
-                        .clone(),
-                );
+                        .clone())
+                })?;
             }
             "--arg" | "-a" => {
                 args.push(arguments.next().context("--arg requires a value")?.clone());
             }
             "--theme" | "-t" => {
-                anyhow::ensure!(theme.is_none(), "--theme may only be specified once");
-                theme = Some(
-                    arguments
+                set_once(&mut theme, "--theme", || {
+                    Ok(arguments
                         .next()
                         .context("--theme requires a theme name")?
-                        .clone(),
-                );
+                        .clone())
+                })?;
             }
             "--dark-theme" | "-d" => {
-                anyhow::ensure!(
-                    dark_theme.is_none(),
-                    "--dark-theme may only be specified once"
-                );
-                dark_theme = Some(
-                    arguments
+                set_once(&mut dark_theme, "--dark-theme", || {
+                    Ok(arguments
                         .next()
                         .context("--dark-theme requires a theme name")?
-                        .clone(),
-                );
+                        .clone())
+                })?;
             }
             "--icon" | "-i" => {
-                anyhow::ensure!(!icon_set, "--icon may only be specified once");
-                icon_set = true;
+                set_flag(&mut icon_set, "--icon")?;
                 icon = ProfileIcon::parse_name(
                     arguments
                         .next()
@@ -565,9 +558,13 @@ fn set_profile_hidden(root: &mut Map<String, Value>, name: &str, hidden: bool) -
     Ok(changed)
 }
 
-fn set_profile_theme(
+/// Sets a profile's `theme` or `dark_theme` (`key`) to `theme`, or removes it,
+/// on every configured entry for `name`; an entry is added only when there is
+/// a theme to set. Returns whether the file changed.
+fn set_profile_theme_key(
     root: &mut Map<String, Value>,
     name: &str,
+    key: &str,
     theme: Option<&str>,
 ) -> Result<bool> {
     let indices = configured_profile_indices(root, name);
@@ -578,7 +575,7 @@ fn set_profile_theme(
         let profiles = profiles_array_mut(root)?;
         let mut value = Map::new();
         value.insert("name".to_owned(), json!(name));
-        value.insert("theme".to_owned(), json!(theme));
+        value.insert(key.to_owned(), json!(theme));
         profiles.push(Value::Object(value));
         return Ok(true);
     }
@@ -591,13 +588,13 @@ fn set_profile_theme(
             .context("each profile must be an object")?;
         match theme {
             Some(theme) => {
-                if object.get("theme").and_then(Value::as_str) != Some(theme) {
-                    object.insert("theme".to_owned(), json!(theme));
+                if object.get(key).and_then(Value::as_str) != Some(theme) {
+                    object.insert(key.to_owned(), json!(theme));
                     changed = true;
                 }
             }
             None => {
-                if object.remove("theme").is_some() {
+                if object.remove(key).is_some() {
                     changed = true;
                 }
             }
@@ -606,45 +603,20 @@ fn set_profile_theme(
     Ok(changed)
 }
 
+fn set_profile_theme(
+    root: &mut Map<String, Value>,
+    name: &str,
+    theme: Option<&str>,
+) -> Result<bool> {
+    set_profile_theme_key(root, name, "theme", theme)
+}
+
 fn set_profile_dark_theme(
     root: &mut Map<String, Value>,
     name: &str,
     theme: Option<&str>,
 ) -> Result<bool> {
-    let indices = configured_profile_indices(root, name);
-    if indices.is_empty() {
-        let Some(theme) = theme else {
-            return Ok(false);
-        };
-        let profiles = profiles_array_mut(root)?;
-        let mut value = Map::new();
-        value.insert("name".to_owned(), json!(name));
-        value.insert("dark_theme".to_owned(), json!(theme));
-        profiles.push(Value::Object(value));
-        return Ok(true);
-    }
-
-    let mut changed = false;
-    let profiles = profiles_array_mut(root)?;
-    for index in indices {
-        let object = profiles[index]
-            .as_object_mut()
-            .context("each profile must be an object")?;
-        match theme {
-            Some(theme) => {
-                if object.get("dark_theme").and_then(Value::as_str) != Some(theme) {
-                    object.insert("dark_theme".to_owned(), json!(theme));
-                    changed = true;
-                }
-            }
-            None => {
-                if object.remove("dark_theme").is_some() {
-                    changed = true;
-                }
-            }
-        }
-    }
-    Ok(changed)
+    set_profile_theme_key(root, name, "dark_theme", theme)
 }
 
 fn set_profile_icon(

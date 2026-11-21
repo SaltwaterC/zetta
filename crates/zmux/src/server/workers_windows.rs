@@ -32,10 +32,7 @@ impl DrainWait {
     pub(super) fn wait(&mut self, daemon: &Arc<Daemon>, mut timeout: Duration) {
         let backlogged = persistence_backlogged(daemon);
         {
-            let mut sessions = daemon
-                .sessions
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut sessions = daemon.sessions.lock().recover_poison();
             for pane in sessions
                 .iter_mut()
                 .flat_map(|session| session.panes.iter_mut())

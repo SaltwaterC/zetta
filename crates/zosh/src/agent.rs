@@ -13,6 +13,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use zetta_sync::RecoverPoison as _;
 
 #[cfg(unix)]
 use std::fs;
@@ -717,11 +718,7 @@ impl BootstrapAgentRelay {
     pub(crate) fn binding(&self) -> Option<Vec<u8>> {
         #[cfg(any(unix, windows))]
         {
-            return self
-                .binding
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone();
+            return self.binding.lock().recover_poison().clone();
         }
         #[cfg(not(any(unix, windows)))]
         {
@@ -913,9 +910,7 @@ fn relay_connection_stream(
             return;
         };
         if is_forwarding_session_bind_frame(&frame) {
-            let mut captured = binding
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut captured = binding.lock().recover_poison();
             if captured.is_none() {
                 *captured = Some(frame.clone());
             }

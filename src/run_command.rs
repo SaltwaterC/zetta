@@ -40,6 +40,7 @@ use std::{
         mpsc::{Receiver, RecvTimeoutError, Sender, channel},
     },
 };
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -666,9 +667,7 @@ impl RunCommandRegistry {
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, RegistryState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.state.lock().recover_poison()
     }
 }
 

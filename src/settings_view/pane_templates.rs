@@ -1,3 +1,6 @@
+//! The pane-templates page: the template list, the layout preview, and the
+//! details of the selected pane, split or stack.
+
 use super::*;
 use crate::ui_tokens::RADIUS_CONTROL;
 

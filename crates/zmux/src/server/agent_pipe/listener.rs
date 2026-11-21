@@ -28,6 +28,7 @@ use std::{
     thread,
     time::Duration,
 };
+use zetta_sync::RecoverPoison as _;
 
 use windows::{
     Win32::{
@@ -139,9 +140,7 @@ fn start(
     first: FirstInstance,
     fallback: Option<PathBuf>,
 ) -> Option<PathBuf> {
-    let mut listeners = LISTENERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut listeners = LISTENERS.lock().recover_poison();
     if let Some(listener) = listeners.get(&pane_id) {
         return Some(listener.name.clone());
     }
@@ -219,7 +218,7 @@ pub(in crate::server) fn hand_over(
 ) -> Option<(PathBuf, Option<u64>)> {
     let name = LISTENERS
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .get(&pane_id)?
         .name
         .clone();
@@ -264,10 +263,7 @@ pub(in crate::server) fn discard(instance: Option<u64>) {
 /// Only for a pane the daemon is discarding: an upgrade hands live panes to its
 /// replacement, which must find the target still in place.
 pub(in crate::server) fn stop(pane_id: u64) {
-    let listener = LISTENERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(&pane_id);
+    let listener = LISTENERS.lock().recover_poison().remove(&pane_id);
     if let Some(listener) = listener {
         listener.stop.store(true, Ordering::Release);
         // The listener always has an instance waiting, so an open from here

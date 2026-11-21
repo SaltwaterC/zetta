@@ -1,9 +1,12 @@
+//! `zetta http` and `zetta tftp`: their arguments, and running each server in
+//! the foreground.
+
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 
-use crate::startup::format_help_table;
+use crate::startup::{format_help_table, set_flag, set_once};
 
 use super::CliServiceCommand;
 
@@ -162,8 +165,7 @@ pub(crate) fn parse_tftp_server_args(
     for argument in args {
         match argument.to_string_lossy().as_ref() {
             "--writable" | "-w" => {
-                anyhow::ensure!(!writable, "--writable may only be specified once");
-                writable = true;
+                set_flag(&mut writable, "--writable")?;
             }
             _ => remaining.push(argument),
         }
@@ -189,22 +191,21 @@ fn parse_server_options(
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--root" | "-r" => {
-                anyhow::ensure!(!root_set, "--root may only be specified once");
+                set_flag(&mut root_set, "--root")?;
                 root = arguments
                     .next()
                     .context("--root requires a directory")?
                     .into();
-                root_set = true;
             }
             "--port" | "-p" => {
-                anyhow::ensure!(port.is_none(), "--port may only be specified once");
-                port = Some(parse_port(
-                    arguments.next().context("--port requires a port number")?,
-                )?);
+                set_once(&mut port, "--port", || {
+                    parse_port(arguments.next().context("--port requires a port number")?)
+                })?;
             }
             "--config" | "-c" => {
-                anyhow::ensure!(config_path.is_none(), "--config may only be specified once");
-                config_path = Some(arguments.next().context("--config requires a path")?.into());
+                set_once(&mut config_path, "--config", || {
+                    Ok(arguments.next().context("--config requires a path")?.into())
+                })?;
             }
             option if option.starts_with('-') => {
                 anyhow::bail!("unknown {service} server option {option:?}")

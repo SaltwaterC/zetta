@@ -1,3 +1,6 @@
+//! The remote-session picker in a build without `zmux`: the same names, doing
+//! nothing, so its callers need no `cfg` of their own.
+
 use super::*;
 
 #[derive(Default)]

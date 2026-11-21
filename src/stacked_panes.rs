@@ -1,6 +1,83 @@
+//! Stacked panes, several commands sharing one pane's place: moving between
+//! entries, closing them, and following each command until it finishes.
+
 use super::*;
 
+/// Where a stacked entry lives: the tab, the pane whose stack holds it, and its
+/// own id.
+#[derive(Clone, Copy)]
+pub(crate) struct StackEntryAddress {
+    pub(crate) tab_id: u64,
+    pub(crate) pane_id: u64,
+    pub(crate) entry_id: u64,
+}
+
 impl Zetta {
+    /// The subscriptions a visible stacked entry's terminal and view need,
+    /// whether it was just spawned or came back from a background session:
+    /// its exit, its close, its view's events, input gating, and focus
+    /// selecting it in the stack.
+    pub(crate) fn subscribe_stacked_entry(
+        &mut self,
+        entry: StackEntryAddress,
+        terminal: &Entity<Terminal>,
+        view: &Entity<TerminalView>,
+        run_identity: Option<crate::run_command::RunPaneIdentity>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let StackEntryAddress {
+            tab_id,
+            pane_id,
+            entry_id,
+        } = entry;
+        let run_registry = crate::run_command::process_run_registry();
+        cx.subscribe_in(
+            terminal,
+            window,
+            move |this, _terminal, event: &TerminalEvent, _window, cx| {
+                if let Some(identity) = run_identity {
+                    run_registry.observe_terminal_event(identity, event);
+                }
+                if let TerminalEvent::TaskFinished { exit_code } = event {
+                    this.stacked_task_finished(tab_id, pane_id, entry_id, *exit_code, cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            view,
+            window,
+            move |this, _, event, window, cx| match event {
+                TerminalViewEvent::Close => {
+                    this.stacked_terminal_closed(tab_id, pane_id, entry_id, window, cx);
+                }
+                TerminalViewEvent::TitleChanged => cx.notify(),
+                TerminalViewEvent::PasteError(error) => this.show_error_notice(error.clone(), cx),
+                TerminalViewEvent::Input(_) => {}
+                TerminalViewEvent::OpenEditor(request) => {
+                    this.open_editor_in_new_pane(tab_id, pane_id, request.clone(), window, cx);
+                }
+            },
+        )
+        .detach();
+        let input_enabled = self.terminal_input_enabled();
+        view.update(cx, |view, cx| {
+            view.set_emit_input_events(false);
+            view.set_input_enabled(input_enabled, cx);
+        });
+        let focus_handle = view.focus_handle(cx);
+        cx.on_focus_in(&focus_handle, window, move |this, window, cx| {
+            if let Some(tab) = this.tabs.by_id_mut(tab_id) {
+                tab.activate_stack_entry(pane_id, PaneStackSelection::Stacked(entry_id));
+                cx.notify();
+            }
+            this.activate_current_project(window, cx);
+            this.clear_active_tab_attention_if_focused(window, cx);
+        })
+        .detach();
+    }
+
     pub(crate) fn select_previous_stacked_pane(
         &mut self,
         _: &SelectPreviousStackedPane,
@@ -21,7 +98,7 @@ impl Zetta {
 
     fn cycle_stacked_pane(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         let view = {
-            let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            let Some(tab) = self.current_tab_mut() else {
                 return;
             };
             let pane_id = tab.active_pane;
@@ -57,7 +134,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let view = {
-            let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            let Some(tab) = self.tabs.by_id_mut(tab_id) else {
                 return;
             };
             tab.activate_stack_entry(pane_id, selection);
@@ -79,7 +156,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some((tab_id, pane_id, entry_id)) = self.tabs.get(self.active_tab).and_then(|tab| {
+        let Some((tab_id, pane_id, entry_id)) = self.current_tab().and_then(|tab| {
             let Some(PaneStackSelection::Stacked(entry_id)) = tab
                 .active_pane()
                 .map(|pane| pane.focused_stack_selection(window, cx))
@@ -102,7 +179,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let run_identity = self.run_stacked_pane_identity(tab_id, pane_id, entry_id);
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+        if let Some(tab) = self.tabs.by_id_mut(tab_id) {
             let (removed, close_host) = {
                 let Some(pane) = tab.pane_mut(pane_id) else {
                     return;
@@ -131,9 +208,7 @@ impl Zetta {
 
         let removed = self
             .background_sessions
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
+            .pane_in_mut(tab_id, pane_id)
             .and_then(|pane| pane.stack.remove(entry_id));
         if removed.is_some() {
             if let Some(identity) = run_identity {
@@ -159,7 +234,7 @@ impl Zetta {
 
         let project = self.active_project_config().cloned();
         let working_directory_configured = self.effective_config().working_directory_configured;
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let tab_id = tab.id;
@@ -191,25 +266,26 @@ impl Zetta {
             self.working_directory.clone(),
             working_directory_configured,
         );
-        let application_theme = self.application_theme(cx);
-        let fallback = self.project_context_policy(tab_id).theme_fallback(
+        let terminal_theme = match self.pane_theme(
+            tab_id,
             &profile,
             project.as_deref(),
-            &application_theme,
-        );
-        let terminal_theme =
-            match resolve_terminal_theme(None, tab_theme_override.as_deref(), fallback, cx) {
-                Ok(theme) => theme,
-                Err(error) => {
-                    self.set_multi_command_error(
-                        format!("Could not apply the active profile theme: {error:#}"),
-                        cx,
-                    );
-                    return;
-                }
-            };
-        let entry_id = self.next_pane_id;
-        self.next_pane_id += 1;
+            ThemeOverrides {
+                pane: None,
+                tab: tab_theme_override.as_deref(),
+            },
+            cx,
+        ) {
+            Ok(theme) => theme,
+            Err(error) => {
+                self.set_multi_command_error(
+                    format!("Could not apply the active profile theme: {error:#}"),
+                    cx,
+                );
+                return;
+            }
+        };
+        let entry_id = take_next_id(&mut self.next_pane_id);
         let mut settings = TerminalSpawnSettings::current(cx);
         let entry = StackedPane::new(
             entry_id,
@@ -219,8 +295,7 @@ impl Zetta {
             wsl_directory.clone(),
         );
         let inserted = self
-            .tabs
-            .get_mut(self.active_tab)
+            .current_tab_mut()
             .and_then(|tab| tab.pane_mut(pane_id))
             .is_some_and(|pane| pane.stack.push(entry));
         if !inserted {
@@ -230,22 +305,17 @@ impl Zetta {
         self.multi_command = None;
         self.multi_command_mode = CommandPromptMode::Multi;
         let Some((command, profile, working_directory, wsl_directory)) = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(|tab| tab.pane(pane_id))
             .and_then(|pane| {
-                pane.stack
-                    .entries
-                    .iter()
-                    .find(|entry| entry.id == entry_id)
-                    .map(|entry| {
-                        (
-                            entry.command.clone(),
-                            entry.profile.clone(),
-                            entry.working_directory.clone(),
-                            entry.wsl_directory.clone(),
-                        )
-                    })
+                pane.stack.entry(entry_id).map(|entry| {
+                    (
+                        entry.command.clone(),
+                        entry.profile.clone(),
+                        entry.working_directory.clone(),
+                        entry.wsl_directory.clone(),
+                    )
+                })
             })
         else {
             return;
@@ -281,28 +351,19 @@ impl Zetta {
     ) {
         let run_identity = self.run_stacked_pane_identity(tab_id, pane_id, entry_id);
         let mut found = false;
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-            if let Some(entry) = tab.pane_mut(pane_id).and_then(|pane| {
-                pane.stack
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.id == entry_id)
-            }) {
+        if let Some(tab) = self.tabs.by_id_mut(tab_id) {
+            if let Some(entry) = tab
+                .pane_mut(pane_id)
+                .and_then(|pane| pane.stack.entry_mut(entry_id))
+            {
                 entry.state = StackedPaneState::Completed;
                 entry.exit_code = exit_code;
                 found = true;
             }
         } else if let Some(entry) = self
             .background_sessions
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-            .and_then(|pane| {
-                pane.stack
-                    .entries
-                    .iter_mut()
-                    .find(|entry| entry.id == entry_id)
-            })
+            .pane_in_mut(tab_id, pane_id)
+            .and_then(|pane| pane.stack.entry_mut(entry_id))
         {
             entry.state = StackedPaneState::Completed;
             entry.exit_code = exit_code;

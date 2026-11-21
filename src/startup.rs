@@ -1,3 +1,7 @@
+//! Startup: running the mode a command line asked for, which is either a
+//! subcommand that ends without a window or the application itself, and the
+//! submodules that parse arguments, load keybindings and prepare the window.
+
 use super::*;
 #[cfg(cli_services)]
 use crate::cli_services::CliServiceCommand;
@@ -30,6 +34,7 @@ use crate::process_control::{
 };
 use crate::project_commands::{ProjectCommandInvocation, merge_command_environment};
 use crate::run_command::{PaneWaitCommand, RunWaitRequest, process_run_registry};
+use zetta_sync::RecoverPoison as _;
 #[cfg(feature = "worktree")]
 use zwt::{WorktreeInvocation, run_for as run_worktree};
 
@@ -73,6 +78,7 @@ use arg_parsing::{
 };
 pub(crate) use arg_parsing::{
     StartupMode, TerminalGrid, load_startup_config, native_terminal_environment, parse_args,
+    set_flag, set_once,
 };
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
@@ -474,7 +480,7 @@ fn launch_gui(
     if report_requested {
         let result = report_status
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .take()
             .context("profiling window closed before the performance report completed")?;
         result.map_err(anyhow::Error::msg)?;

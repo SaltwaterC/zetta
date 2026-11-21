@@ -1,3 +1,7 @@
+//! Terminal input as console input records: VT keys, mouse and focus reports
+//! decoded into `INPUT_RECORD`s, and the records applications expect
+//! synthesized from them.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

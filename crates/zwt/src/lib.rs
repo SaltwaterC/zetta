@@ -1,45 +1,11 @@
+//! The `zwt` worktree command as a library: the entry point the standalone
+//! binary and the root package's copy of it both call.
+
 mod process_control;
 mod worktree_cli;
 mod worktree_copy;
 
-pub(crate) fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {
-    let rows = rows
-        .as_ref()
-        .iter()
-        .map(|&(label, description)| (label.trim_end(), description))
-        .collect::<Vec<_>>();
-    let label_width = rows
-        .iter()
-        .map(|(label, _)| label.chars().count())
-        .max()
-        .unwrap_or(0);
-    rows.into_iter()
-        .map(|(label, description)| {
-            let mut lines = description.split('\n');
-            let first_line = lines.next().unwrap_or("").trim_end();
-            let mut formatted = String::new();
-            formatted.push_str("  ");
-            formatted.push_str(label);
-            formatted.push_str(&" ".repeat(label_width - label.chars().count()));
-            if !first_line.is_empty() {
-                formatted.push_str("  ");
-                formatted.push_str(first_line);
-            }
-            for line in lines {
-                formatted.push('\n');
-                let line = line.trim_end();
-                if !line.is_empty() {
-                    formatted.push_str("  ");
-                    formatted.push_str(&" ".repeat(label_width));
-                    formatted.push_str("  ");
-                    formatted.push_str(line);
-                }
-            }
-            formatted
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+pub(crate) use zetta_cli_help::format_help_table;
 
 pub use process_control::{WorktreeNameRequest, request_process_worktree_name};
 pub use worktree_cli::{

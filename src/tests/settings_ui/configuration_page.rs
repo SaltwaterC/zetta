@@ -57,11 +57,22 @@ fn every_row_sits_under_a_heading() {
         layout.first(),
         Some(ConfigurationItem::Heading(_))
     ));
+    // The window rows follow the background-session ones directly, so they
+    // need a heading of their own. Count the always-present ones plus those
+    // this build's features add, rather than a number only a full build has.
     let headings = layout
         .iter()
         .filter(|item| matches!(item, ConfigurationItem::Heading(_)))
         .count();
-    assert!(headings >= 6, "{headings} headings");
+    let expected = 5 + usize::from(cfg!(feature = "zmux")) + usize::from(cfg!(servers_enabled));
+    assert_eq!(headings, expected);
+    let window = layout.iter().position(|item| {
+        matches!(
+            item,
+            ConfigurationItem::Heading(ConfigurationSection::Window)
+        )
+    });
+    assert!(window.is_some(), "the window rows have a heading");
 }
 
 /// Sentence case: after the first word, only names and acronyms are

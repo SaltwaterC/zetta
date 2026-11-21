@@ -15,13 +15,9 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let globally_close_shared_pane =
-            self.tabs
-                .iter()
-                .find(|tab| tab.id == tab_id)
-                .is_some_and(|tab| {
-                    tab.panes.len() > 1 && (tab.shared || self.has_shared_tab_binding(tab_id))
-                });
+        let globally_close_shared_pane = self.tabs.by_id(tab_id).is_some_and(|tab| {
+            tab.panes.len() > 1 && (tab.shared || self.has_shared_tab_binding(tab_id))
+        });
         if self.shared_pane_is_closing(pane_id) {
             return;
         }
@@ -70,7 +66,7 @@ impl Zetta {
         let mut terminal = None;
         let mut updated = false;
 
-        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+        if let Some(tab) = self.tabs.by_id_mut(tab_id) {
             if let Some(pane) = tab.pane_mut(pane_id)
                 && pane.exit.is_none()
             {
@@ -82,10 +78,7 @@ impl Zetta {
                 pane.pending_command = None;
                 updated = true;
             }
-        } else if let Some(tab) = self
-            .background_sessions
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
+        } else if let Some(tab) = self.background_sessions.by_id_mut(tab_id)
             && let Some(pane) = tab.pane_mut(pane_id)
             && pane.exit.is_none()
         {
@@ -148,12 +141,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(pane) = self
-            .tabs
-            .iter_mut()
-            .find(|tab| tab.id == tab_id)
-            .and_then(|tab| tab.pane_mut(pane_id))
-        else {
+        let Some(pane) = self.tabs.pane_in_mut(tab_id, pane_id) else {
             return false;
         };
         if pane.stack.is_empty() {
@@ -182,7 +170,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(tab_index) = self.tab_index(tab_id) else {
             return;
         };
         if !self.tabs[tab_index]
@@ -256,8 +244,7 @@ impl Zetta {
     /// one consolidated wakeup to render everything produced while it was hidden.
     pub(crate) fn sync_visible_terminals(&mut self, cx: &mut Context<Self>) {
         let visible_terminals = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .into_iter()
             .flat_map(|tab| {
                 tab.panes.iter().filter_map(|pane| {
@@ -295,7 +282,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         self.split_pane_with_pending_command(
@@ -324,7 +311,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(tab_index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(tab_index) = self.tab_index(tab_id) else {
             return false;
         };
         let tab = &self.tabs[tab_index];
@@ -363,8 +350,7 @@ impl Zetta {
             launch_fallback,
             working_directory_configured,
         );
-        let pane_id = self.next_pane_id;
-        self.next_pane_id += 1;
+        let pane_id = take_next_id(&mut self.next_pane_id);
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
         self.pane_controls_hidden_for
             .extend(default_hidden_pane_controls(
@@ -430,7 +416,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let selection = tab
@@ -563,7 +549,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let tab_id = tab.id;
@@ -583,7 +569,7 @@ impl Zetta {
         input: &TerminalInput,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+        let Some(tab) = self.tabs.by_id(tab_id) else {
             return;
         };
         if !tab.broadcast_input || tab.active_pane != source_pane_id {
@@ -606,8 +592,8 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
-        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+        let tab_id = self.current_tab().map(|tab| tab.id);
+        if let Some(tab) = self.current_tab_mut() {
             tab.broadcast_input = !tab.broadcast_input;
             let enabled = tab.broadcast_input;
             let views = tab
@@ -632,7 +618,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let Some(tab) = self.current_tab_mut() else {
             return;
         };
         let tab_id = tab.id;

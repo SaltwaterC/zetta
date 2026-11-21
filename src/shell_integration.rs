@@ -9,6 +9,12 @@ use std::os::windows::process::CommandExt as _;
 #[cfg(windows)]
 use std::process::Command;
 
+mod command_tree;
+#[cfg(windows)]
+mod windows_shells;
+#[cfg(windows)]
+use windows_shells::*;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ShellIntegration {
     Bash,
@@ -66,10 +72,15 @@ impl ShellIntegration {
             }
             (Self::Zsh, true) => include_str!("shell_integration/zsh_completions.zsh"),
         };
-        render_integration(template, self).replace(
+        let script = render_integration(template).replace(
             "__ZETTA_LIFECYCLE_VERSION__",
             &zetta_profiles::ZSH_LIFECYCLE_TRACKING_VERSION.to_string(),
-        )
+        );
+        if completions {
+            command_tree::expand(self, &script)
+        } else {
+            command_tree::expand_lazy(self, &script)
+        }
     }
 
     fn startup_file(self, home: &Path) -> PathBuf {
@@ -182,208 +193,57 @@ impl ShellIntegration {
     }
 }
 
-fn render_integration(template: &str, shell: ShellIntegration) -> String {
-    const BEGIN: &str = "ZETTA_WORKTREE_INTEGRATION_BEGIN";
-    const END: &str = "ZETTA_WORKTREE_INTEGRATION_END";
-    const ZMUX_BEGIN: &str = "ZETTA_ZMUX_INTEGRATION_BEGIN";
-    const ZMUX_END: &str = "ZETTA_ZMUX_INTEGRATION_END";
-    const ZPAGER_BEGIN: &str = "ZETTA_PAGER_INTEGRATION_BEGIN";
-    const ZPAGER_END: &str = "ZETTA_PAGER_INTEGRATION_END";
-    let worktree_enabled = cfg!(feature = "worktree");
-    let zmux_enabled = cfg!(feature = "zmux");
-    let pager_enabled = cfg!(feature = "zpager");
-    let mut rendered = String::with_capacity(template.len());
-    let mut in_optional_section = false;
-    let mut in_zmux_section = false;
-    let mut in_zpager_section = false;
-    let mut in_clipboard_section = false;
-    let colors = render_overlay_color_names(shell);
+/// The optional sections of a template, by their begin and end markers, and
+/// whether this build keeps each one.
+const fn integration_sections() -> [(&'static str, &'static str, bool); 5] {
+    [
+        (
+            "ZETTA_WORKTREE_INTEGRATION_BEGIN",
+            "ZETTA_WORKTREE_INTEGRATION_END",
+            cfg!(feature = "worktree"),
+        ),
+        (
+            "ZETTA_ZMUX_INTEGRATION_BEGIN",
+            "ZETTA_ZMUX_INTEGRATION_END",
+            cfg!(feature = "zmux"),
+        ),
+        (
+            "ZETTA_PAGER_INTEGRATION_BEGIN",
+            "ZETTA_PAGER_INTEGRATION_END",
+            cfg!(feature = "zpager"),
+        ),
+        (
+            "ZETTA_CLIPBOARD_INTEGRATION_BEGIN",
+            "ZETTA_CLIPBOARD_INTEGRATION_END",
+            cfg!(feature = "clipboard"),
+        ),
+        (
+            "ZETTA_ZOSH_INTEGRATION_BEGIN",
+            "ZETTA_ZOSH_INTEGRATION_END",
+            cfg!(feature = "zosh-client"),
+        ),
+    ]
+}
 
-    let tftp_setcap_enabled = cfg!(tftp_setcap);
-    let substitutions = [
-        ("ZETTA_OVERLAY_COLORS", colors.as_str()),
-        // Before ZETTA_TFTP_SETCAP_COMMAND, which is a prefix of it.
-        (
-            "ZETTA_TFTP_SETCAP_COMMAND_PS",
-            if tftp_setcap_enabled {
-                "'setcap', "
-            } else {
-                ""
-            },
-        ),
-        (
-            "ZETTA_TFTP_SETCAP_COMMAND",
-            if tftp_setcap_enabled { "setcap" } else { "" },
-        ),
-        (
-            "ZETTA_MUX_ROOT_COMMAND_PS",
-            if zmux_enabled { "'mux'," } else { "" },
-        ),
-        (
-            "ZETTA_NO_MUX_OPTION_PS",
-            if zmux_enabled { "'--no-mux'," } else { "" },
-        ),
-        (
-            "ZETTA_MUX_ROOT_COMMAND",
-            if zmux_enabled { "mux" } else { "" },
-        ),
-        (
-            "ZETTA_NO_MUX_OPTION",
-            if zmux_enabled { "--no-mux" } else { "" },
-        ),
-        (
-            "ZETTA_WORKTREE_ROOT_COMMANDS",
-            if worktree_enabled { ", 'wt'" } else { "" },
-        ),
-        (
-            "ZETTA_WORKTREE_ROOT_COMMAND",
-            if worktree_enabled { "wt" } else { "" },
-        ),
-        (
-            "ZETTA_WORKTREE_BASH_COPY_CONDITION",
-            if worktree_enabled {
-                "[[ $command == wt && ${COMP_WORDS[2]} == new ]]"
-            } else {
-                "false"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_BASH_REPEATABLE_COPY",
-            if worktree_enabled {
-                "[[ $repeatable == 1 && $candidate == --copy ]]"
-            } else {
-                "false"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_ZSH_COPY_OPTION",
-            if worktree_enabled {
-                "[[ $option == --copy ]]"
-            } else {
-                "false"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_FISH_COPY_OPTION",
-            if worktree_enabled {
-                "test \"$argv[1]\" = --copy"
-            } else {
-                "false"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_POWERSHELL_COPY_COMPLETION_CHECK",
-            if worktree_enabled {
-                "($worktreeCommand -and $worktreeOperation -eq 'new' -and $previous -in '--copy', '-c')"
-            } else {
-                "($false)"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_POWERSHELL_REPEATABLE_COPY",
-            if worktree_enabled {
-                "$candidate -eq '--copy'"
-            } else {
-                "$false"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_COMPLETION_CHECK",
-            if worktree_enabled {
-                "($worktreeCommand)"
-            } else {
-                "($false)"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_STANDALONE_CHECK",
-            if worktree_enabled {
-                "($commandName -eq 'zwt')"
-            } else {
-                "($false)"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_ROOT_CHECK",
-            if worktree_enabled {
-                "($subcommand -eq 'wt')"
-            } else {
-                "($false)"
-            },
-        ),
-        (
-            "ZETTA_WORKTREE_SWITCH_CASE",
-            if worktree_enabled {
-                "'wt'"
-            } else {
-                "'__zetta_worktree_disabled__'"
-            },
-        ),
-        (
-            "ZETTA_DIFF_COMPLETION_CHECK",
-            if pager_enabled {
-                "($commandName -eq 'zpager')"
-            } else {
-                "($false)"
-            },
-        ),
-    ];
-    for line in template.split_inclusive('\n') {
-        if line.contains("ZETTA_CLIPBOARD_INTEGRATION_BEGIN") {
-            in_clipboard_section = true;
-            continue;
-        }
-        if line.contains("ZETTA_CLIPBOARD_INTEGRATION_END") {
-            in_clipboard_section = false;
-            continue;
-        }
-        if line.contains(BEGIN) {
-            in_optional_section = true;
-            continue;
-        }
-        if line.contains(END) {
-            in_optional_section = false;
-            continue;
-        }
-        if line.contains(ZMUX_BEGIN) {
-            in_zmux_section = true;
-            continue;
-        }
-        if line.contains(ZMUX_END) {
-            in_zmux_section = false;
-            continue;
-        }
-        if line.contains(ZPAGER_BEGIN) {
-            in_zpager_section = true;
-            continue;
-        }
-        if line.contains(ZPAGER_END) {
-            in_zpager_section = false;
-            continue;
-        }
-        if (!in_optional_section || worktree_enabled)
-            && (!in_zmux_section || zmux_enabled)
-            && (!in_zpager_section || pager_enabled)
-            && (!in_clipboard_section || cfg!(feature = "clipboard"))
-        {
-            // Render only the selected payload, filtering and substituting each line once.
-            let mut rest = line;
-            while let Some(index) = rest.find("ZETTA_") {
-                rendered.push_str(&rest[..index]);
-                rest = &rest[index..];
-                if let Some((token, value)) = substitutions
-                    .iter()
-                    .find(|(token, _)| rest.starts_with(token))
-                {
-                    rendered.push_str(value);
-                    rest = &rest[token.len()..];
-                } else {
-                    rendered.push_str("ZETTA_");
-                    rest = &rest[6..];
-                }
+fn render_integration(template: &str) -> String {
+    let sections = integration_sections();
+    let mut open = sections.map(|_| false);
+    let mut rendered = String::with_capacity(template.len());
+    'lines: for line in template.split_inclusive('\n') {
+        for (index, (begin, end, _)) in sections.iter().enumerate() {
+            if line.contains(begin) || line.contains(end) {
+                open[index] = line.contains(begin);
+                continue 'lines;
             }
-            rendered.push_str(rest);
         }
+        if sections
+            .iter()
+            .zip(open)
+            .any(|((_, _, built), open)| open && !built)
+        {
+            continue;
+        }
+        rendered.push_str(line);
     }
     rendered
 }
@@ -410,41 +270,6 @@ fn active_shell_path() -> Option<PathBuf> {
         }
 
         pid = parent_pid;
-    }
-}
-
-#[cfg(windows)]
-fn cygwin_tool_from_active_shell(tool: &str) -> PathBuf {
-    active_shell_path().map_or_else(
-        || PathBuf::from(tool),
-        |path| cygwin_tool_for_path(&path, tool),
-    )
-}
-
-#[cfg(windows)]
-fn cygwin_tool_for_path(path: &Path, tool: &str) -> PathBuf {
-    cygwin_root_for_path(path)
-        .map(|root| root.join("bin").join(tool))
-        .filter(|tool_path| tool_path.is_file())
-        .unwrap_or_else(|| PathBuf::from(tool))
-}
-
-#[cfg(windows)]
-fn cygwin_tool_for_path_or_active_shell(path: &Path, tool: &str) -> PathBuf {
-    active_shell_path()
-        .map(|shell| cygwin_tool_for_path(&shell, tool))
-        .filter(|tool_path| tool_path.is_file())
-        .unwrap_or_else(|| cygwin_tool_for_path(path, tool))
-}
-
-#[cfg(windows)]
-fn cygwin_root_for_path(path: &Path) -> Option<PathBuf> {
-    let mut candidate = path;
-    loop {
-        if candidate.join("bin").join("cygwin1.dll").is_file() {
-            return Some(candidate.to_path_buf());
-        }
-        candidate = candidate.parent()?;
     }
 }
 
@@ -501,20 +326,6 @@ fn current_posix_shell_home() -> Result<PathBuf> {
     }
 }
 
-#[cfg(windows)]
-fn resolve_windows_posix_shell_home(
-    home: Option<PathBuf>,
-    user_profile: Option<PathBuf>,
-    convert_unix_path: impl FnOnce(&Path) -> Result<PathBuf>,
-) -> Result<PathBuf> {
-    match home {
-        Some(home) if home.is_absolute() => Ok(home),
-        Some(home) => convert_unix_path(&home),
-        None => user_profile
-            .context("could not locate the home directory: HOME and USERPROFILE are not set"),
-    }
-}
-
 fn configure_shell_integration(
     shell: ShellIntegration,
     home: &Path,
@@ -525,161 +336,6 @@ fn configure_shell_integration(
     #[cfg(windows)]
     let path = resolve_cygwin_link_startup_file(&path)?;
     configure_shell_integration_file(shell, &path)
-}
-
-#[cfg(windows)]
-fn resolve_msys2_link_startup_file(
-    path: &Path,
-    resolve_link: impl FnOnce(&Path) -> Result<PathBuf>,
-) -> Result<PathBuf> {
-    if path.exists() {
-        return Ok(path.to_path_buf());
-    }
-    let mut link = path.as_os_str().to_os_string();
-    link.push(".lnk");
-    let link = PathBuf::from(link);
-    if !link.is_file() {
-        return Ok(path.to_path_buf());
-    }
-    resolve_link(&link)
-}
-
-#[cfg(windows)]
-fn resolve_cygwin_link_startup_file(path: &Path) -> Result<PathBuf> {
-    resolve_cygwin_link_startup_file_with(
-        path,
-        |path| path.exists(),
-        |path| fs::symlink_metadata(path).is_ok(),
-        resolve_cygwin_link,
-    )
-}
-
-#[cfg(windows)]
-fn resolve_cygwin_link_startup_file_with(
-    path: &Path,
-    is_accessible: impl Fn(&Path) -> bool,
-    has_metadata: impl Fn(&Path) -> bool,
-    resolve_link: impl FnOnce(&Path) -> Result<Option<PathBuf>>,
-) -> Result<PathBuf> {
-    // Cygwin stores POSIX symlinks as a reparse-point format that native
-    // Windows file APIs cannot follow. `exists` is false for those paths even
-    // though Cygwin can read them, while symlink_metadata still exposes the
-    // reparse point without following it.
-    if is_accessible(path) || !has_metadata(path) {
-        return Ok(path.to_path_buf());
-    }
-
-    match resolve_link(path)? {
-        Some(path) => Ok(path),
-        None => Ok(path.to_path_buf()),
-    }
-}
-
-#[cfg(windows)]
-fn resolve_cygwin_link(path: &Path) -> Result<Option<PathBuf>> {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let resolved = match Command::new(cygwin_tool_for_path_or_active_shell(path, "readlink.exe"))
-        .args(["-f", "--"])
-        .arg(path)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to resolve the Cygwin startup-file link {}",
-                    path.display()
-                )
-            });
-        }
-    };
-    if !resolved.status.success() {
-        return Ok(None);
-    }
-    let resolved = String::from_utf8(resolved.stdout)
-        .context("readlink.exe returned a Cygwin path that was not UTF-8")?;
-    let resolved = resolved.trim().trim_start_matches('\u{feff}');
-    anyhow::ensure!(
-        !resolved.is_empty(),
-        "readlink.exe returned an empty path for {}",
-        path.display()
-    );
-
-    let native = Command::new(cygwin_tool_for_path_or_active_shell(path, "cygpath.exe"))
-        .args(["-w", "--", resolved])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to convert the Cygwin startup-file link {}",
-                path.display()
-            )
-        })?;
-    anyhow::ensure!(
-        native.status.success(),
-        "cygpath.exe could not convert {}: {}",
-        resolved,
-        String::from_utf8_lossy(&native.stderr).trim()
-    );
-    let native = String::from_utf8(native.stdout)
-        .context("cygpath.exe returned a path that was not UTF-8")?;
-    let native = native.trim().trim_start_matches('\u{feff}');
-    anyhow::ensure!(
-        !native.is_empty(),
-        "cygpath.exe returned an empty path for {}",
-        path.display()
-    );
-    Ok(Some(PathBuf::from(native)))
-}
-
-#[cfg(windows)]
-fn resolve_msys2_link(link: &Path) -> Result<PathBuf> {
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    let resolved = Command::new("readlink.exe")
-        .args(["-f", "--"])
-        .arg(link)
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .with_context(|| format!("failed to resolve the MSYS2 link {}", link.display()))?;
-    anyhow::ensure!(
-        resolved.status.success(),
-        "readlink.exe could not resolve {}: {}",
-        link.display(),
-        String::from_utf8_lossy(&resolved.stderr).trim()
-    );
-    let resolved = String::from_utf8(resolved.stdout)
-        .context("readlink.exe returned a path that was not UTF-8")?;
-    let resolved = resolved.trim().trim_start_matches('\u{feff}');
-    anyhow::ensure!(
-        !resolved.is_empty(),
-        "readlink.exe returned an empty path for {}",
-        link.display()
-    );
-
-    let native = Command::new("cygpath.exe")
-        .args(["-w", "--", resolved])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .with_context(|| format!("failed to convert the MSYS2 link {}", link.display()))?;
-    anyhow::ensure!(
-        native.status.success(),
-        "cygpath.exe could not convert {}: {}",
-        link.display(),
-        String::from_utf8_lossy(&native.stderr).trim()
-    );
-    let native = String::from_utf8(native.stdout)
-        .context("cygpath.exe returned a path that was not UTF-8")?;
-    let native = native.trim().trim_start_matches('\u{feff}');
-    anyhow::ensure!(
-        !native.is_empty(),
-        "cygpath.exe returned an empty path for {}",
-        link.display()
-    );
-    Ok(PathBuf::from(native))
 }
 
 fn configure_shell_integration_file(
@@ -724,90 +380,6 @@ fn configure_shell_integration_file(
         .with_context(|| format!("failed to write {}", path.display()))?;
 
     Ok(ShellIntegrationConfiguration::Written(path.to_path_buf()))
-}
-
-#[cfg(windows)]
-fn current_powershell_profile() -> Result<PathBuf> {
-    let executable =
-        parent_powershell_executable().unwrap_or_else(|| PathBuf::from("powershell.exe"));
-    query_powershell_profile(&executable)
-}
-
-#[cfg(windows)]
-fn parent_powershell_executable() -> Option<PathBuf> {
-    let mut system = sysinfo::System::new();
-    let mut pid = sysinfo::get_current_pid().ok()?;
-
-    loop {
-        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
-        let parent_pid = system.process(pid)?.parent()?;
-        system.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[parent_pid]), true);
-        let parent = system.process(parent_pid)?;
-        if parent.exe().is_some_and(|executable| {
-            executable
-                .file_stem()
-                .and_then(OsStr::to_str)
-                .is_some_and(|name| {
-                    name.eq_ignore_ascii_case("powershell") || name.eq_ignore_ascii_case("pwsh")
-                })
-        }) {
-            return parent.exe().map(Path::to_path_buf);
-        }
-        pid = parent_pid;
-    }
-}
-
-#[cfg(windows)]
-fn query_powershell_profile(executable: &Path) -> Result<PathBuf> {
-    let output = Command::new(executable)
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[Console]::OutputEncoding = New-Object Text.UTF8Encoding; \
-             [Console]::Out.Write($PROFILE.CurrentUserCurrentHost)",
-        ])
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to query the PowerShell profile using {}",
-                executable.display()
-            )
-        })?;
-    anyhow::ensure!(
-        output.status.success(),
-        "failed to query the PowerShell profile using {}: {}",
-        executable.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
-
-    let profile = String::from_utf8(output.stdout)
-        .context("PowerShell returned a profile path that was not UTF-8")?;
-    let profile = profile.trim().trim_start_matches('\u{feff}');
-    anyhow::ensure!(
-        !profile.is_empty(),
-        "{} returned an empty PowerShell profile path",
-        executable.display()
-    );
-    Ok(PathBuf::from(profile))
-}
-
-fn render_overlay_color_names(shell: ShellIntegration) -> String {
-    let separator = if shell == ShellIntegration::PowerShell {
-        ", "
-    } else {
-        " "
-    };
-    OVERLAY_COLOR_PRESETS
-        .iter()
-        .map(|preset| match shell {
-            ShellIntegration::PowerShell => format!("'{}'", preset.name),
-            ShellIntegration::Bash | ShellIntegration::Fish | ShellIntegration::Zsh => {
-                preset.name.to_owned()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(separator)
 }
 
 pub(crate) fn shell_integration_help() -> String {

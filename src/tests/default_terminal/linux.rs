@@ -1,8 +1,5 @@
-#![cfg(any(target_os = "linux", target_os = "macos"))]
-
 use super::*;
 
-#[cfg(target_os = "linux")]
 #[test]
 fn detects_supported_desktops_from_session_values() {
     assert_eq!(
@@ -20,7 +17,6 @@ fn detects_supported_desktops_from_session_values() {
     assert_eq!(desktop_environment_from_values(None, None, false), None);
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn selects_the_xdg_terminal_config_for_the_active_desktop() {
     assert_eq!(
@@ -38,10 +34,9 @@ fn selects_the_xdg_terminal_config_for_the_active_desktop() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn declares_zetta_as_an_xdg_terminal_emulator() {
-    let desktop_entry = include_str!("../../resources/linux/Zetta.desktop");
+    let desktop_entry = include_str!("../../../resources/linux/Zetta.desktop");
     assert!(
         desktop_entry
             .lines()
@@ -54,7 +49,6 @@ fn declares_zetta_as_an_xdg_terminal_emulator() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn makes_zetta_the_first_xdg_terminal_without_removing_other_entries() {
     let original =
@@ -65,7 +59,6 @@ fn makes_zetta_the_first_xdg_terminal_without_removing_other_entries() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn recognizes_zetta_as_the_selected_xdg_terminal_only_when_first() {
     assert!(xdg_terminal_list_prefers_zetta(
@@ -79,7 +72,6 @@ fn recognizes_zetta_as_the_selected_xdg_terminal_only_when_first() {
     ));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn uses_the_desktop_specific_gsettings_schema() {
     assert_eq!(
@@ -96,7 +88,6 @@ fn uses_the_desktop_specific_gsettings_schema() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn updates_only_the_requested_ini_keys() {
     let original = "[General]\nTerminalApplication=konsole\nKeep=me\n\n[Other]\nValue=1";
@@ -114,7 +105,6 @@ fn updates_only_the_requested_ini_keys() {
     assert!(updated.contains("[Other]\nValue=1"));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn preserves_ini_line_endings_and_replaces_duplicate_keys() {
     let original =
@@ -133,46 +123,17 @@ fn preserves_ini_line_endings_and_replaces_duplicate_keys() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn updates_xfce_terminal_without_touching_other_helpers() {
     let updated = update_xfce_helpers("WebBrowser=firefox\nTerminalEmulator=old", "/opt/zetta");
     assert_eq!(updated, "WebBrowser=firefox\nTerminalEmulator=/opt/zetta");
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn preserves_xfce_line_endings_when_adding_the_terminal_helper() {
     let updated = update_xfce_helpers("WebBrowser=firefox\r\n", "/opt/zetta");
     assert_eq!(
         updated,
         "WebBrowser=firefox\r\nTerminalEmulator=/opt/zetta\r\n"
-    );
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn accepts_only_registered_script_extensions() {
-    assert!(accepted_script_extension(Path::new("build.command")));
-    assert!(accepted_script_extension(Path::new("script.ZSH")));
-    assert!(accepted_script_extension(Path::new("notes.sh")));
-    assert!(!accepted_script_extension(Path::new("notes.txt")));
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-fn filters_file_urls_and_preserves_multiple_files() {
-    let paths = script_paths_from_urls(&[
-        "file:///tmp/a.command".to_owned(),
-        "https://example.com/b.command".to_owned(),
-        "file:///tmp/notes.txt".to_owned(),
-        "file:///tmp/b.tool".to_owned(),
-    ]);
-    assert_eq!(
-        paths,
-        [
-            PathBuf::from("/tmp/a.command"),
-            PathBuf::from("/tmp/b.tool")
-        ]
     );
 }

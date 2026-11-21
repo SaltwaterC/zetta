@@ -11,8 +11,10 @@ use crate::protocol::AgentHostRecord;
 use crate::wake::{Waker, WakingSender};
 
 #[cfg(unix)]
+#[path = "../../src/agent/unix_socket.rs"]
 mod unix_socket;
 #[cfg(windows)]
+#[path = "../../src/agent/windows_pipe.rs"]
 mod windows_pipe;
 use std::{
     collections::{BTreeMap, HashMap},

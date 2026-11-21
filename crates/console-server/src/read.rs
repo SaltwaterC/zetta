@@ -1,3 +1,6 @@
+//! Reading console input: raw and cooked `ReadConsole`, the text owed to a
+//! handle between reads, and echoing what cooked input types.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

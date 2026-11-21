@@ -1,10 +1,13 @@
+//! The server's session loop: the PTY it runs, the UDP socket its client talks
+//! to, and the timing that paces frames, echo and keep-alives.
+
 use crate::agent::AgentServer;
 use crate::args::Config;
 use crate::child_exit::{self, ChildExitWatch};
 #[cfg(any(unix, windows))]
 use crate::lifecycle;
 use crate::protocol::{
-    AgentHostRecord, ReceiveOutcome, ServerTransport, encode_host_message_with_agent,
+    AgentHostRecord, ReceiveOutcome, ReceivedState, ServerTransport, encode_host_message_with_agent,
 };
 use crate::session_io::{LoopWait, PTY_CHUNK, PtyEvent, PtyIo, PtyWrite, UdpIo};
 use crate::sleep_guard::{self, IdleSleepGuard};
@@ -200,41 +203,31 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
     let waker = wait.waker();
     let mut udp = UdpIo::new(socket, &waker).context("setting up the UDP socket")?;
     let mut udp_buf = vec![0u8; UDP_BUFFER];
-    // The first authenticated user state decides whether this is a Zosh peer
-    // that negotiated forwarding. Until then no child, PTY, or agent socket
-    // exists, so an inherited bootstrap SSH_AUTH_SOCK cannot leak into a
-    // stock-Mosh session.
-    let mut pty: Option<PtySession> = None;
-    let mut agent_server: Option<AgentServer> = None;
-    let mut agent_decided = false;
-    let mut terminal = TerminalState::new(INITIAL_ROWS, INITIAL_COLS);
-    // Until the first client state arrives the server does not know whether it
-    // is talking to something that can take scrolled-off rows, and it is
-    // already producing them. It collects on spec and settles the question
-    // here, once, from the first state it accepts.
-    let mut scrollback_settled = false;
-    let mut clipboard_supported = false;
-    let mut responder = QueryResponder::new();
-    let mut user_stream = UserStreamTracker::new();
-    let mut peer: Option<SocketAddr> = None;
     let association_deadline = Instant::now() + ASSOCIATION_TIMEOUT;
     let network_timeout = configured_network_timeout();
 
-    let mut dirty = true;
-    let mut echo = EchoAcknowledgements::default();
-    let mut enqueued_echo: u64 = 0;
-    let mut local_shutdown = false;
-    let mut remote_shutdown = false;
     let mut loop_timing = timing::LoopTiming::new();
-    // The interval a client has asked this session to be held to, once it has
-    // announced one, and when this side last put a datagram on the wire.
-    let mut keep_alive: Option<Duration> = None;
-    let mut last_send = Instant::now();
-    // The last time a send was attempted and nothing left, which keeps a
-    // keep-alive that cannot go out from waking the loop continuously.
-    let mut send_failed_at: Option<Instant> = None;
-    let mut frames = FramePacer::default();
     let mut sleep_guard = IdleSleepGuard::new();
+    let mut session_loop = SessionLoop {
+        pty: None,
+        agent_server: None,
+        agent_decided: false,
+        terminal: TerminalState::new(INITIAL_ROWS, INITIAL_COLS),
+        scrollback_settled: false,
+        clipboard_supported: false,
+        responder: QueryResponder::new(),
+        user_stream: UserStreamTracker::new(),
+        peer: None,
+        dirty: true,
+        echo: EchoAcknowledgements::default(),
+        enqueued_echo: 0,
+        local_shutdown: false,
+        remote_shutdown: false,
+        keep_alive: None,
+        last_send: Instant::now(),
+        send_failed_at: None,
+        frames: FramePacer::default(),
+    };
 
     loop {
         #[cfg(test)]
@@ -247,9 +240,9 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         // way it would on an SSH session whose window has closed. A peer that
         // has stopped answering altogether is not worth stalling a program
         // for; past `SCROLLBACK_STALL` the oldest rows are dropped instead.
-        let hold_for_scrollback = if terminal.scrollback_over_budget() {
+        let hold_for_scrollback = if session_loop.terminal.scrollback_over_budget() {
             if transport.last_recv().elapsed() >= SCROLLBACK_STALL {
-                terminal.drop_scrollback_over_budget();
+                session_loop.terminal.drop_scrollback_over_budget();
                 false
             } else {
                 true
@@ -259,274 +252,58 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         };
         let pty_progress = if hold_for_scrollback {
             PtyProgress::default()
-        } else if let Some(session) = pty.as_mut() {
+        } else if let Some(session) = session_loop.pty.as_mut() {
             session.io.flush();
             drain_pty_events(
                 &mut session.io,
-                &mut terminal,
-                &mut responder,
-                clipboard_supported,
-                &mut echo,
+                &mut session_loop.terminal,
+                &mut session_loop.responder,
+                session_loop.clipboard_supported,
+                &mut session_loop.echo,
                 cfg.verbose > 0,
             )?
         } else {
             PtyProgress::default()
         };
-        dirty |= pty_progress.dirty;
+        session_loop.dirty |= pty_progress.dirty;
         if pty_progress.ended
-            && let Some(session) = pty.as_mut()
+            && let Some(session) = session_loop.pty.as_mut()
         {
             session.exited = true;
         }
         timing::slow("pty_drain_slow", phase);
 
-        let confirmed_echo = echo.advance(Instant::now());
+        let confirmed_echo = session_loop.echo.advance(Instant::now());
 
-        // Drain authenticated UDP datagrams. The peer address follows only
-        // an authenticated *in-order* datagram (`roam`), which implements
-        // Mosh's IP/port roaming without letting either a forged or a
-        // replayed packet rebind it.
         let phase = timing::begin();
-        let udp_started = Instant::now();
-        let mut udp_budget_exhausted = true;
-        for _ in 0..128 {
-            if udp_started.elapsed() >= IO_BUDGET {
-                break;
-            }
-            match udp.recv(&mut udp_buf) {
-                Ok(Some((length, addr))) => {
-                    let bytes = &udp_buf[..length];
-                    let outcome = transport.receive(bytes)?;
-                    if outcome.authenticated {
-                        timing::record("udp_authenticated", bytes.len() as u64, 0);
-                    }
-                    roam(&mut peer, &outcome, addr);
-
-                    if let Some(state) = outcome.state {
-                        timing::record("input_state", state.new_num, state.ack_num);
-                        terminal.acknowledge(transport.acked_by_remote());
-                        if transport.take_rebase_required() {
-                            dirty = true;
-                        }
-
-                        if state.new_num == u64::MAX || transport.ack_num() == u64::MAX {
-                            remote_shutdown = true;
-                        }
-
-                        if !remote_shutdown {
-                            let accepted = user_stream.accept(&state)?;
-                            timing::record(
-                                "input_apply",
-                                accepted.frame,
-                                accepted.events.len() as u64,
-                            );
-                            if let Some(announced) = accepted.keep_alive_ms {
-                                // The client is holding the link open
-                                // against radio power management, so the
-                                // answer is worth more than the delayed
-                                // ack's chance to carry data with it.
-                                // `send_updates` runs later in this same
-                                // pass.
-                                timing::record("keepalive", accepted.frame, u64::from(announced));
-                                keep_alive = Some(
-                                    Duration::from_millis(u64::from(announced))
-                                        .clamp(KEEP_ALIVE_MIN, KEEP_ALIVE_MAX),
-                                );
-                                transport.force_next_send();
-                            }
-                            if let Some(kib) = accepted.scrollback_kib {
-                                // The one negotiation the extension has.
-                                timing::record(
-                                    "scrollback_request",
-                                    accepted.frame,
-                                    u64::from(kib),
-                                );
-                                terminal.set_scrollback_budget((kib as usize).saturating_mul(1024));
-                                scrollback_settled = true;
-                            } else if !scrollback_settled {
-                                // A client announces on its first instruction,
-                                // and the announcement is cumulative, so a
-                                // first state without one is a client that
-                                // will never send one: a stock Mosh client.
-                                terminal.forget_scrollback();
-                                scrollback_settled = true;
-                            }
-                            clipboard_supported |= accepted.clipboard_version == Some(1);
-                            if !agent_decided {
-                                let requested = accepted
-                                    .events
-                                    .iter()
-                                    .any(|event| matches!(event, UserEvent::AgentHello { .. }));
-                                agent_decided = true;
-                                if cfg.forward_agent && requested {
-                                    agent_server = Some(AgentServer::new(waker.clone()));
-                                }
-                                pty = Some(spawn_pty_session(
-                                    &cfg,
-                                    agent_server.as_ref().and_then(|agent| agent.socket_path()),
-                                    &waker,
-                                )?);
-                            }
-                            let events = accepted.events;
-                            for event in &events {
-                                if let UserEvent::AgentResponse {
-                                    connection_id,
-                                    request_id,
-                                    frame,
-                                    closed,
-                                } = event
-                                    && let Some(agent) = agent_server.as_mut()
-                                {
-                                    agent.apply_response(
-                                        *connection_id,
-                                        *request_id,
-                                        frame,
-                                        *closed,
-                                    );
-                                }
-                            }
-                            let terminal_events = events
-                                .into_iter()
-                                .filter(|event| {
-                                    !matches!(
-                                        event,
-                                        UserEvent::AgentHello { .. }
-                                            | UserEvent::AgentResponse { .. }
-                                    )
-                                })
-                                .collect();
-                            if let Some(session) = pty.as_mut() {
-                                apply_user_events(
-                                    terminal_events,
-                                    accepted.frame,
-                                    session.master.as_ref(),
-                                    &mut terminal,
-                                    &mut session.io,
-                                    &mut dirty,
-                                )?;
-                            }
-                        }
-                    }
-                }
-                Ok(None) => {
-                    udp_budget_exhausted = false;
-                    break;
-                }
-                Err(error) => return Err(error).context("receiving UDP datagram"),
-            }
-        }
+        let udp_budget_exhausted =
+            session_loop.drain_udp(&cfg, &waker, &mut transport, &mut udp, &mut udp_buf)?;
 
         timing::slow("input_drain_slow", phase);
-        let associated = peer.is_some() && transport.has_received_authenticated();
+        let associated = session_loop.peer.is_some() && transport.has_received_authenticated();
         sleep_guard.update(
             sleep_guard::peer_present(associated, transport.last_recv().elapsed()),
             cfg.verbose > 0,
         );
         if !associated && Instant::now() >= association_deadline {
-            kill_pty(&mut pty, false);
+            kill_pty(&mut session_loop.pty, false);
             bail!("no Mosh client associated within 60 seconds");
         }
 
-        if associated {
-            if let Some(agent) = agent_server.as_mut() {
-                agent.acknowledge(transport.acked_by_remote());
-                if agent.poll() {
-                    dirty = true;
-                    transport.force_next_send();
-                }
-            }
-            if network_timeout.is_some_and(|timeout| transport.last_recv().elapsed() >= timeout) {
-                if cfg.verbose > 0 {
-                    eprintln!("zosh-server-rs: network timeout expired");
-                }
-                kill_pty(&mut pty, false);
-                break;
-            }
-
-            terminal.acknowledge(transport.acked_by_remote());
-
-            // Build a cumulative HostMessage from the peer's acknowledged
-            // visual base. SSP may discard an unsent intermediate state; every
-            // newer state is independently valid from the acknowledged base.
-            //
-            // Built only once one may go out (see `FramePacer`): the
-            // transport sends a new state the moment it has one, so a frame
-            // built sooner is a frame sent sooner, and each costs a diff of
-            // the whole screen, a snapshot and a datagram.
-            let owed = Owed {
-                screen: !local_shutdown && !remote_shutdown && dirty,
-                echo: !local_shutdown && !remote_shutdown && confirmed_echo > enqueued_echo,
-            };
-            let now = Instant::now();
-            if frames
-                .due(owed, now, transport.send_interval())
-                .is_some_and(|due| now >= due)
-            {
-                if let Some(state_num) = queue_frame(
-                    &mut transport,
-                    &terminal,
-                    agent_server.as_ref(),
-                    confirmed_echo,
-                ) {
-                    timing::record("host_update", state_num, confirmed_echo);
-                    terminal.snapshot_for_state(state_num);
-                    if let Some(agent) = agent_server.as_mut() {
-                        agent.snapshot_for_state(state_num);
-                    }
-                    enqueued_echo = enqueued_echo.max(confirmed_echo);
-                    frames.sent(now);
-                } else {
-                    frames.settled();
-                }
-                dirty = false;
-            }
-
-            // The server's own half of the keep-alive, and the reason the
-            // client's is not enough on its own: replying to what arrives
-            // makes this side go quiet exactly when the other side's
-            // packets are the ones being delayed. This timer does not care
-            // whether anything arrived.
-            //
-            // Like the client's, it is a floor on sending rather than an
-            // extra timer: an ordinary reply resets `last_send`, so a
-            // healthy session pays nothing for it.
-            if keep_alive_due(
-                keep_alive,
-                last_send.elapsed(),
-                transport.last_recv().elapsed(),
-            ) {
-                timing::record("keepalive_send", last_send.elapsed().as_millis() as u64, 0);
-                transport.force_next_send();
-            }
-
-            match send_updates(&mut transport, &udp, peer, cfg.verbose > 1) {
-                SendOutcome::Sent => {
-                    last_send = Instant::now();
-                    send_failed_at = None;
-                }
-                SendOutcome::Failed => send_failed_at = Some(Instant::now()),
-                SendOutcome::Nothing => {}
-            }
-
-            if transport.crypto_exhausted() {
-                kill_pty(&mut pty, false);
-                bail!("Mosh OCB per-key block limit exhausted; refusing nonce/key reuse");
-            }
-
-            if remote_shutdown && transport.counterparty_shutdown_ack_sent() {
-                kill_pty(&mut pty, false);
-                break;
-            }
-
-            if local_shutdown
-                && (transport.shutdown_acknowledged() || transport.shutdown_timed_out())
-            {
-                break;
-            }
+        if associated
+            && session_loop.serve_associated(
+                &cfg,
+                &mut transport,
+                &udp,
+                network_timeout,
+                confirmed_echo,
+            )? == Flow::Stop
+        {
+            break;
         }
 
         let phase = timing::begin();
-        if let Some(session) = pty.as_mut()
+        if let Some(session) = session_loop.pty.as_mut()
             && !session.exited
             && session.child_may_have_exited()
             && session
@@ -540,9 +317,14 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         }
         timing::slow("child_poll_slow", phase);
 
-        if pty.as_ref().is_some_and(|session| session.exited) && !local_shutdown {
-            if associated && !remote_shutdown {
-                local_shutdown = true;
+        if session_loop
+            .pty
+            .as_ref()
+            .is_some_and(|session| session.exited)
+            && !session_loop.local_shutdown
+        {
+            if associated && !session_loop.remote_shutdown {
+                session_loop.local_shutdown = true;
                 transport.start_shutdown();
             } else {
                 break;
@@ -553,7 +335,7 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         // or the newest frame rests on a base too old to assume the peer has,
         // rebuild from the current ACK base on the next pass.
         if transport.take_rebase_required() || transport.frame_base_expired() {
-            dirty = true;
+            session_loop.dirty = true;
         }
 
         // A producer wakes the loop after publishing an event, and a pending
@@ -563,13 +345,15 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
         // that stopped early, or PTY output that was held back for a
         // scrollback budget this pass's acknowledgements have since freed. A
         // frame that is owed is a deadline like any other: `frame_due`.
-        let pty_backlog = hold_for_scrollback && !terminal.scrollback_over_budget();
-        let sending = associated && !local_shutdown && !remote_shutdown;
+        let pty_backlog = hold_for_scrollback && !session_loop.terminal.scrollback_over_budget();
+        let sending = associated && !session_loop.local_shutdown && !session_loop.remote_shutdown;
         let owed = Owed {
-            screen: sending && dirty,
-            echo: sending && confirmed_echo > enqueued_echo,
+            screen: sending && session_loop.dirty,
+            echo: sending && confirmed_echo > session_loop.enqueued_echo,
         };
-        let frame_due = frames.due(owed, Instant::now(), transport.send_interval());
+        let frame_due = session_loop
+            .frames
+            .due(owed, Instant::now(), transport.send_interval());
         if !pty_progress.budget_exhausted && !udp_budget_exhausted && !pty_backlog {
             let wake = next_wake(WakeSources {
                 now: Instant::now(),
@@ -577,32 +361,343 @@ fn serve_session(cfg: Config, socket: UdpSocket, mut transport: ServerTransport)
                 association_deadline,
                 network_timeout,
                 transport: &transport,
-                keep_alive,
-                last_send,
-                send_failed_at,
-                terminal: &terminal,
-                echo: &echo,
-                child_poll: pty.as_ref().and_then(PtySession::child_poll_deadline),
+                keep_alive: session_loop.keep_alive,
+                last_send: session_loop.last_send,
+                send_failed_at: session_loop.send_failed_at,
+                terminal: &session_loop.terminal,
+                echo: &session_loop.echo,
+                child_poll: session_loop
+                    .pty
+                    .as_ref()
+                    .and_then(PtySession::child_poll_deadline),
                 frame_due,
             });
             // The program is held back while the client is behind on its
             // scrollback (see the top of the pass), and then its output must
             // not end the wait: the stall deadline is what ends that.
-            let holding = terminal.scrollback_over_budget()
+            let holding = session_loop.terminal.scrollback_over_budget()
                 && transport.last_recv().elapsed() < SCROLLBACK_STALL;
             loop_timing.parking(wake.earliest());
             wait.wait(
                 wake,
                 &udp,
-                pty.as_ref().map(|session| &session.io),
+                session_loop.pty.as_ref().map(|session| &session.io),
                 !holding,
             )
             .context("waiting for the network or the PTY")?;
         }
     }
 
-    kill_pty(&mut pty, true);
+    kill_pty(&mut session_loop.pty, true);
     Ok(())
+}
+
+/// What the session loop carries from one pass to the next, apart from the
+/// sockets and the wake-up it waits on.
+struct SessionLoop {
+    /// The first authenticated user state decides whether this is a Zosh peer
+    /// that negotiated forwarding. Until then no child, PTY, or agent socket
+    /// exists, so an inherited bootstrap `SSH_AUTH_SOCK` cannot leak into a
+    /// stock-Mosh session.
+    pty: Option<PtySession>,
+    agent_server: Option<AgentServer>,
+    agent_decided: bool,
+    terminal: TerminalState,
+    /// Until the first client state arrives the server does not know whether
+    /// it is talking to something that can take scrolled-off rows, and it is
+    /// already producing them. It collects on spec and settles the question
+    /// once, from the first state it accepts.
+    scrollback_settled: bool,
+    clipboard_supported: bool,
+    responder: QueryResponder,
+    user_stream: UserStreamTracker,
+    peer: Option<SocketAddr>,
+    dirty: bool,
+    echo: EchoAcknowledgements,
+    enqueued_echo: u64,
+    local_shutdown: bool,
+    remote_shutdown: bool,
+    /// The interval a client has asked this session to be held to, once it
+    /// has announced one.
+    keep_alive: Option<Duration>,
+    /// When this side last put a datagram on the wire.
+    last_send: Instant,
+    /// The last time a send was attempted and nothing left, which keeps a
+    /// keep-alive that cannot go out from waking the loop continuously.
+    send_failed_at: Option<Instant>,
+    frames: FramePacer,
+}
+
+/// Whether the session loop goes round again.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    Continue,
+    Stop,
+}
+
+impl SessionLoop {
+    /// Drains authenticated datagrams for at most `IO_BUDGET`. The peer
+    /// address follows only an authenticated *in-order* datagram (`roam`),
+    /// which implements Mosh's IP/port roaming without letting either a forged
+    /// or a replayed packet rebind it. Says whether the budget ran out before
+    /// the socket did.
+    fn drain_udp(
+        &mut self,
+        cfg: &Config,
+        waker: &Waker,
+        transport: &mut ServerTransport,
+        udp: &mut UdpIo,
+        udp_buf: &mut [u8],
+    ) -> Result<bool> {
+        let udp_started = Instant::now();
+        let mut udp_budget_exhausted = true;
+        for _ in 0..128 {
+            if udp_started.elapsed() >= IO_BUDGET {
+                break;
+            }
+            match udp.recv(udp_buf) {
+                Ok(Some((length, addr))) => {
+                    let bytes = &udp_buf[..length];
+                    let outcome = transport.receive(bytes)?;
+                    if outcome.authenticated {
+                        timing::record("udp_authenticated", bytes.len() as u64, 0);
+                    }
+                    roam(&mut self.peer, &outcome, addr);
+
+                    if let Some(state) = outcome.state {
+                        self.accept_user_state(cfg, waker, transport, state)?;
+                    }
+                }
+                Ok(None) => {
+                    udp_budget_exhausted = false;
+                    break;
+                }
+                Err(error) => return Err(error).context("receiving UDP datagram"),
+            }
+        }
+        Ok(udp_budget_exhausted)
+    }
+
+    /// Applies one authenticated client state: the shutdown it may carry, the
+    /// keep-alive and scrollback it may announce, the agent forwarding its
+    /// first instruction decides, and its input to the PTY.
+    fn accept_user_state(
+        &mut self,
+        cfg: &Config,
+        waker: &Waker,
+        transport: &mut ServerTransport,
+        state: ReceivedState,
+    ) -> Result<()> {
+        timing::record("input_state", state.new_num, state.ack_num);
+        self.terminal.acknowledge(transport.acked_by_remote());
+        if transport.take_rebase_required() {
+            self.dirty = true;
+        }
+
+        if state.new_num == u64::MAX || transport.ack_num() == u64::MAX {
+            self.remote_shutdown = true;
+        }
+
+        if !self.remote_shutdown {
+            let accepted = self.user_stream.accept(&state)?;
+            timing::record("input_apply", accepted.frame, accepted.events.len() as u64);
+            if let Some(announced) = accepted.keep_alive_ms {
+                // The client is holding the link open
+                // against radio power management, so the
+                // answer is worth more than the delayed
+                // ack's chance to carry data with it.
+                // `send_updates` runs later in this same
+                // pass.
+                timing::record("keepalive", accepted.frame, u64::from(announced));
+                self.keep_alive = Some(
+                    Duration::from_millis(u64::from(announced))
+                        .clamp(KEEP_ALIVE_MIN, KEEP_ALIVE_MAX),
+                );
+                transport.force_next_send();
+            }
+            if let Some(kib) = accepted.scrollback_kib {
+                // The one negotiation the extension has.
+                timing::record("scrollback_request", accepted.frame, u64::from(kib));
+                self.terminal
+                    .set_scrollback_budget((kib as usize).saturating_mul(1024));
+                self.scrollback_settled = true;
+            } else if !self.scrollback_settled {
+                // A client announces on its first instruction,
+                // and the announcement is cumulative, so a
+                // first state without one is a client that
+                // will never send one: a stock Mosh client.
+                self.terminal.forget_scrollback();
+                self.scrollback_settled = true;
+            }
+            self.clipboard_supported |= accepted.clipboard_version == Some(1);
+            if !self.agent_decided {
+                let requested = accepted
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, UserEvent::AgentHello { .. }));
+                self.agent_decided = true;
+                if cfg.forward_agent && requested {
+                    self.agent_server = Some(AgentServer::new(waker.clone()));
+                }
+                self.pty = Some(spawn_pty_session(
+                    cfg,
+                    self.agent_server
+                        .as_ref()
+                        .and_then(|agent| agent.socket_path()),
+                    waker,
+                )?);
+            }
+            let events = accepted.events;
+            for event in &events {
+                if let UserEvent::AgentResponse {
+                    connection_id,
+                    request_id,
+                    frame,
+                    closed,
+                } = event
+                    && let Some(agent) = self.agent_server.as_mut()
+                {
+                    agent.apply_response(*connection_id, *request_id, frame, *closed);
+                }
+            }
+            let terminal_events = events
+                .into_iter()
+                .filter(|event| {
+                    !matches!(
+                        event,
+                        UserEvent::AgentHello { .. } | UserEvent::AgentResponse { .. }
+                    )
+                })
+                .collect();
+            if let Some(session) = self.pty.as_mut() {
+                apply_user_events(
+                    terminal_events,
+                    accepted.frame,
+                    session.master.as_ref(),
+                    &mut self.terminal,
+                    &mut session.io,
+                    &mut self.dirty,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// One pass's work once a client is associated: agent records, the
+    /// network timeout, building and sending a frame, the keep-alive, and the
+    /// shutdown handshake.
+    fn serve_associated(
+        &mut self,
+        cfg: &Config,
+        transport: &mut ServerTransport,
+        udp: &UdpIo,
+        network_timeout: Option<Duration>,
+        confirmed_echo: u64,
+    ) -> Result<Flow> {
+        if let Some(agent) = self.agent_server.as_mut() {
+            agent.acknowledge(transport.acked_by_remote());
+            if agent.poll() {
+                self.dirty = true;
+                transport.force_next_send();
+            }
+        }
+        if network_timeout.is_some_and(|timeout| transport.last_recv().elapsed() >= timeout) {
+            if cfg.verbose > 0 {
+                eprintln!("zosh-server-rs: network timeout expired");
+            }
+            kill_pty(&mut self.pty, false);
+            return Ok(Flow::Stop);
+        }
+
+        self.terminal.acknowledge(transport.acked_by_remote());
+
+        // Build a cumulative HostMessage from the peer's acknowledged
+        // visual base. SSP may discard an unsent intermediate state; every
+        // newer state is independently valid from the acknowledged base.
+        //
+        // Built only once one may go out (see `FramePacer`): the
+        // transport sends a new state the moment it has one, so a frame
+        // built sooner is a frame sent sooner, and each costs a diff of
+        // the whole screen, a snapshot and a datagram.
+        let owed = Owed {
+            screen: !self.local_shutdown && !self.remote_shutdown && self.dirty,
+            echo: !self.local_shutdown
+                && !self.remote_shutdown
+                && confirmed_echo > self.enqueued_echo,
+        };
+        let now = Instant::now();
+        if self
+            .frames
+            .due(owed, now, transport.send_interval())
+            .is_some_and(|due| now >= due)
+        {
+            if let Some(state_num) = queue_frame(
+                transport,
+                &self.terminal,
+                self.agent_server.as_ref(),
+                confirmed_echo,
+            ) {
+                timing::record("host_update", state_num, confirmed_echo);
+                self.terminal.snapshot_for_state(state_num);
+                if let Some(agent) = self.agent_server.as_mut() {
+                    agent.snapshot_for_state(state_num);
+                }
+                self.enqueued_echo = self.enqueued_echo.max(confirmed_echo);
+                self.frames.sent(now);
+            } else {
+                self.frames.settled();
+            }
+            self.dirty = false;
+        }
+
+        // The server's own half of the keep-alive, and the reason the
+        // client's is not enough on its own: replying to what arrives
+        // makes this side go quiet exactly when the other side's
+        // packets are the ones being delayed. This timer does not care
+        // whether anything arrived.
+        //
+        // Like the client's, it is a floor on sending rather than an
+        // extra timer: an ordinary reply resets `last_send`, so a
+        // healthy session pays nothing for it.
+        if keep_alive_due(
+            self.keep_alive,
+            self.last_send.elapsed(),
+            transport.last_recv().elapsed(),
+        ) {
+            timing::record(
+                "keepalive_send",
+                self.last_send.elapsed().as_millis() as u64,
+                0,
+            );
+            transport.force_next_send();
+        }
+
+        match send_updates(transport, udp, self.peer, cfg.verbose > 1) {
+            SendOutcome::Sent => {
+                self.last_send = Instant::now();
+                self.send_failed_at = None;
+            }
+            SendOutcome::Failed => self.send_failed_at = Some(Instant::now()),
+            SendOutcome::Nothing => {}
+        }
+
+        if transport.crypto_exhausted() {
+            kill_pty(&mut self.pty, false);
+            bail!("Mosh OCB per-key block limit exhausted; refusing nonce/key reuse");
+        }
+
+        if self.remote_shutdown && transport.counterparty_shutdown_ack_sent() {
+            kill_pty(&mut self.pty, false);
+            return Ok(Flow::Stop);
+        }
+
+        if self.local_shutdown
+            && (transport.shutdown_acknowledged() || transport.shutdown_timed_out())
+        {
+            return Ok(Flow::Stop);
+        }
+        Ok(Flow::Continue)
+    }
 }
 
 #[derive(Default)]

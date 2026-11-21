@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use zetta_sync::RecoverPoison as _;
 
 #[derive(Default)]
 pub struct Launch {
@@ -25,62 +26,35 @@ pub struct Launch {
 struct SharedSink(SharedOutput);
 impl ConsoleOutput for SharedSink {
     fn write(&mut self, bytes: &[u8], mode: OutputMode) -> io::Result<()> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .write(bytes, mode)
+        self.0.lock().recover_poison().write(bytes, mode)
     }
     fn flush(&self) -> io::Result<()> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .flush()
+        self.0.lock().recover_poison().flush()
     }
     fn cursor(&self) -> (i16, i16) {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .cursor()
+        self.0.lock().recover_poison().cursor()
     }
     fn size(&self) -> (i16, i16) {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .size()
+        self.0.lock().recover_poison().size()
     }
     fn read_cells(
         &self,
         rows: std::ops::Range<i16>,
         columns: std::ops::Range<i16>,
     ) -> Option<Vec<crate::output::Cell>> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .read_cells(rows, columns)
+        self.0.lock().recover_poison().read_cells(rows, columns)
     }
     fn screen(&self) -> crate::output::Screen {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .screen()
+        self.0.lock().recover_poison().screen()
     }
     fn title(&self) -> Option<String> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .title()
+        self.0.lock().recover_poison().title()
     }
     fn set_title(&mut self, title: &str) -> io::Result<()> {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .set_title(title)
+        self.0.lock().recover_poison().set_title(title)
     }
     fn ended(&mut self) {
-        self.0
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .ended();
+        self.0.lock().recover_poison().ended();
     }
 }
 pub struct Session {
@@ -177,10 +151,7 @@ impl Session {
     }
     /// The pane's colors changed; the console reports the new table.
     pub fn set_palette(&self, palette: Palette) {
-        *self
-            .palette
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(palette);
+        *self.palette.lock().recover_poison() = Some(palette);
     }
     /// Closes the console as closing its window does: output stops, every
     /// client gets CTRL_CLOSE_EVENT, and this returns at once. A reaper

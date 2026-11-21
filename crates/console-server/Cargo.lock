@@ -89,6 +89,8 @@ dependencies = [
  "unicode-width",
  "vte",
  "windows-sys 0.59.0",
+ "zetta_cli_help",
+ "zetta_sync",
 ]
 
 [[package]]
@@ -655,4 +657,16 @@ dependencies = [
  "memchr",
  "tempfile",
  "windows",
+ "zetta_cli_help",
 ]
+
+[[package]]
+name = "zetta_cli_help"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "zetta_sync"
+version = "0.1.0"

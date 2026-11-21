@@ -109,24 +109,17 @@ fn an_old_relay_cannot_remove_a_replacement_subscription() {
     let client_id = ClientId::new("replacement");
     let (old, _old_receiver) = relay_with_sender(1, 1, client_id.clone());
     let (replacement, _replacement_receiver) = relay_with_sender(1, 2, client_id.clone());
-    daemon
-        .subscribers
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(
-            client_id.clone(),
-            Subscriber {
-                process_id: 1,
-                relay: Arc::clone(&replacement),
-            },
-        );
+    daemon.subscribers.lock().recover_poison().insert(
+        client_id.clone(),
+        Subscriber {
+            process_id: 1,
+            relay: Arc::clone(&replacement),
+        },
+    );
 
     remove_subscriber_if_matches(&daemon, &client_id, old.id);
 
-    let subscribers = daemon
-        .subscribers
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let subscribers = daemon.subscribers.lock().recover_poison();
     assert_eq!(
         subscribers.get(&client_id).unwrap().relay.id,
         replacement.id
@@ -138,10 +131,7 @@ fn a_revoke_targets_the_holder_when_both_clients_are_subscribed() {
     let (daemon, _directory) = test_daemon();
     let (holder, _holder_receiver) = relay_with_sender(1, 1, ClientId::new("holder"));
     let (requester, _requester_receiver) = relay_with_sender(1, 2, ClientId::new("requester"));
-    let mut subscribers = daemon
-        .subscribers
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut subscribers = daemon.subscribers.lock().recover_poison();
     subscribers.insert(
         ClientId::new("holder"),
         Subscriber {

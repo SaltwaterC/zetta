@@ -218,15 +218,17 @@ fi
 
 if ! type -t vi >/dev/null 2>&1; then
     eval 'vi() { zetta vi "$@"; }'
-    complete -F _zetta_complete vi
+    __ZETTA_VI_WRAPPER=1
 fi
 
 zvi() { zetta vi "$@"; }
 
+# ZETTA_ZOSH_INTEGRATION_BEGIN
 if ! type -t mosh >/dev/null 2>&1; then
     mosh() { zetta mosh "$@"; }
     __ZETTA_MOSH_WRAPPER=1
 fi
+# ZETTA_ZOSH_INTEGRATION_END
 
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 zwt() {
@@ -342,19 +344,9 @@ __zetta_lazy_complete() {
     [[ $handler != __zetta_lazy_complete && -n $handler ]] && "$handler" "$@"
 }
 if [[ ${__ZETTA_COMPLETIONS_LOADED:-0} != 1 ]]; then
-    complete -F __zetta_lazy_complete zetta zosh zvi ztftp zhttp zntfy
-# ZETTA_PAGER_INTEGRATION_BEGIN
-    complete -F __zetta_lazy_complete zpager
-# ZETTA_PAGER_INTEGRATION_END
+    # ZETTA_LAZY_COMPLETIONS
+# ZETTA_ZOSH_INTEGRATION_BEGIN
     [[ ${__ZETTA_MOSH_WRAPPER:-0} == 1 ]] && complete -F __zetta_lazy_complete mosh
-# ZETTA_WORKTREE_INTEGRATION_BEGIN
-    complete -F __zetta_lazy_complete zwt
-# ZETTA_WORKTREE_INTEGRATION_END
-# ZETTA_ZMUX_INTEGRATION_BEGIN
-    complete -F __zetta_lazy_complete zmux
-# ZETTA_ZMUX_INTEGRATION_END
-# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
-    complete -F __zetta_lazy_complete zcopy zpaste
-    case "$OSTYPE" in darwin*) ;; *) complete -F __zetta_lazy_complete pbcopy pbpaste ;; esac
-# ZETTA_CLIPBOARD_INTEGRATION_END
+# ZETTA_ZOSH_INTEGRATION_END
+    [[ ${__ZETTA_VI_WRAPPER:-0} == 1 ]] && complete -F __zetta_lazy_complete vi
 fi

@@ -31,7 +31,8 @@ mod wait;
 pub use client::ClientArgs;
 pub use escape::{EscapeAction, EscapeKey, EscapeState};
 pub use launcher::{
-    PaneBootstrapOutcome, PaneBootstrapRequest, PaneEndpoint, bootstrap_pane_endpoint,
+    LauncherCommand, PaneBootstrapOutcome, PaneBootstrapRequest, PaneEndpoint,
+    bootstrap_pane_endpoint, parse_launcher_args,
 };
 pub use mosh_rs::session::CLIPBOARD_PROTOCOL_VERSION;
 pub use mosh_rs::{Base64Key, DisplayPreference};

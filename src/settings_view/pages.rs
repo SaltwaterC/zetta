@@ -1,3 +1,6 @@
+//! The settings dialog's pages: configuration, themes, keymap and profiles,
+//! each built from the shared form widgets.
+
 use super::pane_templates::render_pane_templates_page;
 use super::projects::render_projects_page;
 use super::widgets::{KeymapRowRenderContext, SETTINGS_SCROLLBAR_WIDTH};

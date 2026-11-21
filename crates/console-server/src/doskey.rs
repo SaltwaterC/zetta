@@ -1,3 +1,6 @@
+//! The doskey APIs: adding, reading and listing aliases, and the
+//! command-history calls `doskey` makes.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

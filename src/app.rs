@@ -27,7 +27,13 @@ pub(crate) enum TabDropPosition {
     /// No tab surface was hit. The tab bar does not construct this during a
     /// normal drag, but it keeps the outside-drop no-op explicit — which is
     /// why only the sidecar builds one, to pin that the drop is a no-op.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "matched in production, constructed only by the sidecar"
+        )
+    )]
     Outside,
 }
 
@@ -162,19 +168,14 @@ pub(crate) fn tab_drop_preserves_pinning(
     source_id: u64,
     position: TabDropPosition,
 ) -> bool {
-    let Some(source_pinned) = tabs
-        .iter()
-        .find(|tab| tab.id == source_id)
-        .map(|tab| tab.pinned)
-    else {
+    let Some(source_pinned) = tabs.by_id(source_id).map(|tab| tab.pinned) else {
         return false;
     };
     let target_id = match position {
         TabDropPosition::Before(target_id) | TabDropPosition::After(target_id) => target_id,
         TabDropPosition::Outside => return false,
     };
-    tabs.iter()
-        .find(|tab| tab.id == target_id)
+    tabs.by_id(target_id)
         .is_some_and(|tab| tab.pinned == source_pinned)
 }
 
@@ -478,6 +479,16 @@ pub(crate) fn resolve_auto_protect(
             None
         }
     }
+}
+
+/// Hands out `*counter` and advances it: how `Zetta::next_tab_id` and
+/// `Zetta::next_pane_id` issue ids. A function of the field rather than a
+/// method on `Zetta`, so a caller holding another part of `Zetta` can still
+/// take an id.
+pub(crate) fn take_next_id(counter: &mut u64) -> u64 {
+    let id = *counter;
+    *counter += 1;
+    id
 }
 
 pub(crate) struct Zetta {

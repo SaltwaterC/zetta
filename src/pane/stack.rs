@@ -53,6 +53,14 @@ impl PaneStack {
         }
     }
 
+    pub(crate) fn entry(&self, id: u64) -> Option<&StackedPane> {
+        self.entries.iter().find(|entry| entry.id == id)
+    }
+
+    pub(crate) fn entry_mut(&mut self, id: u64) -> Option<&mut StackedPane> {
+        self.entries.iter_mut().find(|entry| entry.id == id)
+    }
+
     pub(crate) fn selected_entry(&self) -> Option<&StackedPane> {
         let PaneStackSelection::Stacked(id) = self.selected else {
             return None;

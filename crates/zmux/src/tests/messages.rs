@@ -54,16 +54,72 @@ fn requests_are_tagged_by_name_on_the_wire() {
     let encoded = serde_json::to_value(Request::List).unwrap();
     assert_eq!(encoded, serde_json::json!({"request": "list"}));
 
-    let attach = serde_json::to_value(Request::Attach {
+    let attach = serde_json::to_value(Request::Attach(crate::messages::AttachRequest {
         session_id: 3,
         pane_id: Some(4),
         secret: None,
         force_shared: false,
         relaying_for: None,
-    })
+    }))
     .unwrap();
     assert_eq!(attach["request"], "attach");
     assert_eq!(attach["session_id"], 3);
+}
+
+#[test]
+fn requests_carrying_a_struct_keep_their_fields_beside_the_tag() {
+    // These four were struct variants before their fields became named types.
+    // An internally tagged newtype flattens the same way, so a daemon and a
+    // client of either build still read each other; this pins that.
+    let cases = [
+        (
+            Request::Attach(crate::messages::AttachRequest {
+                session_id: 1,
+                pane_id: None,
+                secret: None,
+                force_shared: true,
+                relaying_for: None,
+            }),
+            serde_json::json!({"request": "attach", "session_id": 1, "pane_id": null,
+                "secret": null, "force_shared": true}),
+        ),
+        (
+            Request::Snapshot(crate::messages::SnapshotRequest {
+                session_id: 2,
+                pane_id: 3,
+                length: 4,
+                columns: 80,
+                lines: 24,
+            }),
+            serde_json::json!({"request": "snapshot", "session_id": 2, "pane_id": 3,
+                "length": 4, "columns": 80, "lines": 24}),
+        ),
+        (
+            Request::StoreImage(crate::messages::StoreImageRequest {
+                session_id: 5,
+                pane_id: 6,
+                length: 7,
+            }),
+            serde_json::json!({"request": "store_image", "session_id": 5, "pane_id": 6,
+                "length": 7}),
+        ),
+        (
+            Request::SetSessionScope(crate::messages::SessionScopeRequest {
+                session_id: 8,
+                shared: true,
+                verifier: None,
+                key_envelope: None,
+            }),
+            serde_json::json!({"request": "set_session_scope", "session_id": 8,
+                "shared": true, "verifier": null}),
+        ),
+    ];
+    for (request, expected) in cases {
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded, expected);
+        let decoded: Request = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+    }
 }
 
 #[test]
@@ -147,11 +203,11 @@ fn headless_create_requests_round_trip_the_recursive_layout() {
 
 #[test]
 fn image_store_messages_round_trip_with_the_raw_payload_length() {
-    let request = Request::StoreImage {
+    let request = Request::StoreImage(crate::messages::StoreImageRequest {
         session_id: 7,
         pane_id: 8,
         length: 1234,
-    };
+    });
     let wire = serde_json::to_value(&request).unwrap();
     assert_eq!(wire["request"], "store_image");
     assert_eq!(wire["session_id"], 7);
@@ -161,11 +217,11 @@ fn image_store_messages_round_trip_with_the_raw_payload_length() {
     let parsed: Request = serde_json::from_value(wire).unwrap();
     assert!(matches!(
         parsed,
-        Request::StoreImage {
+        Request::StoreImage(crate::messages::StoreImageRequest {
             session_id: 7,
             pane_id: 8,
             length: 1234,
-        }
+        })
     ));
 
     let response = Response::ImageStored {

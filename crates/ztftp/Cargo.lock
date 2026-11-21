@@ -216,10 +216,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "zetta_cli_help"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
+name = "zetta_sync"
+version = "0.1.0"
+
+[[package]]
 name = "ztftp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "tempfile",
  "time",
+ "zetta_cli_help",
+ "zetta_sync",
 ]

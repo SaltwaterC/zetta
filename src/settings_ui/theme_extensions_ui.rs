@@ -1,3 +1,6 @@
+//! Theme extensions from the settings dialog: fetching the catalogue,
+//! downloading and removing extensions, and the theme names they register.
+
 use super::*;
 
 impl Zetta {

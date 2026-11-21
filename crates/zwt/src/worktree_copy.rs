@@ -1,3 +1,7 @@
+//! Copying the files a new worktree is told to bring along: checking every path
+//! stays inside the repository, and copying with a copy-on-write clone where
+//! the filesystem supports one.
+
 use std::{
     fs::{self, File, OpenOptions},
     io,

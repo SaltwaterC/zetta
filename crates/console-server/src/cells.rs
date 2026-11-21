@@ -1,3 +1,6 @@
+//! Grid cells as the `*ConsoleOutput*` APIs read and write them: `CHAR_INFO`
+//! records, wide glyphs, and the rectangles they cover.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

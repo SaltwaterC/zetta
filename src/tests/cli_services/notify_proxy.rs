@@ -1,4 +1,5 @@
 use super::*;
+use crate::cli_services::NotificationTimeout;
 
 #[test]
 fn proxy_arguments_preserve_all_notification_options() {

@@ -1,3 +1,6 @@
+//! Drawing a tab's body: its pane layout, or one maximized pane with its bar,
+//! and the shelf of minimized panes along the bottom.
+
 use super::*;
 
 const MINIMIZED_PANE_ENTRY_MIN_WIDTH: Pixels = px(180.);
@@ -89,7 +92,7 @@ impl Zetta {
         corner_radius: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        match self.tabs.get(self.active_tab) {
+        match self.current_tab() {
             Some(tab) => {
                 let tab_theme = self.theme_for_tab(tab, cx);
                 let tab_colors = tab_theme.colors();

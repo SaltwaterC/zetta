@@ -11,18 +11,19 @@ pub(super) fn discard_pane(
     daemon: &Arc<Daemon>,
     session_id: u64,
     pane_id: u64,
-    client_process_id: u32,
-    peer_process_id: Option<u32>,
-    session_secret: Option<&str>,
+    caller: Caller<'_>,
 ) -> Result<()> {
+    let Caller {
+        client_process_id,
+        peer_process_id,
+        session_secret,
+        ..
+    } = caller;
     let client_process_id = control_process_id(client_process_id, peer_process_id);
     let proof = prove_session_secret(daemon, peer_process_id, session_secret, |session| {
         session.id == session_id
     });
-    let mut sessions = daemon
-        .sessions
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut sessions = daemon.sessions.lock().recover_poison();
     let session = sessions
         .iter_mut()
         .find(|session| session.id == session_id)

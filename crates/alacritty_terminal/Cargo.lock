@@ -711,6 +711,14 @@ dependencies = [
  "memchr",
  "tempfile",
  "windows",
+ "zetta_cli_help",
+]
+
+[[package]]
+name = "zetta_cli_help"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]

@@ -43,6 +43,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -319,21 +320,13 @@ struct CleanupRegistry {
 
 impl CleanupRegistry {
     fn push(&self, entry: CleanupEntry) {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push(entry);
+        self.entries.lock().recover_poison().push(entry);
     }
 }
 
 impl Drop for CleanupRegistry {
     fn drop(&mut self) {
-        let entries = std::mem::take(
-            &mut *self
-                .entries
-                .get_mut()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
+        let entries = std::mem::take(&mut *self.entries.get_mut().recover_poison());
         if entries.is_empty() {
             return;
         }
@@ -387,11 +380,11 @@ fn foreground_ssh_argv(argv: &[String]) -> Option<OpenSshInvocation> {
 #[cfg(feature = "zosh-client")]
 fn foreground_mosh_argv(argv: &[String]) -> Option<OpenSshInvocation> {
     let arguments = mosh_launcher_arguments(argv)?;
-    let command = crate::mosh::parse_mosh_args(arguments.values()).ok()?;
+    let command = zosh::parse_launcher_args(arguments.values().iter().cloned()).ok()?;
     // `--local` never opens an SSH connection, and `--fake-proxy` is the
     // launcher re-entering itself as an SSH `ProxyCommand` rather than a
     // session anyone is typing into.
-    if command.local || command.proxy.is_some() {
+    if command.local || command.proxy {
         return None;
     }
     let target = command.target?;

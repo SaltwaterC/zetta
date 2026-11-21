@@ -1,3 +1,6 @@
+//! `zetta`'s help and version text, for the whole command and each subcommand,
+//! built from what this build has.
+
 use super::*;
 
 #[cfg(not(feature = "tftp-client"))]
@@ -67,47 +70,11 @@ pub(crate) fn version_text() -> String {
     version
 }
 
-pub(crate) fn format_help_table<'a>(rows: impl AsRef<[(&'a str, &'a str)]>) -> String {
-    let rows = rows
-        .as_ref()
-        .iter()
-        .map(|&(label, description)| (label.trim_end(), description))
-        .collect::<Vec<_>>();
-    let label_width = rows
-        .iter()
-        .map(|(label, _)| label.chars().count())
-        .max()
-        .unwrap_or(0);
-    rows.into_iter()
-        .map(|(label, description)| {
-            let mut lines = description.split('\n');
-            let first_line = lines.next().unwrap_or("").trim_end();
-            let mut formatted = String::new();
-            formatted.push_str("  ");
-            formatted.push_str(label);
-            formatted.push_str(&" ".repeat(label_width - label.chars().count()));
-            if !first_line.is_empty() {
-                formatted.push_str("  ");
-                formatted.push_str(first_line);
-            }
-            for line in lines {
-                formatted.push('\n');
-                let line = line.trim_end();
-                if !line.is_empty() {
-                    formatted.push_str("  ");
-                    formatted.push_str(&" ".repeat(label_width));
-                    formatted.push_str("  ");
-                    formatted.push_str(line);
-                }
-            }
-            formatted
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
+pub(crate) use zetta_cli_help::format_help_table;
 
-pub(crate) fn help_text(profiles: &[Profile]) -> String {
-    let features = [
+/// The features this build was compiled with, as `--help` lists them.
+fn built_in_features() -> Vec<&'static str> {
+    let features = vec![
         "Terminal emulator",
         #[cfg(feature = "syntax-highlighting")]
         "Vi syntax highlighting",
@@ -140,7 +107,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         #[cfg(feature = "zosh-client")]
         "Zosh client",
     ];
+    features
+}
 
+/// The `Usage:` lines, one per command form this build has.
+fn usage_lines() -> Vec<&'static str> {
     let mut usage = vec![
         "zetta [OPTIONS]",
         "zetta benchmark [OPTIONS]",
@@ -198,7 +169,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
     if cfg!(feature = "clipboard") {
         usage.extend(["zetta copy [OPTIONS]", "zetta paste [OPTIONS]"]);
     }
+    usage
+}
 
+/// The `Commands:` table, before formatting.
+fn command_rows() -> Vec<(&'static str, &'static str)> {
     let mut commands = vec![
         ("benchmark", "Profile terminal rendering"),
         (
@@ -264,8 +239,11 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
             ("paste", "Print the clipboard's contents"),
         ]);
     }
-    let commands = format_help_table(commands);
+    commands
+}
 
+/// The `Options:` table, before formatting.
+fn option_rows() -> Vec<(&'static str, &'static str)> {
     let option_rows = vec![
         ("-h, --help", "Print help"),
         ("-v, --version", "Print version and compatibility versions"),
@@ -313,7 +291,14 @@ pub(crate) fn help_text(profiles: &[Profile]) -> String {
         ));
         option_rows
     };
-    let options = format_help_table(option_rows);
+    option_rows
+}
+
+pub(crate) fn help_text(profiles: &[Profile]) -> String {
+    let features = built_in_features();
+    let usage = usage_lines();
+    let commands = format_help_table(command_rows());
+    let options = format_help_table(option_rows());
     let profiles = profiles
         .iter()
         .map(|profile| profile.name.as_str())
@@ -496,26 +481,22 @@ pub(crate) fn parse_tab_icon_args(args: &[OsString]) -> Result<StartupMode> {
                 std::process::exit(0);
             }
             "--list" | "-l" => {
-                anyhow::ensure!(!list, "--list may only be specified once");
-                list = true;
+                set_flag(&mut list, "--list")?;
             }
             "--reset" | "-r" => {
-                anyhow::ensure!(!reset, "--reset may only be specified once");
-                reset = true;
+                set_flag(&mut reset, "--reset")?;
             }
             "--queue" | "-q" => {
-                anyhow::ensure!(!queue, "--queue may only be specified once");
-                queue = true;
+                set_flag(&mut queue, "--queue")?;
             }
             "--icon" | "-i" => {
-                anyhow::ensure!(icon_name.is_none(), "--icon may only be specified once");
-                icon_name = Some(
-                    arguments
+                set_once(&mut icon_name, "--icon", || {
+                    Ok(arguments
                         .next()
                         .context("--icon requires an icon name")?
                         .to_string_lossy()
-                        .into_owned(),
-                );
+                        .into_owned())
+                })?;
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown tabicon option {value:?}")
@@ -657,22 +638,19 @@ pub(crate) fn parse_theme_args(scope: ThemeScope, args: &[OsString]) -> Result<S
                 std::process::exit(0);
             }
             "--reset" | "-r" => {
-                anyhow::ensure!(!reset, "--reset may only be specified once");
-                reset = true;
+                set_flag(&mut reset, "--reset")?;
             }
             "--list" | "-l" => {
-                anyhow::ensure!(!list, "--list may only be specified once");
-                list = true;
+                set_flag(&mut list, "--list")?;
             }
             "--theme" | "-t" => {
-                anyhow::ensure!(theme_name.is_none(), "--theme may only be specified once");
-                theme_name = Some(
-                    arguments
+                set_once(&mut theme_name, "--theme", || {
+                    Ok(arguments
                         .next()
                         .context("--theme requires a theme name")?
                         .to_string_lossy()
-                        .into_owned(),
-                );
+                        .into_owned())
+                })?;
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown theme option {value:?}")
@@ -755,58 +733,59 @@ pub(crate) fn parse_overlay_args(args: &[OsString]) -> Result<StartupMode> {
                 std::process::exit(0);
             }
             "--reset" | "-r" => {
-                anyhow::ensure!(!reset, "--reset may only be specified once");
-                reset = true;
+                set_flag(&mut reset, "--reset")?;
             }
             "--text" | "-t" => {
-                anyhow::ensure!(text.is_none(), "--text may only be specified once");
-                text = Some(
-                    arguments
+                set_once(&mut text, "--text", || {
+                    Ok(arguments
                         .next()
                         .context("--text requires overlay text")?
                         .to_string_lossy()
-                        .into_owned(),
-                );
+                        .into_owned())
+                })?;
             }
             "--size" | "-s" => {
-                anyhow::ensure!(font_size.is_none(), "--size may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--size requires a font size")?
-                    .to_string_lossy()
-                    .into_owned();
-                font_size = Some(OverlayFontSize::parse(&value).with_context(|| {
-                    format!(
-                        "unknown overlay size {value:?}; expected one of {}",
-                        OverlayFontSize::CLI_NAMES.join(", ")
-                    )
-                })?);
+                set_once(&mut font_size, "--size", || {
+                    let value = arguments
+                        .next()
+                        .context("--size requires a font size")?
+                        .to_string_lossy()
+                        .into_owned();
+                    OverlayFontSize::parse(&value).with_context(|| {
+                        format!(
+                            "unknown overlay size {value:?}; expected one of {}",
+                            OverlayFontSize::CLI_NAMES.join(", ")
+                        )
+                    })
+                })?;
             }
             "--opacity" | "-o" => {
-                anyhow::ensure!(opacity.is_none(), "--opacity may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--opacity requires a percentage from 0 to 100")?
-                    .to_string_lossy()
-                    .into_owned();
-                let percent = value
-                    .parse::<u8>()
-                    .with_context(|| format!("--opacity {value:?} must be a whole number"))?;
-                anyhow::ensure!(percent <= 100, "--opacity must be between 0 and 100");
-                opacity = Some(percent);
+                set_once(&mut opacity, "--opacity", || {
+                    let value = arguments
+                        .next()
+                        .context("--opacity requires a percentage from 0 to 100")?
+                        .to_string_lossy()
+                        .into_owned();
+                    let percent = value
+                        .parse::<u8>()
+                        .with_context(|| format!("--opacity {value:?} must be a whole number"))?;
+                    anyhow::ensure!(percent <= 100, "--opacity must be between 0 and 100");
+                    Ok(percent)
+                })?;
             }
             "--color" | "-c" => {
-                anyhow::ensure!(color.is_none(), "--color may only be specified once");
-                let value = arguments
-                    .next()
-                    .context("--color requires a color name or hex color")?
-                    .to_string_lossy()
-                    .into_owned();
-                anyhow::ensure!(
-                    overlay_color_from_value(&value).is_some(),
-                    "invalid overlay color {value:?}"
-                );
-                color = Some(value);
+                set_once(&mut color, "--color", || {
+                    let value = arguments
+                        .next()
+                        .context("--color requires a color name or hex color")?
+                        .to_string_lossy()
+                        .into_owned();
+                    anyhow::ensure!(
+                        overlay_color_from_value(&value).is_some(),
+                        "invalid overlay color {value:?}"
+                    );
+                    Ok(value)
+                })?;
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown overlay option {value:?}")

@@ -133,8 +133,7 @@ impl Zetta {
 
     fn pane_exposure(&self, tab_id: u64, pane_id: u64, window: &Window, cx: &App) -> PaneExposure {
         let Some(tab) = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .filter(|tab| window.is_window_active() && tab.id == tab_id)
             .filter(|tab| tab.pane_is_visible(pane_id))
         else {

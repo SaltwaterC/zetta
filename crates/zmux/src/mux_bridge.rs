@@ -46,6 +46,7 @@ use std::{
     },
     thread,
 };
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::{Context as _, Result};
 
@@ -203,10 +204,7 @@ impl Channel {
     }
 
     fn grant(&self, bytes: u32) {
-        let mut credit = self
-            .credit
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut credit = self.credit.lock().recover_poison();
         credit.available = credit.available.saturating_add(bytes);
         self.credit_changed.notify_all();
     }
@@ -214,10 +212,7 @@ impl Channel {
     /// Waits for credit and takes up to `wanted` of it, or `None` once the
     /// stream is gone.
     fn take_credit(&self, wanted: usize) -> Option<usize> {
-        let mut credit = self
-            .credit
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut credit = self.credit.lock().recover_poison();
         loop {
             if credit.closed {
                 return None;
@@ -227,18 +222,12 @@ impl Channel {
                 credit.available -= taken as u32;
                 return Some(taken);
             }
-            credit = self
-                .credit_changed
-                .wait(credit)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            credit = self.credit_changed.wait(credit).recover_poison();
         }
     }
 
     fn deliver(&self, inbound: Inbound) {
-        let sender = self
-            .inbound
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let sender = self.inbound.lock().recover_poison();
         if let Some(sender) = sender.as_ref() {
             let _ = sender.send(inbound);
         }
@@ -247,17 +236,11 @@ impl Channel {
     /// Ends the stream in both directions without waiting for either pump.
     fn reset(&self) {
         {
-            let mut credit = self
-                .credit
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut credit = self.credit.lock().recover_poison();
             credit.closed = true;
             self.credit_changed.notify_all();
         }
-        self.inbound
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
+        self.inbound.lock().recover_poison().take();
         let _ = self.local.shutdown(Shutdown::Both);
     }
 }
@@ -283,10 +266,7 @@ impl Link {
             return Err(io::ErrorKind::BrokenPipe.into());
         }
         let bytes = encode_frame(stream, kind, payload);
-        let mut writer = self
-            .writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut writer = self.writer.lock().recover_poison();
         let result = writer.write_all(&bytes).and_then(|()| writer.flush());
         if result.is_err() {
             self.closed.store(true, Ordering::Release);
@@ -295,18 +275,11 @@ impl Link {
     }
 
     fn channel(&self, stream: u32) -> Option<Arc<Channel>> {
-        self.streams
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&stream)
-            .cloned()
+        self.streams.lock().recover_poison().get(&stream).cloned()
     }
 
     fn remove(&self, stream: u32) -> Option<Arc<Channel>> {
-        self.streams
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&stream)
+        self.streams.lock().recover_poison().remove(&stream)
     }
 
     /// Registers a stream and starts both of its pumps.
@@ -317,7 +290,7 @@ impl Link {
         let channel = Arc::new(Channel::new(local, sender));
         self.streams
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .recover_poison()
             .insert(stream, channel.clone());
         let link = self.clone();
         let outbound_channel = channel.clone();
@@ -339,10 +312,7 @@ impl Link {
 
     fn pump_finished(&self, stream: u32, channel: &Arc<Channel>) {
         if channel.pumps.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let mut streams = self
-                .streams
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut streams = self.streams.lock().recover_poison();
             if streams
                 .get(&stream)
                 .is_some_and(|current| Arc::ptr_eq(current, channel))
@@ -355,12 +325,7 @@ impl Link {
     /// The link has ended: every stream on it has too.
     fn shut_down(&self) {
         self.closed.store(true, Ordering::Release);
-        let streams = std::mem::take(
-            &mut *self
-                .streams
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        );
+        let streams = std::mem::take(&mut *self.streams.lock().recover_poison());
         for channel in streams.into_values() {
             channel.reset();
         }
@@ -379,11 +344,7 @@ impl Link {
             Kind::Eof => {
                 if let Some(channel) = self.channel(frame.stream) {
                     channel.deliver(Inbound::Eof);
-                    channel
-                        .inbound
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .take();
+                    channel.inbound.lock().recover_poison().take();
                 }
             }
             Kind::Close => {
@@ -489,10 +450,7 @@ pub(crate) fn serve(
 ) -> Result<()> {
     let link = Link::new(Box::new(writer));
     {
-        let mut writer = link
-            .writer
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut writer = link.writer.lock().recover_poison();
         // The first info reply goes out unasked: every near side wants it
         // straight away, and asking would cost a round trip.
         let mut greeting = HELLO.to_vec();
@@ -615,10 +573,7 @@ impl MuxBridge {
 
     /// Asks the far side again. One round trip, no new login.
     pub(crate) fn query_info(&self, timeout: Duration) -> Result<BridgeInfo> {
-        let replies = self
-            .info
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let replies = self.info.lock().recover_poison();
         self.link
             .send(LINK_STREAM, Kind::Info, &[])
             .context("asking the remote zmux bridge for its endpoint")?;
@@ -632,10 +587,7 @@ impl MuxBridge {
     pub(crate) fn open(&self) -> Result<Stream> {
         anyhow::ensure!(self.is_alive(), "the remote zmux bridge has closed");
         let stream = {
-            let mut next = self
-                .next_stream
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut next = self.next_stream.lock().recover_poison();
             let stream = *next;
             *next = next
                 .checked_add(1)
@@ -753,10 +705,7 @@ impl LocalPairs {
     /// Connects and accepts under one lock, so two streams opened at once
     /// cannot each accept the other's connection.
     fn pair(&self) -> io::Result<(Stream, Stream)> {
-        let listener = self
-            .listener
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let listener = self.listener.lock().recover_poison();
         let client = Stream::connect(&self.socket)?;
         let (relay, _) = listener.accept()?;
         Ok((client, relay))

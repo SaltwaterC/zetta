@@ -228,10 +228,7 @@ pub(super) fn adopted_grants(
 /// Installs the grants an upgrade carried, and tells the store what every
 /// adopted session is sealed to.
 pub(super) fn adopt_seals(daemon: &Daemon, grants: Option<RecipientGrants>) {
-    let mut sessions = daemon
-        .sessions
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut sessions = daemon.sessions.lock().recover_poison();
     #[cfg(feature = "session-persistence")]
     let mut persistence = daemon.persistence.lock();
     #[cfg(feature = "session-persistence")]
@@ -249,10 +246,7 @@ pub(super) fn adopt_seals(daemon: &Daemon, grants: Option<RecipientGrants>) {
 }
 
 pub(super) fn lock_grants(daemon: &Daemon) -> std::sync::MutexGuard<'_, RecipientGrants> {
-    daemon
-        .recipient_grants
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    daemon.recipient_grants.lock().recover_poison()
 }
 
 // Each test configures grants, which only a persisting build can.

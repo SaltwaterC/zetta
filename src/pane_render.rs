@@ -1,3 +1,6 @@
+//! Drawing the pane layout: each pane with its badges and overlay, the rows of
+//! a stacked pane, and the gutters between panes that resize them.
+
 use super::*;
 
 const PANE_RESIZE_GUTTER_SIZE: Pixels = px(20.);

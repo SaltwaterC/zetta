@@ -706,6 +706,8 @@ dependencies = [
  "alacritty_terminal",
  "unicode-width 0.2.2",
  "windows-sys 0.59.0",
+ "zetta_cli_help",
+ "zetta_sync",
 ]
 
 [[package]]
@@ -5463,6 +5465,7 @@ dependencies = [
  "memchr",
  "tempfile",
  "windows 0.61.3",
+ "zetta_cli_help",
 ]
 
 [[package]]
@@ -5571,6 +5574,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zetta_cli_help"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "zetta_profiles"
 version = "0.1.0"
 dependencies = [
@@ -5579,6 +5589,10 @@ dependencies = [
  "serde_json",
  "windows 0.61.3",
 ]
+
+[[package]]
+name = "zetta_sync"
+version = "0.1.0"
 
 [[package]]
 name = "zlib-rs"

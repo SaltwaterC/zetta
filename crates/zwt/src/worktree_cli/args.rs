@@ -4,6 +4,7 @@
 //! [`WorktreeInvocation`] it was reached by and reports errors in that name.
 
 use super::*;
+use zetta_cli_help::set_flag;
 
 pub fn parse_worktree_args(arguments: &[OsString]) -> Result<WorktreeCommand> {
     parse_worktree_args_for(arguments, WorktreeInvocation::Standalone)
@@ -69,8 +70,7 @@ pub(super) fn parse_new_args(
                 std::process::exit(0);
             }
             PATH_ONLY_OPTION | "-P" => {
-                anyhow::ensure!(!path_only, "{PATH_ONLY_OPTION} may only be specified once");
-                path_only = true;
+                set_flag(&mut path_only, PATH_ONLY_OPTION)?;
             }
             "--copy" | "-c" => {
                 let path = arguments
@@ -172,8 +172,7 @@ pub(super) fn parse_path_only_args(
                 std::process::exit(0);
             }
             PATH_ONLY_OPTION | "-P" => {
-                anyhow::ensure!(!path_only, "{PATH_ONLY_OPTION} may only be specified once");
-                path_only = true;
+                set_flag(&mut path_only, PATH_ONLY_OPTION)?;
             }
             value => anyhow::bail!(
                 "unknown {} {operation} argument {value:?}",

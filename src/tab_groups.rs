@@ -395,7 +395,7 @@ impl Zetta {
         if !self.tab_groups_enabled() {
             return None;
         }
-        self.tabs.get(self.active_tab).map(|tab| &tab.group)
+        self.current_tab().map(|tab| &tab.group)
     }
 
     /// The group the user is in, for the sidebar's selection. Main while
@@ -477,7 +477,7 @@ impl Zetta {
         if !self.tab_groups.arriving.contains(&tab_id) {
             return;
         }
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+        let Some(tab) = self.tabs.by_id_mut(tab_id) else {
             return;
         };
         let Some(group) = group_for_arriving_tab(tab, &self.projects) else {
@@ -499,7 +499,7 @@ impl Zetta {
         let fallback = self
             .tab_groups
             .remembered(&TabGroup::Main)
-            .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id));
+            .and_then(|tab_id| self.tab_index(tab_id));
         self.active_tab = active_index_after_removal(
             &self.tabs,
             removed_index,
@@ -524,7 +524,7 @@ impl Zetta {
         let remembered = self
             .tab_groups
             .remembered(&group)
-            .and_then(|tab_id| self.tabs.iter().position(|tab| tab.id == tab_id));
+            .and_then(|tab_id| self.tab_index(tab_id));
         let entry = group_entry(&self.tabs, self.active_tab, remembered, &group, |tab| {
             &tab.group
         });
@@ -532,7 +532,7 @@ impl Zetta {
             self.focus_active(window, cx);
             return;
         }
-        if let Some(tab) = self.tabs.get(self.active_tab) {
+        if let Some(tab) = self.current_tab() {
             self.tab_groups.remember(tab.group.clone(), tab.id);
         }
         if self.tab_search.is_some() {
@@ -563,7 +563,7 @@ impl Zetta {
         if !self.tab_groups_enabled() {
             return;
         }
-        if let Some(tab) = self.tabs.get(self.active_tab) {
+        if let Some(tab) = self.current_tab() {
             self.tab_groups.remember(tab.group.clone(), tab.id);
         }
         self.open_first_tab_in_group(group, window, cx);

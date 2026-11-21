@@ -1,3 +1,6 @@
+//! Command history: one list per executable, how the line editor moves through
+//! it, and what is kept once its client exits.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

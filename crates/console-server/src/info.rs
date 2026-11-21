@@ -1,3 +1,7 @@
+//! The informational APIs a ConPTY console answers from fixed or stored values:
+//! fonts, mouse and display mode, selection, history settings, language, and
+//! the process list.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

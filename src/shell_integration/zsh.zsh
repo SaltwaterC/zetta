@@ -264,12 +264,14 @@ fi
 
 function zvi { zetta vi "$@"; }
 
+# ZETTA_ZOSH_INTEGRATION_BEGIN
 if (( ! $+commands[mosh] && ! $+aliases[mosh] && ! $+functions[mosh] && ! $+builtins[mosh] )); then
     function mosh { zetta mosh "$@"; }
     _zetta_mosh_missing=1
 else
     _zetta_mosh_missing=${_zetta_mosh_missing:-0}
 fi
+# ZETTA_ZOSH_INTEGRATION_END
 
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 function zwt {
@@ -390,22 +392,11 @@ function __zetta_lazy_complete {
 function __zetta_register_lazy_completions {
     (( $+functions[compdef] )) || return 1
     if (( ${__zetta_completions_loaded:-0} == 0 )); then
-        compdef __zetta_lazy_complete zetta zosh zvi ztftp zhttp zntfy
-# ZETTA_PAGER_INTEGRATION_BEGIN
-        compdef __zetta_lazy_complete zpager
-# ZETTA_PAGER_INTEGRATION_END
+        # ZETTA_LAZY_COMPLETIONS
         (( _zetta_vi_missing )) && compdef __zetta_lazy_complete vi
+# ZETTA_ZOSH_INTEGRATION_BEGIN
         (( _zetta_mosh_missing )) && compdef __zetta_lazy_complete mosh
-# ZETTA_WORKTREE_INTEGRATION_BEGIN
-        compdef __zetta_lazy_complete zwt
-# ZETTA_WORKTREE_INTEGRATION_END
-# ZETTA_ZMUX_INTEGRATION_BEGIN
-        compdef __zetta_lazy_complete zmux
-# ZETTA_ZMUX_INTEGRATION_END
-# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
-        compdef __zetta_lazy_complete zcopy zpaste
-        case "$OSTYPE" in darwin*) ;; *) compdef __zetta_lazy_complete pbcopy pbpaste ;; esac
-# ZETTA_CLIPBOARD_INTEGRATION_END
+# ZETTA_ZOSH_INTEGRATION_END
     fi
     return 0
 }

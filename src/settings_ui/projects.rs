@@ -1,3 +1,6 @@
+//! The projects page: the registered projects, editing one's configuration, and
+//! adding or opening a project from the dialog.
+
 use super::*;
 use crate::project::{
     ProjectConfig, ProjectRegistry, canonical_project_root, ensure_project_config, paths_equal,
@@ -316,8 +319,7 @@ impl Zetta {
     /// cannot open, so it counts as having reported nothing.
     fn project_prompt_directory(&self, cx: &App) -> Option<PathBuf> {
         prompt_start_directory(
-            self.tabs
-                .get(self.active_tab)
+            self.current_tab()
                 .and_then(Tab::active_pane)
                 .filter(|pane| !is_wsl_shell(&pane.profile.command))
                 .and_then(|pane| pane.working_directory(cx)),

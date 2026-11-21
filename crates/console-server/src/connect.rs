@@ -1,3 +1,6 @@
+//! The connect message a client sends as it attaches: its process group, its
+//! title, and the executable name aliases and history are kept by.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

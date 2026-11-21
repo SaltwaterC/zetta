@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use crate::format_help_table;
 use anyhow::{Context as _, Result};
+use zetta_cli_help::set_flag;
 
 pub fn http_server_help() -> String {
     format!(
@@ -43,18 +44,10 @@ pub fn parse_http_server_flags(
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--serve-dotfiles" | "-d" => {
-                anyhow::ensure!(
-                    !options.serve_dotfiles,
-                    "--serve-dotfiles may only be specified once"
-                );
-                options.serve_dotfiles = true;
+                set_flag(&mut options.serve_dotfiles, "--serve-dotfiles")?;
             }
             "--allow-any-host" | "-A" => {
-                anyhow::ensure!(
-                    !options.allow_any_host,
-                    "--allow-any-host may only be specified once"
-                );
-                options.allow_any_host = true;
+                set_flag(&mut options.allow_any_host, "--allow-any-host")?;
             }
             "--allow-host" | "-a" => {
                 let name = arguments
@@ -103,12 +96,11 @@ pub fn parse_http_args(args: impl IntoIterator<Item = OsString>) -> Result<Serve
     while let Some(argument) = args.next() {
         match argument.to_string_lossy().as_ref() {
             "--root" | "-r" => {
-                anyhow::ensure!(!root_set, "--root may only be specified once");
+                set_flag(&mut root_set, "--root")?;
                 command.root = args.next().context("--root requires a directory")?.into();
-                root_set = true;
             }
             "--port" | "-p" => {
-                anyhow::ensure!(!port_set, "--port may only be specified once");
+                set_flag(&mut port_set, "--port")?;
                 command.port = args
                     .next()
                     .context("--port requires a port number")?
@@ -116,7 +108,6 @@ pub fn parse_http_args(args: impl IntoIterator<Item = OsString>) -> Result<Serve
                     .parse()
                     .context("--port must be a number from 1 to 65535")?;
                 anyhow::ensure!(command.port != 0, "--port must be a number from 1 to 65535");
-                port_set = true;
             }
             "--help" | "-h" => anyhow::bail!("{}", http_server_help()),
             value => anyhow::bail!("unknown HTTP server argument {value:?}"),

@@ -26,6 +26,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use zetta_sync::RecoverPoison as _;
 
 use alacritty_terminal::{
     event::{OnResize as _, WindowSize},
@@ -663,7 +664,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             columns,
             lines,
         } => {
-            let mut consoles = host.consoles.lock().unwrap();
+            let mut consoles = host.consoles.lock().recover_poison();
             if let Some(console) = consoles.iter_mut().find(|console| console.id == console_id) {
                 console.pty.resize(columns, lines);
             }
@@ -673,7 +674,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             console_id,
             palette,
         } => {
-            let mut consoles = host.consoles.lock().unwrap();
+            let mut consoles = host.consoles.lock().recover_poison();
             if let Some(console) = consoles.iter_mut().find(|console| console.id == console_id)
                 && console.palette != palette
             {
@@ -687,7 +688,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             // process running on it.
             host.consoles
                 .lock()
-                .unwrap()
+                .recover_poison()
                 .retain(|console| console.id != console_id);
             HostResponse::Ok
         }
@@ -695,7 +696,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             let consoles = host
                 .consoles
                 .lock()
-                .unwrap()
+                .recover_poison()
                 .iter()
                 .map(|console| ConsoleSummary {
                     console_id: console.id,
@@ -706,7 +707,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             HostResponse::Consoles { consoles }
         }
         HostRequest::Reap => {
-            let mut consoles = host.consoles.lock().unwrap();
+            let mut consoles = host.consoles.lock().recover_poison();
             let exits = consoles
                 .iter_mut()
                 .filter_map(|console| console.pending_exit.take())
@@ -714,7 +715,7 @@ fn handle(host: &Arc<Host>, envelope: HostEnvelope) -> HostResponse {
             HostResponse::Exits { exits }
         }
         HostRequest::Shutdown => {
-            if host.consoles.lock().unwrap().is_empty() {
+            if host.consoles.lock().recover_poison().is_empty() {
                 // The serving connection sends the acknowledgement before
                 // terminating the helper, so the daemon can complete a
                 // normal stop without treating the helper's exit as an I/O
@@ -798,7 +799,7 @@ fn open_console(host: &Arc<Host>, request: OpenConsoleRequest) -> Result<HostRes
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let child_pid = pty.child_pid();
     let handles = duplicate_console(&pty, target_process_id)?;
-    host.consoles.lock().unwrap().push(Console {
+    host.consoles.lock().recover_poison().push(Console {
         id: console_id,
         pty,
         exited: false,
@@ -833,7 +834,7 @@ fn console_handles(
     console_id: u64,
     target_process_id: u32,
 ) -> Result<HostResponse> {
-    let consoles = host.consoles.lock().unwrap();
+    let consoles = host.consoles.lock().recover_poison();
     let console = consoles
         .iter()
         .find(|console| console.id == console_id)
@@ -864,7 +865,7 @@ fn start_watcher(host: Arc<Host>) {
     thread::spawn(move || {
         loop {
             {
-                let mut consoles = host.consoles.lock().unwrap();
+                let mut consoles = host.consoles.lock().recover_poison();
                 for console in consoles.iter_mut() {
                     if console.exited {
                         continue;

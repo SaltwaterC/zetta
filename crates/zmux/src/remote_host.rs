@@ -17,6 +17,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -58,7 +59,7 @@ fn host_key(target: &RemoteTarget) -> HostKey {
 pub(crate) fn learned(target: &RemoteTarget) -> Option<HostPlatform> {
     learned_platforms()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .get(&host_key(target))
         .copied()
 }
@@ -66,7 +67,7 @@ pub(crate) fn learned(target: &RemoteTarget) -> Option<HostPlatform> {
 pub(crate) fn learn(target: &RemoteTarget, platform: HostPlatform) {
     learned_platforms()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .insert(host_key(target), platform);
 }
 

@@ -1,3 +1,6 @@
+//! Console modes and code pages: `GetConsoleMode` and `SetConsoleMode`, the
+//! input the terminal is asked to send as a result, and the code-page calls.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

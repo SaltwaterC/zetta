@@ -1,3 +1,6 @@
+//! Dispatching a console API message: the size each API's message must have,
+//! the kind of object it acts on, and the routine that answers it.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

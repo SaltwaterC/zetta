@@ -1,3 +1,7 @@
+//! The settings dialog's controls: building the list each page offers, moving
+//! keyboard focus through it, and the two-press confirmation of destructive
+//! ones.
+
 use super::keymap::{KeymapRow, keymap_filtered_indices, keymap_rows};
 use super::pane_templates;
 use super::projects;

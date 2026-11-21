@@ -19,6 +19,7 @@ use std::{
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
+use zetta_sync::RecoverPoison as _;
 
 use log::{LevelFilter, Log, Metadata, Record};
 
@@ -123,10 +124,7 @@ impl Log for FileLogger {
         let line = format_line(SystemTime::now(), std::process::id(), record);
         // A lock poisoned by a panic mid-write loses at most that line; the
         // file itself is still fine to append to.
-        let mut log = self
-            .file
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut log = self.file.lock().recover_poison();
         if log.written.saturating_add(line.len() as u64) > MAX_LOG_BYTES {
             self.rotate(&mut log);
         }
@@ -136,12 +134,7 @@ impl Log for FileLogger {
     }
 
     fn flush(&self) {
-        let _ = self
-            .file
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .file
-            .flush();
+        let _ = self.file.lock().recover_poison().file.flush();
     }
 }
 

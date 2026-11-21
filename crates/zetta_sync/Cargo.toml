@@ -1,0 +1,11 @@
+[package]
+name = "zetta_sync"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Poison-tolerant locking shared by Zetta's crates"
+
+[lib]
+path = "src/lib.rs"
+doctest = false

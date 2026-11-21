@@ -41,9 +41,12 @@ eight are not, because each is expensive or impossible to undo:
    `cfg` aliases `build.rs` emits over respelling a predicate.
 5. **Suppress lints with `#[expect(..)]`, not `#[allow(..)]`**, except where a
    lint fires only on some platform or feature arm.
-6. **Take a `Mutex` with `unwrap_or_else(|poisoned| poisoned.into_inner())`**
-   unless the mutex guards an invariant a panic can break — then `unwrap` and
-   say so at the lock.
+6. **Take a lock with `.recover_poison()`** (`zetta_sync::RecoverPoison`)
+   unless it guards an invariant a panic can break — then `unwrap` and say so
+   at the lock. That covers `lock`, `read`, `write`, `get_mut`, `into_inner`
+   and condvar waits. Upstream forks under `crates/` keep the spelled-out
+   `unwrap_or_else(|poisoned| poisoned.into_inner())` rather than take the
+   dependency.
 7. **Preserve unrelated working-tree changes.** Do not rewrite or clean files
    outside the requested scope.
 8. **Do not run `make install`, uninstall targets, or system-cache refresh
@@ -64,6 +67,10 @@ eight are not, because each is expensive or impossible to undo:
   `zed/` and `gpui` dependencies so the daemon can link it; icons, themes and
   everything else that needs a window stay in `src/config.rs`, which layers them
   back on.
+- `crates/zetta_sync` holds `RecoverPoison`, the one spelling of rule 6. It is
+  its own crate, with no dependencies, so the application, `zmux`, `zosh` and
+  every other Zetta-authored crate can share it; import it as
+  `use zetta_sync::RecoverPoison as _;`.
 - A change to a `zed/` crate is made by forking it under `crates/`, never by
   editing the submodule. Cargo resolves a dependency edge from the manifest that
   declares it, so forking a crate that other `zed/` crates depend on means
@@ -86,15 +93,17 @@ growing `main.rs`. If a module becomes difficult to navigate, split it by
 responsibility rather than creating a generic helpers module. Keep rendering
 code separate from state transitions where practical.
 
-New modules carry a `//!` doc saying what they own and, where it is not obvious,
-why they exist separately. That doc is what the next reader routes from.
+Every module carries a `//!` doc saying what it owns and, where it is not
+obvious, why it exists separately; give a new one the same. That doc is what the
+next reader routes from.
 
 **Size.** Split a module by responsibility once it approaches roughly 1500
-lines. Keep functions under 200 lines — most are far below it. Both are rules
-for new and edited code, not descriptions of the tree: nine files and six
-production functions currently exceed them (largest: `terminal_spawn.rs` at 2976
-lines and its `spawn_shared_terminal_now` at 336). Those are backlog, not
-precedent — do not cite them to justify a new one.
+lines. Keep functions under 200 lines — most are far below it. Every
+Zetta-authored file and production function is currently within both; the
+upstream forks under `crates/` (those with an `UPSTREAM.md`) are not held to
+them, because splitting one would only add merge friction against its upstream.
+Several functions sit just under 200, so an edit that pushes one over is the
+moment to split it, not a reason to raise the limit.
 
 Never let a single `render` function or top-level function own an entire screen
 or CLI surface. Splitting a long function is only worth doing when the pieces
@@ -256,7 +265,9 @@ Run `cargo clippy --all-targets` for broader Rust changes when practical.
 ```sh
 (cd crates/alacritty_terminal && cargo test)
 (cd crates/terminal && cargo test)
+(cd crates/zetta_cli_help && cargo test)
 (cd crates/zetta_profiles && cargo test)
+(cd crates/zetta_sync && cargo test)
 (cd crates/zmux && cargo build --bin zmux && cargo test)
 (cd crates/wslx && cargo test)
 ```
@@ -467,7 +478,8 @@ as separate artifacts associated with the JSON report.
   behavior, installation steps, or defaults change.
 - Prefer the `cfg` aliases `build.rs` emits over respelling a repeated
   platform/feature predicate: `linux_like` for
-  `any(target_os = "linux", target_os = "freebsd")`, `servers_enabled` for
+  `any(target_os = "linux", target_os = "freebsd")`, `drawn_window_controls`
+  for `any(target_os = "windows", linux_like)`, `servers_enabled` for
   `any(feature = "http-server", feature = "tftp-server")`, `tftp_enabled` for
   `any(feature = "tftp-server", feature = "tftp-client")`, `byte_stream_panes`
   for `any(feature = "serial-console", feature = "http-server", feature =
@@ -486,6 +498,17 @@ as separate artifacts associated with the JSON report.
 Always create both long and short command line arguments. Expose only the long
 versions in autocomplete to declutter the completion interface and aid with
 readability. Update shell completions and parser tests when adding a flag.
+Every command Zetta completes is described once, in
+`src/shell_integration/command_tree/trees.rs`, so that means adding the option
+to its tree — every spelling the parser accepts, what its value completes to,
+whether the parser also takes that value attached as `--option=VALUE`
+(`attached`), and whether the option prints and exits (`exits`, as `--help`
+does) — rather than to four shell scripts; the per-shell tests in
+`src/tests/shell_integration/command_tree.rs` drive the real shells through it.
+The completion templates keep only the helpers a value needs a shell for, such
+as reading `~/.ssh/config`, and the startup scripts' lazy loaders register for
+exactly the commands `REGISTRATIONS` lists, so a new command needs no edit
+there either.
 
 For the short arguments prefer the lowercase version. If there is a conflict,
 prioritise lowercase for the more commonly used arguments such as mandatory
@@ -501,16 +524,14 @@ dynamically enumerate these values via CLI and offer these via auto complete.
 
 ### CLI help formatting
 
-CLI help tables must use the shared `format_help_table` helper from
-`startup/cli_help.rs`. The standalone `zmux` and `zwt` CLIs each use their own
-crate-local copy of it, in `crates/zmux/src/lib.rs` and `crates/zwt/src/lib.rs`:
-the crates under `crates/` are separate Cargo workspaces, so sharing one
-implementation would mean publishing a crate to hold twelve lines of string
-padding. The three copies are deliberate and must stay identical in behaviour —
-each carries the same test. Store option or command labels and descriptions
-separately instead of embedding manual padding. The formatter computes the
-longest label per table, uses a two-space separator, aligns multiline
-continuation text, and emits no trailing whitespace.
+CLI help tables must use `format_help_table` from `crates/zetta_cli_help`.
+Every CLI depends on that crate by path — the application, and each standalone
+tool under `crates/` — so there is exactly one implementation and one test of
+it. Do not copy it into a crate again: a separate Cargo workspace can still take
+a path dependency without anything being published. Store option or command
+labels and descriptions separately instead of embedding manual padding. The
+formatter computes the longest label per table, uses a two-space separator,
+aligns multiline continuation text, and emits no trailing whitespace.
 
 This convention applies to `Commands`, `Operations`, `Options`, and equivalent
 sections across maintained Rust CLI help. Do not manually count spaces or use
@@ -518,3 +539,11 @@ chained string replacements to insert help rows. Help-content tests should
 verify semantic content and alignment without depending on fragile,
 hand-counted padding. Shell-completion descriptions and upstream `zed/` and
 `busy-v/` code are outside this convention.
+
+### Repeated options
+
+`crates/zetta_cli_help` also holds the check every parser refuses a repeated
+option with, for the same reason: `set_flag` for a switch, and `set_once` for an
+option with a value, which reads the value only once a repeat is ruled out, so
+`--size 1 --size` reports the repeat rather than the missing value. Use those
+rather than another hand-written `may only be specified once`.

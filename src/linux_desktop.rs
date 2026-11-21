@@ -1,3 +1,7 @@
+//! The user's desktop entry on Linux: keeping its per-profile launcher actions
+//! in step with the configured profiles, inside a block Zetta manages, and only
+//! in an entry that launches this executable.
+
 use std::{
     collections::HashSet,
     env,

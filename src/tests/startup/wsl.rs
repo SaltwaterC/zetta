@@ -472,7 +472,7 @@ fn wsl_environment_converts_the_cwd_marker_without_wslpath() {
         environment.get("WSLENV").map(String::as_str),
         Some("USER/u:ZETTA_HOST_EXECUTABLE/up:ZETTA_CWD_TRACKING_FILE/up")
     );
-    assert!(!WSL_CWD_TRACKER.contains("wslpath"));
+    assert!(!wsl_cwd_tracker().contains("wslpath"));
 }
 
 #[test]
@@ -651,39 +651,39 @@ fn wsl_tracker_wraps_the_default_login_shell() {
         shell,
         Shell::WithArguments { args, .. }
             if args[..4] == ["--distribution", "Ubuntu", "--cd", "/work"]
-                && args[4..8] == ["--exec", "/bin/sh", "-c", WSL_CWD_TRACKER]
+                && args[4..8] == ["--exec", "/bin/sh", "-c", wsl_cwd_tracker()]
                 && args.last().map(String::as_str) == Some("zetta-wsl-cwd")
     ));
 }
 
 #[test]
 fn wsl_wrapper_prefers_prompt_cwd_reports_and_keeps_a_shell_fallback() {
-    assert!(WSL_CWD_TRACKER.contains("PROMPT_COMMAND="));
-    assert!(WSL_CWD_TRACKER.contains("--on-event fish_prompt"));
-    assert!(WSL_CWD_TRACKER.contains("add-zsh-hook precmd __zetta_report_cwd"));
-    assert!(WSL_CWD_TRACKER.contains("\"$ZETTA_HOST_EXECUTABLE\" init bash"));
-    assert!(WSL_CWD_TRACKER.contains("$ZETTA_HOST_EXECUTABLE init fish | source"));
-    assert!(WSL_CWD_TRACKER.contains("\"$ZETTA_HOST_EXECUTABLE\" init zsh"));
-    assert!(WSL_CWD_TRACKER.contains("add-zsh-hook precmd __zetta_load_shell_integration"));
-    assert!(WSL_CWD_TRACKER.contains("add-zsh-hook -d precmd __zetta_load_shell_integration"));
-    assert!(WSL_CWD_TRACKER.contains("ZETTA_HOST_EXECUTABLE"));
-    assert!(WSL_CWD_TRACKER.contains("source \"$ZDOTDIR/.zshenv\""));
-    assert!(WSL_CWD_TRACKER.contains("rm -rf -- \"$ZETTA_INTEGRATION_ZDOTDIR\""));
-    assert!(!WSL_CWD_TRACKER.contains("source \"$ZDOTDIR/.zshrc\""));
-    assert!(WSL_CWD_TRACKER.contains("]7;file://localhost"));
-    assert!(WSL_CWD_TRACKER.contains("]2;zetta-cwd:"));
-    assert!(WSL_CWD_TRACKER.contains("readlink \"/proc/$parent/cwd\""));
+    assert!(wsl_cwd_tracker().contains("PROMPT_COMMAND="));
+    assert!(wsl_cwd_tracker().contains("--on-event fish_prompt"));
+    assert!(wsl_cwd_tracker().contains("add-zsh-hook precmd __zetta_report_cwd"));
+    assert!(wsl_cwd_tracker().contains("\"$ZETTA_HOST_EXECUTABLE\" init bash </dev/null"));
+    assert!(wsl_cwd_tracker().contains("$ZETTA_HOST_EXECUTABLE init fish </dev/null | source"));
+    assert!(wsl_cwd_tracker().contains("\"$ZETTA_HOST_EXECUTABLE\" init zsh </dev/null"));
+    assert!(wsl_cwd_tracker().contains("add-zsh-hook precmd __zetta_load_shell_integration"));
+    assert!(wsl_cwd_tracker().contains("add-zsh-hook -d precmd __zetta_load_shell_integration"));
+    assert!(wsl_cwd_tracker().contains("ZETTA_HOST_EXECUTABLE"));
+    assert!(wsl_cwd_tracker().contains("source \"$ZDOTDIR/.zshenv\""));
+    assert!(wsl_cwd_tracker().contains("rm -rf -- \"$ZETTA_INTEGRATION_ZDOTDIR\""));
+    assert!(!wsl_cwd_tracker().contains("source \"$ZDOTDIR/.zshrc\""));
+    assert!(wsl_cwd_tracker().contains("]7;file://localhost"));
+    assert!(wsl_cwd_tracker().contains("]2;zetta-cwd:"));
+    assert!(wsl_cwd_tracker().contains("readlink \"/proc/$parent/cwd\""));
 
     // Windows-side process inspection can't see into the WSL VM's own process
     // namespace, so the running command is reported explicitly by each shell's
     // preexec-equivalent hook via the `zetta-cmd;<nonce>:` title marker.
-    assert!(WSL_CWD_TRACKER.contains("trap '__zetta_preexec' DEBUG"));
-    assert!(WSL_CWD_TRACKER.contains("--on-event fish_preexec"));
-    assert!(WSL_CWD_TRACKER.contains("add-zsh-hook preexec __zetta_report_preexec"));
-    assert!(WSL_CWD_TRACKER.contains("]2;zetta-cmd;%s:%s"));
+    assert!(wsl_cwd_tracker().contains("trap '__zetta_preexec' DEBUG"));
+    assert!(wsl_cwd_tracker().contains("--on-event fish_preexec"));
+    assert!(wsl_cwd_tracker().contains("add-zsh-hook preexec __zetta_report_preexec"));
+    assert!(wsl_cwd_tracker().contains("]2;zetta-cmd;%s:%s"));
     // Without the nonce the marker cannot drive image paste, so no shell may
     // still report the unauthenticated form.
-    assert!(!WSL_CWD_TRACKER.contains("]2;zetta-cmd:"));
+    assert!(!wsl_cwd_tracker().contains("]2;zetta-cmd:"));
 }
 
 /// The WSL tracker hands the command-marker nonce to the shell it starts and
@@ -700,7 +700,7 @@ fn the_wsl_tracker_marks_commands_with_a_nonce_its_children_do_not_inherit() {
     }
     let home = tempfile::tempdir().unwrap();
     let mut child = std::process::Command::new("/bin/sh")
-        .args(["-c", WSL_CWD_TRACKER])
+        .args(["-c", wsl_cwd_tracker()])
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())
         .env("HOME", home.path())
@@ -733,4 +733,208 @@ fn the_wsl_tracker_marks_commands_with_a_nonce_its_children_do_not_inherit() {
         "{stdout:?}"
     );
     assert!(stdout.contains("inherited:[0]"), "{stdout:?}");
+}
+
+/// Runs the MSYS2/Cygwin Bash `PROMPT_COMMAND` in a real interactive Bash and
+/// returns what it wrote to the terminal. `rc` is the rc file's contents, and
+/// the hook Zetta found in the environment prints `$?`, so its output shows the
+/// status the hooks were handed. Bash on Linux stands in for the Windows one;
+/// the tracker is plain Bash either way.
+#[cfg(unix)]
+fn run_bash_prompt_command(layer: PosixLayer, rc: &str, input: &str) -> String {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let directory = tempfile::tempdir().unwrap();
+    let rc_path = directory.path().join("bashrc");
+    std::fs::write(&rc_path, rc).unwrap();
+    let mut child = Command::new("bash")
+        .args(["--noprofile", "--rcfile"])
+        .arg(&rc_path)
+        .arg("-i")
+        .current_dir(directory.path())
+        .env(
+            "PROMPT_COMMAND",
+            bash_prompt_command(layer, Some(r#"echo "user's-hook:$?""#)),
+        )
+        .env("__ZETTA_COMMAND_MARKER_NONCE", "abc")
+        .env("PS1", "")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// The tracker was once spliced onto `__zetta_precmd` with no line between
+/// them, so precmd never ran and the ready event carried `abc__zetta_precmd`
+/// as its nonce; and the whole script re-ran at every prompt, clearing the
+/// started flag before the finished event could see it.
+#[cfg(unix)]
+#[test]
+fn bash_prompt_command_loads_once_and_reports_every_command() {
+    for layer in [PosixLayer::Msys2, PosixLayer::Cygwin] {
+        let output = run_bash_prompt_command(layer, "", "cd /\nfalse\nexit\n");
+        assert_eq!(
+            output.matches("zetta-event;abc:tracking-ready").count(),
+            1,
+            "{output:?}"
+        );
+        assert!(!output.contains("abc__zetta_precmd"), "{output:?}");
+        assert!(
+            output.contains("zetta-event;abc:command-started:cd /"),
+            "{output:?}"
+        );
+        assert!(output.contains("zetta-cwd;abc:/\u{1b}"), "{output:?}");
+        assert!(
+            output.contains("zetta-event;abc:command-finished:1"),
+            "{output:?}"
+        );
+        // `cd`, `false`, and `exit`, which never reaches another prompt.
+        assert_eq!(output.matches(":command-started:").count(), 3, "{output:?}");
+        assert_eq!(
+            output.matches(":command-finished:").count(),
+            2,
+            "{output:?}"
+        );
+        // At the first prompt and after each command, and seeing the status
+        // of the command it follows.
+        assert_eq!(output.matches("user's-hook:").count(), 3, "{output:?}");
+        assert!(output.contains("user's-hook:1"), "{output:?}");
+    }
+}
+
+/// Hooks an rc file adds before and after the tracker keep running once per
+/// prompt and are never reported as a command the user typed. A hook after
+/// the tracker still runs once at the top level on the first prompt, so that
+/// prompt is left unmarked and only the second command is reported.
+#[cfg(unix)]
+#[test]
+fn bash_prompt_command_keeps_hooks_an_rc_file_adds() {
+    let rc = "PROMPT_COMMAND=\"echo rc-prefix;$PROMPT_COMMAND\"\n\
+              PROMPT_COMMAND+='; echo rc-suffix'\n";
+    let output = run_bash_prompt_command(PosixLayer::Msys2, rc, "true\nfalse\nexit\n");
+    assert_eq!(output.matches("rc-prefix").count(), 3, "{output:?}");
+    assert_eq!(output.matches("rc-suffix").count(), 3, "{output:?}");
+    assert_eq!(output.matches("user's-hook:").count(), 3, "{output:?}");
+    assert!(!output.contains("command-started:echo"), "{output:?}");
+    // `false` and `exit`; `true`, at the unmarked first prompt, is not.
+    assert_eq!(output.matches(":command-started:").count(), 2, "{output:?}");
+    assert!(!output.contains("command-started:true"), "{output:?}");
+    assert!(
+        output.contains("zetta-event;abc:command-finished:1"),
+        "{output:?}"
+    );
+}
+
+/// Runs the WSL tracker the way a distribution does — `/bin/sh` starting the
+/// user's login Bash — but interactive, with `profile` as its
+/// `.bash_profile`, and a stand-in Windows executable whose `init bash` is the
+/// real integration script.
+#[cfg(unix)]
+fn run_wsl_bash(profile: &str, input: &str) -> String {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::process::{Command, Stdio};
+
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let bin = directory.path().join("bin");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(home.join(".bash_profile"), profile).unwrap();
+    let executable = |path: &Path, script: String| {
+        std::fs::write(path, script).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    // The tracker picks its branch by the shell's name; a pipe is not a
+    // terminal, so the wrapper asks Bash for the interactive shell itself.
+    executable(
+        &bin.join("bash"),
+        "#!/bin/sh\nexec /bin/bash -i \"$@\"\n".to_owned(),
+    );
+    let integration = directory.path().join("init.bash");
+    std::fs::write(
+        &integration,
+        crate::shell_integration::ShellIntegration::Bash.script(),
+    )
+    .unwrap();
+    let host = directory.path().join("zetta.exe");
+    executable(
+        &host,
+        format!("#!/bin/sh\ncat '{}'\n", integration.display()),
+    );
+
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", wsl_cwd_tracker(), "zetta-wsl-cwd"])
+        .current_dir(&home)
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", &home)
+        .env("SHELL", bin.join("bash"))
+        .env("TERM", "dumb")
+        .env("PS1", "")
+        .env(terminal::COMMAND_MARKER_NONCE_ENV, "abc")
+        // Forwarded into WSL, and what enables the integration's own tracker.
+        .env("ZETTA_PANE_ID", "7")
+        .env("ZETTA_HOST_EXECUTABLE", &host)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// The WSL tracker used to replace PROMPT_COMMAND wholesale at the first
+/// prompt, so hooks a profile added ran once and never again; and the
+/// integration it loaded then installed a second tracker, whose DEBUG trap
+/// displaced the first and never marked the title with the running command.
+#[cfg(unix)]
+#[test]
+fn wsl_bash_keeps_profile_hooks_and_one_tracker() {
+    if !Path::new("/bin/bash").is_file() {
+        return;
+    }
+    let profile = "PROMPT_COMMAND=\"echo rc-prefix;$PROMPT_COMMAND\"\n\
+                   PROMPT_COMMAND+='; echo rc-suffix'\n";
+    let output = run_wsl_bash(
+        profile,
+        "true\nfalse\n\
+         echo \"[$(declare -F __zetta_lazy_complete)|$(trap -p DEBUG)|$PROMPT_COMMAND|$(env | grep -c ZETTA_ORIGINAL_PROMPT_COMMAND)]\"\n\
+         exit\n",
+    );
+    // The first prompt and the three after it.
+    assert_eq!(output.matches("rc-prefix").count(), 4, "{output:?}");
+    assert_eq!(output.matches("rc-suffix").count(), 4, "{output:?}");
+    assert_eq!(output.matches(":tracking-ready").count(), 1, "{output:?}");
+    assert_eq!(output.matches("zetta-cwd;abc:").count(), 4, "{output:?}");
+    assert!(output.contains("zetta-cmd;abc:false\x1b\\"), "{output:?}");
+    assert!(
+        output.contains("zetta-event;abc:command-finished:1"),
+        "{output:?}"
+    );
+    // The integration loaded, but only this tracker reports, and the hook it
+    // was handed is not passed on to the commands the shell runs.
+    assert!(
+        output.contains(
+            "[__zetta_lazy_complete|trap -- '__zetta_preexec' DEBUG|__zetta_prompt_command|0]"
+        ),
+        "{output:?}"
+    );
 }

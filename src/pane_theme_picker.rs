@@ -1,3 +1,6 @@
+//! The theme picker for a pane or a tab: its list of installed themes,
+//! previewing one as the selection moves, and applying or resetting it.
+
 use super::*;
 
 /// The picker's list for `scope`: the reset entry pinned first, then every
@@ -71,8 +74,7 @@ impl Zetta {
         // override nor a profile theme, so the tick mark always lands on
         // whichever theme is actually showing, not just an active override.
         let current_theme_name = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(|tab| match scope {
                 ThemeScope::Pane => tab
                     .active_view()
@@ -212,7 +214,7 @@ impl Zetta {
         // Covers every scope below; over-bumping costs one extra query, while
         // under-bumping leaves an open `zetta vi` on stale colours.
         crate::process_control::bump_pane_theme_revision();
-        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(tab_id) = self.current_tab().map(|tab| tab.id) else {
             return false;
         };
         if scope == ThemeScope::Tab {
@@ -229,21 +231,12 @@ impl Zetta {
         }
 
         let Some((pane_id, selection, project_pane_id, profile, view)) = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .and_then(Tab::active_pane)
             .and_then(|pane| {
                 let (project_pane_id, profile) = match pane.stack.selected {
                     PaneStackSelection::Base => (pane.id, pane.profile.clone()),
-                    PaneStackSelection::Stacked(id) => (
-                        id,
-                        pane.stack
-                            .entries
-                            .iter()
-                            .find(|entry| entry.id == id)?
-                            .profile
-                            .clone(),
-                    ),
+                    PaneStackSelection::Stacked(id) => (id, pane.stack.entry(id)?.profile.clone()),
                 };
                 pane.selected_view()
                     .map(|view| (pane.id, pane.stack.selected, project_pane_id, profile, view))
@@ -260,9 +253,7 @@ impl Zetta {
                     match selection {
                         PaneStackSelection::Base => pane.theme_override = Some(name),
                         PaneStackSelection::Stacked(id) => {
-                            let Some(entry) =
-                                pane.stack.entries.iter_mut().find(|entry| entry.id == id)
-                            else {
+                            let Some(entry) = pane.stack.entry_mut(id) else {
                                 return false;
                             };
                             entry.theme_override = Some(name);
@@ -279,9 +270,7 @@ impl Zetta {
                 match selection {
                     PaneStackSelection::Base => pane.theme_override = None,
                     PaneStackSelection::Stacked(id) => {
-                        let Some(entry) =
-                            pane.stack.entries.iter_mut().find(|entry| entry.id == id)
-                        else {
+                        let Some(entry) = pane.stack.entry_mut(id) else {
                             return false;
                         };
                         entry.theme_override = None;

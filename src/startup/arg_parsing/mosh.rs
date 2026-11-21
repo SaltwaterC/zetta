@@ -1,3 +1,5 @@
+//! `zetta mosh`: checked as `zosh` will read it, then handed over unchanged.
+
 use super::*;
 
 use crate::mosh::parse_mosh_args;

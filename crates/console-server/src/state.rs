@@ -1,3 +1,6 @@
+//! The console's own state: its palette, input and output modes, and the view
+//! of the screen the embedder last stored.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

@@ -85,10 +85,8 @@ fn shift_f9_arms_the_focused_terminal_and_escape_cancels(cx: &mut TestAppContext
             dark_theme: None,
             icon: ProfileIcon::Zetta,
         };
-        let pane_id = zetta.next_pane_id;
-        zetta.next_pane_id += 1;
-        let tab_id = zetta.next_tab_id;
-        zetta.next_tab_id += 1;
+        let pane_id = take_next_id(&mut zetta.next_pane_id);
+        let tab_id = take_next_id(&mut zetta.next_tab_id);
         zetta.tabs.push(Tab {
             id: tab_id,
             attention_id: tab_id,

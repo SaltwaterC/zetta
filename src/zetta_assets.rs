@@ -1,3 +1,6 @@
+//! Zetta's embedded assets, served through GPUI's asset source alongside Zed's,
+//! with its own fonts kept uncompressed.
+
 use std::borrow::Cow;
 
 use anyhow::Context as _;

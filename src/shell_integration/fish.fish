@@ -146,12 +146,14 @@ if set -q ZETTA_HOST_EXECUTABLE; and test -n "$ZETTA_HOST_EXECUTABLE"
     end
 end
 
+# ZETTA_ZOSH_INTEGRATION_BEGIN
 if not type -q mosh
     function mosh --wraps 'zetta mosh'
         command zetta mosh $argv
     end
     set -g __ZETTA_MOSH_WRAPPER 1
 end
+# ZETTA_ZOSH_INTEGRATION_END
 
 # The nonce Zetta gave this shell. Lifecycle and working-directory markers
 # carry it so that a `command-finished` or a directory printed by anything else
@@ -255,14 +257,17 @@ if not type -q vi
         function vi --wraps 'zetta vi' --description 'Zetta vi editor'
             zetta vi $argv
         end
-        complete -c vi -F
+        # Fish ships completions for `vi` that describe Vim, or SunOS vi, and
+        # loads them on first use alongside the wrapped `zetta vi` ones.
+        # Erasing them is what stops that load; the wrap is then given again.
+        complete -c vi -e
+        complete -c vi --wraps 'zetta vi'
     end
 end
 
 function zvi --wraps 'zetta vi' --description 'Zetta vi editor'
     zetta vi $argv
 end
-complete -c zvi -F
 
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 function __zetta_worktree_commits
@@ -284,29 +289,6 @@ function __zetta_worktree_commits
     or return
     set split_point $split_point[1]
     git rev-list --reverse "$split_point..refs/heads/$source_branch" 2>/dev/null
-end
-
-function __zetta_worktree_sync_target
-    set -l words (commandline -opc)
-    set -l current (commandline -ct)
-    string match -q -- '-*' "$current"
-    and return 1
-    set -l operation_index 3
-    if test "$words[1]" = zwt
-        set operation_index 2
-    end
-    test "$words[$operation_index]" = sync
-    or return 1
-    set -l target_count 0
-    set -l argument_index (math $operation_index + 1)
-    while test $argument_index -le (count $words)
-        if string match -q -- '-*' "$words[$argument_index]"
-            return 1
-        end
-        set target_count (math $target_count + 1)
-        set argument_index (math $argument_index + 1)
-    end
-    test $target_count -eq 0
 end
 
 function zwt --description 'Zetta Git worktree workflow'
@@ -363,7 +345,7 @@ end
 # ZETTA_WORKTREE_INTEGRATION_END
 
 functions -e ztftp
-function zntfy --wraps 'zetta notify' --description 'Zetta desktop notifications'
+function zntfy --description 'Zetta desktop notifications'
     zetta notify $argv
 end
 
@@ -420,25 +402,12 @@ function __zetta_lazy_complete
     complete -C (commandline -cp)
 end
 if not set -q __zetta_completions_loaded
-    set -g __zetta_completion_commands zetta zosh zvi ztftp zhttp zntfy
-# ZETTA_PAGER_INTEGRATION_BEGIN
-    set -a __zetta_completion_commands zpager
-# ZETTA_PAGER_INTEGRATION_END
-# ZETTA_WORKTREE_INTEGRATION_BEGIN
-    set -a __zetta_completion_commands zwt
-# ZETTA_WORKTREE_INTEGRATION_END
-# ZETTA_ZMUX_INTEGRATION_BEGIN
-    set -a __zetta_completion_commands zmux
-# ZETTA_ZMUX_INTEGRATION_END
-# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
-    set -a __zetta_completion_commands zcopy zpaste
-    if test "$__zetta_platform" != Darwin
-        set -a __zetta_completion_commands pbcopy pbpaste
-    end
-# ZETTA_CLIPBOARD_INTEGRATION_END
+    # ZETTA_LAZY_COMPLETIONS
+# ZETTA_ZOSH_INTEGRATION_BEGIN
     if set -q __ZETTA_MOSH_WRAPPER
         set -a __zetta_completion_commands mosh
     end
+# ZETTA_ZOSH_INTEGRATION_END
     for name in $__zetta_completion_commands
         __zetta_remove_lazy_registration $name
         complete -c $name -a '(__zetta_lazy_complete)'

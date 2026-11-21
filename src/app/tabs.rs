@@ -8,8 +8,37 @@
 use super::*;
 
 impl Zetta {
+    /// The tab the window is showing. A method on `Zetta`, so it borrows all of
+    /// it: where a caller has to touch another field while holding the tab,
+    /// `self.current_tab_mut()` is the disjoint-borrow spelling.
+    pub(crate) fn current_tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active_tab)
+    }
+
+    pub(crate) fn current_tab_mut(&mut self) -> Option<&mut Tab> {
+        self.tabs.get_mut(self.active_tab)
+    }
+
+    /// Tab `tab_id`, whether visible or detached into the background.
+    pub(crate) fn any_tab(&self, tab_id: u64) -> Option<&Tab> {
+        self.tabs
+            .by_id(tab_id)
+            .or_else(|| self.background_sessions.by_id(tab_id))
+    }
+
+    pub(crate) fn any_tab_mut(&mut self, tab_id: u64) -> Option<&mut Tab> {
+        self.tabs
+            .by_id_mut(tab_id)
+            .or_else(|| self.background_sessions.by_id_mut(tab_id))
+    }
+
+    /// Where the visible tab `tab_id` sits in `Zetta::tabs`.
+    pub(crate) fn tab_index(&self, tab_id: u64) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == tab_id)
+    }
+
     pub(crate) fn open_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
+        let active_profile = self.current_tab().and_then(Tab::active_profile);
         let project = self.active_project_config().cloned();
         let effective = project
             .as_ref()
@@ -93,7 +122,7 @@ impl Zetta {
         let effective = project
             .as_ref()
             .map_or(&self.launch_config, |project| &project.effective);
-        let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
+        let active_profile = self.current_tab().and_then(Tab::active_profile);
         let profile = new_tab_profile(
             active_profile,
             &self.profiles,
@@ -125,7 +154,7 @@ impl Zetta {
         let effective = project
             .as_ref()
             .map_or(&self.launch_config, |project| &project.effective);
-        let active_profile = self.tabs.get(self.active_tab).and_then(Tab::active_profile);
+        let active_profile = self.current_tab().and_then(Tab::active_profile);
         let Some(profile) = new_tab_profile(
             active_profile,
             &self.profiles,
@@ -149,7 +178,7 @@ impl Zetta {
             cx,
         );
         if let Some(title) = title.filter(|title| !title.is_empty())
-            && let Some(tab) = self.tabs.get_mut(self.active_tab)
+            && let Some(tab) = self.current_tab_mut()
         {
             tab.custom_title = Some(title);
             cx.notify();
@@ -187,7 +216,7 @@ impl Zetta {
                 }
             });
         let group = self.group_for_new_tab(origin, project.as_deref(), cx);
-        let active_pane = self.tabs.get(self.active_tab).and_then(Tab::active_pane);
+        let active_pane = self.current_tab().and_then(Tab::active_pane);
         let effective = project
             .as_ref()
             .map_or(&self.launch_config, |project| &project.effective);
@@ -223,8 +252,7 @@ impl Zetta {
                 effective.working_directory_configured,
             )
         };
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
+        let tab_id = take_next_id(&mut self.next_tab_id);
         let attention_id = if cx.has_global::<ZettaProcessState>() {
             let process = cx.global_mut::<ZettaProcessState>();
             let attention_id = process.next_attention_id;
@@ -235,8 +263,7 @@ impl Zetta {
             self.next_attention_id += 1;
             attention_id
         };
-        let pane_id = self.next_pane_id;
-        self.next_pane_id += 1;
+        let pane_id = take_next_id(&mut self.next_pane_id);
         let wsl_cwd_file = wsl_cwd_tracking_file(&profile, pane_id);
         if let Some(project) = &project {
             self.projects
@@ -348,7 +375,7 @@ impl Zetta {
         if self.defer_tab_close_for_handover(tab_id, background_if_pinned, window, cx) {
             return;
         }
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+        let Some(index) = self.tab_index(tab_id) else {
             return;
         };
         self.set_tab_remote_clipboard_paste(tab_id, false, cx);
@@ -472,7 +499,7 @@ impl Zetta {
     }
 
     pub(crate) fn close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(tab_id) = self.current_tab().map(|tab| tab.id) else {
             return;
         };
         if self.tabs[self.active_tab].pinned {
@@ -488,7 +515,7 @@ impl Zetta {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tab_id = self.tabs.get(self.active_tab).map(|tab| tab.id);
+        let tab_id = self.current_tab().map(|tab| tab.id);
         let Some(insertion_index) = toggle_tab_pinning_in_order(&mut self.tabs, self.active_tab)
         else {
             return;
@@ -621,7 +648,7 @@ impl Zetta {
         if !self.tab_move_mode {
             return;
         }
-        let Some(source_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(source_id) = self.current_tab().map(|tab| tab.id) else {
             return;
         };
         let filter = self.tab_group_filter().cloned();
@@ -651,7 +678,7 @@ impl Zetta {
         position: TabDropPosition,
         cx: &mut Context<Self>,
     ) {
-        let Some(active_tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(active_tab_id) = self.current_tab().map(|tab| tab.id) else {
             return;
         };
         if !tab_drop_preserves_pinning(&self.tabs, tab_id, position) {

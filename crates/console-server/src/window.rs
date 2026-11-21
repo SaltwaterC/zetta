@@ -1,3 +1,6 @@
+//! The console's pseudo-window: the hidden window `GetConsoleWindow` returns,
+//! shown and hidden as applications ask.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

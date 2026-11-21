@@ -117,7 +117,7 @@ use config::{
     profile_is_hidden, visible_profile_count, visible_profile_index,
 };
 use futures::StreamExt as _;
-#[cfg(any(target_os = "windows", linux_like))]
+#[cfg(drawn_window_controls)]
 use gpui::WindowControls;
 use gpui::{
     Action, Anchor, Animation, AnimationExt, AnyElement, App, AppContext as _, Bounds, Context,

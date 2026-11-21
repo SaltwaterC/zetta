@@ -138,10 +138,12 @@ if ($zettaViMissing) {
 
 function zvi { & zetta vi @args }
 
+# ZETTA_ZOSH_INTEGRATION_BEGIN
 $zettaMoshMissing = -not (__zetta_command_available 'mosh')
 if ($zettaMoshMissing) {
     function global:mosh { & zetta mosh @args }
 }
+# ZETTA_ZOSH_INTEGRATION_END
 
 # ZETTA_WORKTREE_INTEGRATION_BEGIN
 function zwt {
@@ -237,34 +239,12 @@ $zettaLazyCompletions = {
         & $state.Handler $wordToComplete $commandAst $cursorPosition
     }
 }
-Register-ArgumentCompleter -Native -CommandName zetta -ScriptBlock $zettaLazyCompletions
-Register-ArgumentCompleter -Native -CommandName zosh -ScriptBlock $zettaLazyCompletions
-# ZETTA_ZMUX_INTEGRATION_BEGIN
-Register-ArgumentCompleter -Native -CommandName zmux -ScriptBlock $zettaLazyCompletions
-# ZETTA_ZMUX_INTEGRATION_END
-Register-ArgumentCompleter -CommandName ztftp -ScriptBlock $zettaLazyCompletions
-Register-ArgumentCompleter -CommandName zhttp -ScriptBlock $zettaLazyCompletions
-# ZETTA_PAGER_INTEGRATION_BEGIN
-Register-ArgumentCompleter -CommandName zpager -ScriptBlock $zettaLazyCompletions
-# ZETTA_PAGER_INTEGRATION_END
-Register-ArgumentCompleter -CommandName zntfy -ScriptBlock $zettaLazyCompletions
-# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
-Register-ArgumentCompleter -CommandName zcopy -ScriptBlock $zettaLazyCompletions
-Register-ArgumentCompleter -CommandName zpaste -ScriptBlock $zettaLazyCompletions
-# ZETTA_CLIPBOARD_INTEGRATION_END
-Register-ArgumentCompleter -CommandName zvi -ScriptBlock $zettaLazyCompletions
-# ZETTA_WORKTREE_INTEGRATION_BEGIN
-Register-ArgumentCompleter -CommandName zwt -ScriptBlock $zettaLazyCompletions
-# ZETTA_WORKTREE_INTEGRATION_END
+# ZETTA_LAZY_COMPLETIONS
 if ($zettaViMissing) {
     Register-ArgumentCompleter -CommandName vi -ScriptBlock $zettaLazyCompletions
 }
+# ZETTA_ZOSH_INTEGRATION_BEGIN
 if ($zettaMoshMissing) {
     Register-ArgumentCompleter -CommandName mosh -ScriptBlock $zettaLazyCompletions
 }
-# ZETTA_CLIPBOARD_INTEGRATION_BEGIN
-if (-not $IsMacOS) {
-    Register-ArgumentCompleter -CommandName pbcopy -ScriptBlock $zettaLazyCompletions
-    Register-ArgumentCompleter -CommandName pbpaste -ScriptBlock $zettaLazyCompletions
-}
-# ZETTA_CLIPBOARD_INTEGRATION_END
+# ZETTA_ZOSH_INTEGRATION_END

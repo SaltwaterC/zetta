@@ -244,12 +244,7 @@ impl LifetimeLock {
 
 /// Runs `f` on the daemon's lifetime lock, if it holds one.
 pub(super) fn held_lock<T>(daemon: &Daemon, f: impl FnOnce(&LifetimeLock) -> T) -> Option<T> {
-    daemon
-        .lifetime_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-        .map(f)
+    daemon.lifetime_lock.lock().recover_poison().as_ref().map(f)
 }
 
 /// Becomes the daemon of `directory`, or says why another one is.

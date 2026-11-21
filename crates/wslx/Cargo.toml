@@ -21,3 +21,4 @@ path = "src/bin/wslx-relay.rs"
 # linked by `rust-lld` alone, and anything that compiles C would need a musl C
 # toolchain on every machine that builds Zetta for Windows.
 [dependencies]
+zetta_sync = { path = "../zetta_sync" }

@@ -1,3 +1,6 @@
+//! Starting the TFTP server from the application: serving the active pane's
+//! directory in a pane of its own.
+
 use super::*;
 
 impl Zetta {
@@ -8,8 +11,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         if self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .is_some_and(|tab| !can_add_panes(tab.panes.len(), 1))
         {
             self.show_error_notice(format!(

@@ -59,7 +59,7 @@ pub(crate) fn prepare_user_themes() -> Result<Vec<theme::ThemeFamily>> {
         &mut THEME_FILE_CACHE
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            .recover_poison(),
     )?;
     Ok(paths
         .into_iter()

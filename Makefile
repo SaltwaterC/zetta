@@ -68,7 +68,9 @@ ZETTA_CRATE_DIRS := \
 	crates/gpui_windows \
 	crates/terminal \
 	crates/terminal_view \
+	crates/zetta_cli_help \
 	crates/zetta_profiles \
+	crates/zetta_sync \
 	crates/zntfy \
 	crates/zclip \
 	crates/ztftp \
@@ -88,7 +90,9 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/console-server \
 	crates/proc-macro-error2 \
 	crates/terminal \
+	crates/zetta_cli_help \
 	crates/zetta_profiles \
+	crates/zetta_sync \
 	crates/zntfy \
 	crates/zclip \
 	crates/ztftp \

@@ -1,3 +1,7 @@
+//! Screen buffers: the main buffer and those `CreateConsoleScreenBuffer` adds,
+//! which one is active, and replaying the main buffer when it comes back on
+//! screen.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

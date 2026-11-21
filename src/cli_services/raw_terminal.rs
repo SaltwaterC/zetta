@@ -1,3 +1,6 @@
+//! Raw mode for the terminal `zetta serial` runs in, so every key reaches the
+//! device, restored when the session ends; one implementation per platform.
+
 #[cfg(any(unix, windows))]
 use anyhow::Context as _;
 use anyhow::Result;

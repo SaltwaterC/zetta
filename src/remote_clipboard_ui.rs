@@ -11,7 +11,7 @@ impl Zetta {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(tab_id) = self.current_tab().map(|tab| tab.id) else {
             return;
         };
         let allowed = if self.remote_clipboard_paste_tabs.insert(tab_id) {
@@ -41,7 +41,7 @@ impl Zetta {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_id) = self.tabs.get(self.active_tab).map(|tab| tab.id) else {
+        let Some(tab_id) = self.current_tab().map(|tab| tab.id) else {
             return;
         };
         let allowed = if self.remote_clipboard_copy_blocked_tabs.insert(tab_id) {
@@ -62,7 +62,7 @@ impl Zetta {
         cx: &mut Context<Self>,
         mut apply: impl FnMut(&mut Terminal),
     ) {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+        let Some(tab) = self.tabs.by_id(tab_id) else {
             return;
         };
         let terminals = tab

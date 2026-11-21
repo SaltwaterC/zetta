@@ -1,3 +1,6 @@
+//! The settings dialog's form widgets: buttons, dropdowns and their popover,
+//! keymap rows, and keeping the focused control scrolled into view.
+
 use super::*;
 pub(crate) use crate::searchable_dropdown::{
     DropdownChoice, SearchableDropdownRenderState, searchable_dropdown_popup,

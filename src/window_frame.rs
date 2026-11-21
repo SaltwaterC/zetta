@@ -1,4 +1,10 @@
+//! The window frame where Zetta draws its own: the border and client inset,
+//! which side the window buttons sit on (GNOME's setting, on Linux), and the
+//! corners in each window state.
+
 use super::*;
+#[cfg(target_os = "linux")]
+use zetta_sync::RecoverPoison as _;
 
 const BORDER_SIZE: Pixels = px(1.);
 /// The client-decoration inset used for rounded corners and the compositor shadow.
@@ -64,19 +70,14 @@ pub(crate) fn prefetch_gnome_button_layout() {
         .spawn(query_gnome_button_layout)
         .map_err(|error| log::warn!("could not start the button layout prefetch: {error}"))
         .ok();
-    *PREFETCHED_BUTTON_LAYOUT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner()) = query;
+    *PREFETCHED_BUTTON_LAYOUT.lock().recover_poison() = query;
 }
 
 /// The prefetched answer the first time, then a fresh query: a later call
 /// follows a layout change, which the launch's answer predates.
 #[cfg(target_os = "linux")]
 pub(crate) fn read_gnome_button_layout() -> Option<WindowButtonLayout> {
-    let prefetched = PREFETCHED_BUTTON_LAYOUT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take();
+    let prefetched = PREFETCHED_BUTTON_LAYOUT.lock().recover_poison().take();
     match prefetched.map(std::thread::JoinHandle::join) {
         Some(Ok(layout)) => layout,
         Some(Err(_)) | None => query_gnome_button_layout(),
@@ -116,15 +117,15 @@ pub(crate) fn platform_title_bar_height(window: &Window) -> Pixels {
 
 #[derive(Clone, Copy)]
 pub(crate) struct WindowControlState {
-    #[cfg(any(target_os = "windows", linux_like))]
+    #[cfg(drawn_window_controls)]
     pub(crate) supported_controls: WindowControls,
-    #[cfg(any(target_os = "windows", linux_like))]
+    #[cfg(drawn_window_controls)]
     pub(crate) is_maximized: bool,
-    #[cfg(any(target_os = "windows", linux_like))]
+    #[cfg(drawn_window_controls)]
     pub(crate) is_resizable: bool,
-    #[cfg(any(target_os = "windows", linux_like))]
+    #[cfg(drawn_window_controls)]
     pub(crate) is_minimizable: bool,
-    #[cfg(any(target_os = "windows", linux_like))]
+    #[cfg(drawn_window_controls)]
     pub(crate) is_fullscreen: bool,
     #[cfg(linux_like)]
     pub(crate) client_decorations: bool,
@@ -151,15 +152,15 @@ pub(crate) struct WindowFrameGeometry {
 
 impl WindowFrameGeometry {
     pub(crate) fn new(window: &Window, cx: &App) -> Self {
-        #[cfg(any(target_os = "windows", linux_like))]
+        #[cfg(drawn_window_controls)]
         let supported_controls = window.window_controls();
-        #[cfg(any(target_os = "windows", linux_like))]
+        #[cfg(drawn_window_controls)]
         let is_maximized = window.is_maximized();
-        #[cfg(any(target_os = "windows", linux_like))]
+        #[cfg(drawn_window_controls)]
         let is_resizable = window.is_resizable();
-        #[cfg(any(target_os = "windows", linux_like))]
+        #[cfg(drawn_window_controls)]
         let is_minimizable = window.is_minimizable();
-        #[cfg(any(target_os = "windows", linux_like))]
+        #[cfg(drawn_window_controls)]
         let is_fullscreen = window.is_fullscreen();
         let (client_decorations, tiling) = match window.window_decorations() {
             Decorations::Client { tiling } => (true, tiling),
@@ -170,15 +171,15 @@ impl WindowFrameGeometry {
         let compact_tab_corners = compact_tab_corner_state(window, cx, client_decorations, tiling);
         Self {
             window_control_state: WindowControlState {
-                #[cfg(any(target_os = "windows", linux_like))]
+                #[cfg(drawn_window_controls)]
                 supported_controls,
-                #[cfg(any(target_os = "windows", linux_like))]
+                #[cfg(drawn_window_controls)]
                 is_maximized,
-                #[cfg(any(target_os = "windows", linux_like))]
+                #[cfg(drawn_window_controls)]
                 is_resizable,
-                #[cfg(any(target_os = "windows", linux_like))]
+                #[cfg(drawn_window_controls)]
                 is_minimizable,
-                #[cfg(any(target_os = "windows", linux_like))]
+                #[cfg(drawn_window_controls)]
                 is_fullscreen,
                 #[cfg(linux_like)]
                 client_decorations,
@@ -304,7 +305,7 @@ fn compact_tab_corner_state(
     }
 }
 
-#[cfg(any(target_os = "windows", linux_like))]
+#[cfg(drawn_window_controls)]
 fn window_button_enabled(
     button: WindowButton,
     supported_controls: WindowControls,
@@ -544,7 +545,7 @@ pub(crate) fn render_window_controls(
         .into_any_element()
 }
 
-#[cfg(not(any(target_os = "windows", linux_like)))]
+#[cfg(not(drawn_window_controls))]
 pub(crate) fn render_window_controls(
     _buttons: [Option<WindowButton>; MAX_BUTTONS_PER_SIDE],
     _state: WindowControlState,

@@ -7,6 +7,15 @@
 
 use super::*;
 
+#[cfg(unix)]
+mod unix;
+#[cfg(unix)]
+pub(super) use unix::*;
+#[cfg(windows)]
+mod windows_handover;
+#[cfg(windows)]
+pub(super) use windows_handover::*;
+
 /// Why an upgrade did not happen, and whether the client has been told.
 ///
 /// The answer is sent before the exec, because an exec never returns to send
@@ -19,371 +28,9 @@ pub(super) enum UpgradeRefused {
     AfterAnswering(anyhow::Error),
 }
 
-/// Replaces this daemon with a fresh image of itself.
-///
-/// Returns only on failure, in which case this daemon carries on holding
-/// everything it had: an upgrade that cannot be completed must not be a way to
-/// lose the sessions it was meant to preserve.
-#[cfg(unix)]
-pub(super) fn upgrade_daemon(
-    daemon: &Arc<Daemon>,
-    connection: &mut Connection,
-) -> std::result::Result<(), UpgradeRefused> {
-    prepare_and_exec(daemon, connection)
-}
-
-#[cfg(unix)]
-pub(super) fn prepare_and_exec(
-    daemon: &Arc<Daemon>,
-    connection: &mut Connection,
-) -> std::result::Result<(), UpgradeRefused> {
-    let prepared = prepare_upgrade(daemon).map_err(UpgradeRefused::Before)?;
-
-    // Answered before the exec, because the exec never returns to answer. The
-    // pre-flight has already established that the replacement can take over, so
-    // this reports what was accepted rather than what completed.
-    connection
-        .send(&Response::Ok)
-        .map_err(UpgradeRefused::Before)?;
-
-    // Tell the clients this is deliberate, so the disconnect the exec is about
-    // to cause reads as a replacement rather than a failure. Their terminals are
-    // unaffected either way — in exclusive mode they hold the descriptors
-    // themselves — but a client that knows can reconnect at once instead of
-    // waiting out a backoff, and it never logs a lost multiplexer as a fault.
-    // Best effort by nature: whether or not this lands, no client may treat a
-    // lost subscription as its panes' processes ending.
-    broadcast(daemon, &Event::Replacing);
-
-    // Past this point the process becomes the replacement, so anything that
-    // was going to fail had to have failed already.
-    Err(UpgradeRefused::AfterAnswering(exec_carrying(
-        daemon, &prepared,
-    )))
-}
-
-/// What [`prepare_upgrade`] settled on, for [`exec_carrying`] to carry out.
-#[cfg(unix)]
-pub(super) struct PreparedUpgrade {
-    executable: PathBuf,
-    /// The handover, still close-on-exec.
-    handover: std::fs::File,
-    /// Every pane the handover names, by id and by the descriptor it names.
-    /// A pane that has closed since is not carried, and neither is one that
-    /// started since, even if it was given a closed pane's descriptor number.
-    panes: HashSet<(u64, RawFd)>,
-}
-
-/// Makes everything the handover names inheritable and replaces this image,
-/// returning only if that could not be done — with every descriptor
-/// close-on-exec again.
-///
-/// No pane starts from clearing the first flag to the `execv`: it would
-/// inherit every pane's terminal, the listener and the handover.
-#[cfg(unix)]
-fn exec_carrying(daemon: &Daemon, prepared: &PreparedUpgrade) -> anyhow::Error {
-    let _no_spawns = daemon
-        .spawn_gate
-        .write()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let sessions = daemon.sessions.lock().unwrap();
-    let lifetime_lock = daemon
-        .lifetime_lock
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let panes = sessions
-        .iter()
-        .flat_map(|session| session.panes.iter())
-        .filter(|pane| {
-            prepared
-                .panes
-                .contains(&(pane.id, pane.pty.file().as_raw_fd()))
-        })
-        .map(|pane| pane.pty.file());
-    // Keep the listener together with the PTY masters where the platform
-    // preserves its local peer-credential state across exec. macOS has to
-    // rebind: inheriting a Darwin local listener makes every new connection
-    // fail the credential lookup in the replacement.
-    #[cfg(target_os = "macos")]
-    let listener = None;
-    // SAFETY: the daemon's listener stays open for the daemon's lifetime, and
-    // this borrow ends with this function.
-    #[cfg(not(target_os = "macos"))]
-    let listener = Some(unsafe { BorrowedFd::borrow_raw(daemon.listener_fd) });
-    // If the lock cannot be carried, the replacement takes it itself.
-    let lock = lifetime_lock.as_ref().map(LifetimeLock::as_fd);
-    let carried = panes
-        .map(std::os::fd::AsFd::as_fd)
-        .chain(listener)
-        .chain(lock)
-        .chain(std::iter::once(prepared.handover.as_fd()));
-    let _inherited = match crate::upgrade::InheritedAcrossExec::clear(carried) {
-        Ok(inherited) => inherited,
-        Err(error) => return error.context("keeping descriptors open for the replacement"),
-    };
-    match crate::upgrade::exec_replacement(
-        &prepared.executable,
-        prepared.handover.as_raw_fd(),
-        listener.map(|listener| listener.as_raw_fd()),
-    ) {
-        Ok(never) => match never {},
-        Err(error) => error,
-    }
-}
-
-/// Everything that can still be refused: resolving the image, checking it can
-/// take over, and writing the handover.
-#[cfg(unix)]
-pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<PreparedUpgrade> {
-    let executable = daemon
-        .executable
-        .clone()
-        .context("this multiplexer does not know its own path, so it cannot be replaced")?;
-    anyhow::ensure!(
-        executable.is_file(),
-        "{} no longer exists, so this multiplexer cannot replace itself with it. Its sessions \
-         are untouched; rebuild or reinstall in place and try again.",
-        executable.display()
-    );
-    anyhow::ensure!(
-        crate::upgrade::replacement_accepts_handover(&executable)?,
-        "{} cannot take over this multiplexer's sessions, so it was not started",
-        executable.display()
-    );
-
-    #[cfg(feature = "session-persistence")]
-    if let Some(persistence) = daemon.persistence.lock().as_mut() {
-        persistence
-            .flush_segments()
-            .context("flushing encrypted scrollback before replacing the daemon")?;
-    }
-
-    let mut sessions = daemon.sessions.lock().unwrap();
-    let now = std::time::Instant::now();
-    let handover = crate::upgrade::Handover {
-        version: crate::upgrade::HANDOVER_VERSION,
-        generation: daemon.catalog.lock().unwrap().runner_id(),
-        next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
-        next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
-        retention: *daemon.retention.lock().unwrap(),
-        recipient_grants: Some(lock_grants(daemon).clone()),
-        lifetime_lock: held_lock(daemon, |lock| lock.raw_fd()),
-        sessions: sessions
-            .iter_mut()
-            .map(|session| {
-                crate::upgrade::SessionHandover {
-                    id: session.id,
-                    summary: session.summary.clone(),
-                    state: session.state.clone(),
-                    shared_state: session.shared_state.clone(),
-                    keep: session.keep,
-                    offered: session.offered,
-                    owner: session.owner.map(|owner| owner.pid),
-                    owner_started: session.owner.and_then(|owner| owner.started),
-                    verifier: session
-                        .authentication
-                        .as_ref()
-                        .map(|authentication| authentication.verifier().to_owned()),
-                    key_envelope: session.key_envelope.clone(),
-                    failed_authentications: session.failed_authentications,
-                    // A monotonic deadline means nothing in another image, so
-                    // what is carried is how much of the window is left.
-                    refuse_for: session
-                        .refuse_until
-                        .and_then(|until| until.checked_duration_since(now)),
-                    sealed_to: session.sealed_to.clone(),
-                    panes: session
-                        .panes
-                        .iter_mut()
-                        .map(|pane| {
-                            let (columns, lines, retained) = snapshot_for_upgrade(pane);
-                            crate::upgrade::PaneHandover {
-                                id: pane.id,
-                                descriptor: pane.pty.file().as_raw_fd(),
-                                child_pid: pane.pty.child_pid(),
-                                attachment: attachment_handover(&pane.attachment),
-                                attachment_client_id: pane.attachment_client_id.clone(),
-                                columns,
-                                lines,
-                                exited: pane.exited,
-                                exit_status: pane.exit_status,
-                                // Copied, not taken. The exec is irreversible but
-                                // everything before it is not, and emptying the live
-                                // ring here meant a refused upgrade had already
-                                // destroyed the output it was protecting.
-                                retained,
-                            }
-                        })
-                        .collect(),
-                }
-            })
-            .collect(),
-    };
-
-    drop(sessions);
-    // Only the terminals. The `SIGCHLD` pipes are deliberately left
-    // close-on-exec: the replacement registers its own, and a carried one is
-    // worse than useless — see `PaneHandover::descriptor`.
-    let panes = handover
-        .sessions
-        .iter()
-        .flat_map(|session| session.panes.iter())
-        .map(|pane| (pane.id, pane.descriptor))
-        .collect();
-    let handover = crate::upgrade::write_handover(&handover)?;
-    Ok(PreparedUpgrade {
-        executable,
-        handover,
-        panes,
-    })
-}
-
-#[cfg(windows)]
-pub(super) fn upgrade_daemon(
-    daemon: &Arc<Daemon>,
-    connection: &mut Connection,
-) -> std::result::Result<(), UpgradeRefused> {
-    let (executable, mut handover) = prepare_upgrade(daemon).map_err(UpgradeRefused::Before)?;
-    let ready =
-        crate::upgrade::ready_path(&session_catalog_dir()).map_err(UpgradeRefused::Before)?;
-    let mut replacement =
-        crate::upgrade::spawn_replacement(&executable, &ready).map_err(UpgradeRefused::Before)?;
-    // Everything the replacement was given — the handover pipe, the agent pipe
-    // instances — goes with it if it is stopped here.
-    let refuse = |replacement: &mut std::process::Child, error: anyhow::Error| {
-        let _ = replacement.kill();
-        crate::upgrade::remove_ready(&ready);
-        Err(UpgradeRefused::Before(error))
-    };
-    hand_over_agent_pipes(&mut handover, &replacement);
-    let sent = held_lock(daemon, |lock| {
-        crate::upgrade::send_handover(&mut replacement, &handover, Some(lock.file()))
-    })
-    .unwrap_or_else(|| crate::upgrade::send_handover(&mut replacement, &handover, None));
-    if let Err(error) = sent {
-        return refuse(&mut replacement, error);
-    }
-    drop(handover);
-    if let Err(error) = crate::upgrade::wait_for_ready(&mut replacement, &ready) {
-        return refuse(&mut replacement, error);
-    }
-    if let Err(error) = connection.send(&Response::Ok) {
-        return refuse(&mut replacement, error);
-    }
-    broadcast(daemon, &Event::Replacing);
-    // The replacement binds and publishes as soon as this daemon's listener
-    // closes, so neither is this daemon's to remove on the way out.
-    daemon.handed_over.store(true, Ordering::SeqCst);
-    daemon.running.store(false, Ordering::SeqCst);
-    let _ = Stream::connect(socket_path(&session_catalog_dir()));
-    Ok(())
-}
-
-/// Gives the replacement an instance of every pane's agent pipe, so each name
-/// stays held while this daemon exits; see `agent_pipe/listener.rs`.
-#[cfg(windows)]
-fn hand_over_agent_pipes(
-    handover: &mut crate::upgrade::Handover,
-    replacement: &std::process::Child,
-) {
-    use std::os::windows::io::AsRawHandle as _;
-
-    let process = windows::Win32::Foundation::HANDLE(replacement.as_raw_handle());
-    for pane in handover
-        .sessions
-        .iter_mut()
-        .flat_map(|session| session.panes.iter_mut())
-    {
-        if let Some((name, instance)) = super::agent_pipe::hand_over(pane.id, process) {
-            pane.agent_pipe = Some(name.to_string_lossy().into_owned());
-            pane.agent_pipe_instance = instance;
-        }
-    }
-}
-
-#[cfg(windows)]
-pub(super) fn prepare_upgrade(daemon: &Arc<Daemon>) -> Result<(PathBuf, crate::upgrade::Handover)> {
-    let executable = daemon
-        .executable
-        .clone()
-        .context("this multiplexer does not know its own path, so it cannot be replaced")?;
-    anyhow::ensure!(
-        executable.is_file(),
-        "{} no longer exists, so this multiplexer cannot replace itself with it. Its sessions \
-         are untouched; rebuild or reinstall in place and try again.",
-        executable.display()
-    );
-    anyhow::ensure!(
-        crate::upgrade::replacement_accepts_handover(&executable)?,
-        "{} cannot take over this multiplexer's sessions, so it was not started",
-        executable.display()
-    );
-
-    let mut sessions = daemon.sessions.lock().unwrap();
-    let now = Instant::now();
-    let handover = crate::upgrade::Handover {
-        version: crate::upgrade::HANDOVER_VERSION,
-        generation: daemon.catalog.lock().unwrap().runner_id(),
-        next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
-        next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
-        retention: *daemon.retention.lock().unwrap(),
-        recipient_grants: Some(lock_grants(daemon).clone()),
-        lifetime_lock: None,
-        sessions: sessions
-            .iter_mut()
-            .map(|session| crate::upgrade::SessionHandover {
-                id: session.id,
-                summary: session.summary.clone(),
-                state: session.state.clone(),
-                shared_state: session.shared_state.clone(),
-                keep: session.keep,
-                offered: session.offered,
-                owner: session.owner.map(|owner| owner.pid),
-                owner_started: session.owner.and_then(|owner| owner.started),
-                verifier: session
-                    .authentication
-                    .as_ref()
-                    .map(|authentication| authentication.verifier().to_owned()),
-                key_envelope: session.key_envelope.clone(),
-                failed_authentications: session.failed_authentications,
-                refuse_for: session
-                    .refuse_until
-                    .and_then(|until| until.checked_duration_since(now)),
-                sealed_to: session.sealed_to.clone(),
-                panes: session
-                    .panes
-                    .iter_mut()
-                    .map(|pane| {
-                        let (columns, lines, retained) = snapshot_for_upgrade(pane);
-                        crate::upgrade::PaneHandover {
-                            id: pane.id,
-                            console_id: pane.console_id,
-                            child_pid: pane.pty.child_pid(),
-                            attachment: attachment_handover(&pane.attachment),
-                            attachment_client_id: pane.attachment_client_id.clone(),
-                            columns,
-                            lines,
-                            exited: pane.exited,
-                            exit_status: pane.exit_status,
-                            retained,
-                            // Filled in once the replacement exists to hold
-                            // an instance: `hand_over_agent_pipes`.
-                            agent_pipe: None,
-                            agent_pipe_instance: None,
-                        }
-                    })
-                    .collect(),
-            })
-            .collect(),
-    };
-    drop(sessions);
-    validate_handover_with_host(&daemon.pty_host, &handover)?;
-    Ok((executable, handover))
-}
-
 /// A pane's attachment in the form that crosses an exec.
 #[cfg(any(unix, windows))]
-pub(super) fn attachment_handover(attachment: &Attachment) -> crate::upgrade::AttachmentHandover {
+fn attachment_handover(attachment: &Attachment) -> crate::upgrade::AttachmentHandover {
     use crate::upgrade::{AttachmentHandover, SharedClientHandover};
     match attachment {
         Attachment::None => AttachmentHandover::None,
@@ -412,10 +59,288 @@ pub(super) fn attachment_handover(attachment: &Attachment) -> crate::upgrade::At
     }
 }
 
-/// Takes over the sessions the previous image left behind.
+/// The image that takes over: this daemon's own executable, refused while it
+/// is missing or cannot adopt a handover, so a refused upgrade has touched
+/// nothing.
+#[cfg(any(unix, windows))]
+fn replacement_executable(daemon: &Daemon) -> Result<PathBuf> {
+    let executable = daemon
+        .executable
+        .clone()
+        .context("this multiplexer does not know its own path, so it cannot be replaced")?;
+    anyhow::ensure!(
+        executable.is_file(),
+        "{} no longer exists, so this multiplexer cannot replace itself with it. Its sessions \
+         are untouched; rebuild or reinstall in place and try again.",
+        executable.display()
+    );
+    anyhow::ensure!(
+        crate::upgrade::replacement_accepts_handover(&executable)?,
+        "{} cannot take over this multiplexer's sessions, so it was not started",
+        executable.display()
+    );
+    Ok(executable)
+}
+
+/// What every upgrade settles before taking its handover: the image that
+/// takes over, and the scrollback still buffered in memory, written out.
 ///
-/// The descriptors are the same ones it held: the `execv` kept them open, so a
-/// pane is rebuilt around its existing terminal rather than being restarted.
+/// The flush has to come before the replacement exists. From then on the
+/// persistence directory is the replacement's to write, and a flush from this
+/// daemon would also rewrite the manifest under it — which a Windows daemon,
+/// still running beside its replacement, used to do on its way out (see
+/// `shut_down`). Output buffered after this point is not written to disk,
+/// which is also what a Unix `exec` does with it. What this daemon reads
+/// before the handover snapshots each pane's screen still reaches the
+/// replacement in that snapshot, and what it has not read yet waits in the
+/// terminal for the replacement; only what it reads after the snapshot misses
+/// the replacement's screen, as it always has on both platforms.
+#[cfg(any(unix, windows))]
+pub(super) fn prepare_replacement(daemon: &Daemon) -> Result<PathBuf> {
+    let executable = replacement_executable(daemon)?;
+    #[cfg(feature = "session-persistence")]
+    if let Some(persistence) = daemon.persistence.lock().as_mut() {
+        persistence
+            .flush_segments()
+            .context("flushing encrypted scrollback before replacing the daemon")?;
+    }
+    Ok(executable)
+}
+
+/// The handover of `sessions`, with the counters and policy the replacement
+/// continues from. The lifetime lock is left for the caller to attach, and on
+/// Windows each pane's agent pipe, which needs the replacement to exist.
+#[cfg(any(unix, windows))]
+pub(super) fn handover_of(daemon: &Daemon, sessions: &mut [Session]) -> crate::upgrade::Handover {
+    let now = std::time::Instant::now();
+    crate::upgrade::Handover {
+        version: crate::upgrade::HANDOVER_VERSION,
+        generation: daemon.catalog.lock().recover_poison().runner_id(),
+        next_session_id: daemon.next_session_id.load(Ordering::SeqCst),
+        next_pane_id: daemon.next_pane_id.load(Ordering::SeqCst),
+        retention: *daemon.retention.lock().recover_poison(),
+        recipient_grants: Some(lock_grants(daemon).clone()),
+        lifetime_lock: None,
+        sessions: sessions
+            .iter_mut()
+            .map(|session| crate::upgrade::SessionHandover {
+                id: session.id,
+                summary: session.summary.clone(),
+                state: session.state.clone(),
+                shared_state: session.shared_state.clone(),
+                keep: session.keep,
+                offered: session.offered,
+                owner: session.owner.map(|owner| owner.pid),
+                owner_started: session.owner.and_then(|owner| owner.started),
+                verifier: session
+                    .authentication
+                    .as_ref()
+                    .map(|authentication| authentication.verifier().to_owned()),
+                key_envelope: session.key_envelope.clone(),
+                failed_authentications: session.failed_authentications,
+                // A monotonic deadline means nothing in another image, so
+                // what is carried is how much of the window is left.
+                refuse_for: session
+                    .refuse_until
+                    .and_then(|until| until.checked_duration_since(now)),
+                sealed_to: session.sealed_to.clone(),
+                panes: session.panes.iter_mut().map(pane_handover).collect(),
+            })
+            .collect(),
+    }
+}
+
+/// One pane's part of the handover: its terminal as the platform carries it,
+/// and everything the replacement rebuilds the pane around.
+#[cfg(any(unix, windows))]
+fn pane_handover(pane: &mut Pane) -> crate::upgrade::PaneHandover {
+    let (columns, lines, retained) = snapshot_for_upgrade(pane);
+    crate::upgrade::PaneHandover {
+        id: pane.id,
+        #[cfg(unix)]
+        descriptor: std::os::fd::AsRawFd::as_raw_fd(pane.pty.file()),
+        #[cfg(windows)]
+        console_id: pane.console_id,
+        child_pid: pane.pty.child_pid(),
+        attachment: attachment_handover(&pane.attachment),
+        attachment_client_id: pane.attachment_client_id.clone(),
+        columns,
+        lines,
+        exited: pane.exited,
+        exit_status: pane.exit_status,
+        // Copied, not taken. Nothing before the replacement takes over is
+        // irreversible, and emptying the live ring here meant a refused
+        // upgrade had already destroyed the output it was protecting.
+        retained,
+        // Filled in once the replacement exists to hold an instance:
+        // `hand_over_agent_pipes`.
+        #[cfg(windows)]
+        agent_pipe: None,
+        #[cfg(windows)]
+        agent_pipe_instance: None,
+    }
+}
+
+/// A pane's terminal as the replacement reclaimed it, which is the part of
+/// adopting a pane that differs by platform.
+#[cfg(any(unix, windows))]
+pub(super) struct AdoptedTerminal {
+    pub(super) pty: tty::Pty,
+    #[cfg(windows)]
+    pub(super) child_events: tty::AttachedChildEvents,
+}
+
+/// Takes over the sessions the previous daemon handed over.
+///
+/// `claim` reclaims one pane's terminal; a failure abandons the adoption, as
+/// the replacement cannot serve a session it holds only part of. `release`
+/// lets go of what a session carried that is skipped because one with its id
+/// is already held: adopting it twice would leave the multiplexer holding two
+/// entries that no client could tell apart.
+#[cfg(any(unix, windows))]
+pub(super) fn adopt_sessions(
+    daemon: &Daemon,
+    handover: crate::upgrade::Handover,
+    mut claim: impl FnMut(&crate::upgrade::PaneHandover) -> Result<AdoptedTerminal>,
+    mut release: impl FnMut(&crate::upgrade::SessionHandover),
+) -> Result<usize> {
+    let retention = *daemon.retention.lock().recover_poison();
+    let mut sessions = daemon.sessions();
+    let now = std::time::Instant::now();
+    for mut session in handover.sessions {
+        if sessions.iter().any(|existing| existing.id == session.id) {
+            log::warn!("ignoring session {}, which is already held", session.id);
+            release(&session);
+            continue;
+        }
+        let panes = std::mem::take(&mut session.panes)
+            .into_iter()
+            .map(|pane| {
+                let terminal = claim(&pane)?;
+                Ok(adopted_pane(retention, pane, terminal))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        sessions.push(adopted_session(session, panes, now)?);
+    }
+    continue_ids_after(
+        daemon,
+        &sessions,
+        handover.next_session_id,
+        handover.next_pane_id,
+    );
+    Ok(sessions.len())
+}
+
+/// A pane rebuilt from its handover around the terminal the platform reclaimed
+/// for it.
+#[cfg(any(unix, windows))]
+fn adopted_pane(
+    retention: crate::retention::Retention,
+    pane: crate::upgrade::PaneHandover,
+    terminal: AdoptedTerminal,
+) -> Pane {
+    // Rebuilt at the size the pane is running at, then given the screen the
+    // previous image serialized for it.
+    let mut retained = retention.new_retained(pane.columns, pane.lines);
+    retained.seed(pane.retained);
+    Pane {
+        id: pane.id,
+        pty: terminal.pty,
+        #[cfg(windows)]
+        console_id: pane.console_id,
+        #[cfg(windows)]
+        child_events: terminal.child_events,
+        attachment: adopt_attachment(pane.attachment),
+        attachment_client_id: pane.attachment_client_id,
+        // The size the pane is actually running at, carried across so
+        // arbitration continues from what its viewers are showing. Restarting
+        // from a default silently resized every adopted pane.
+        size: TerminalSize {
+            columns: pane.columns,
+            lines: pane.lines,
+            cell_width: 0,
+            cell_height: 0,
+        },
+        retained,
+        // An upgrade cannot land mid-handover: the client that would be
+        // waiting for one is the client that asked for the upgrade.
+        handed_over: None,
+        handover_waiters: 0,
+        exited: pane.exited,
+        exit_status: pane.exit_status,
+        pending_input: Vec::new(),
+        clipboard_scanner: zclip::protocol::Scanner::default(),
+    }
+}
+
+/// A session rebuilt from its handover around `panes`, the ones adopted from
+/// it. `now` is when adoption started, which the rate-limit window resumes
+/// from.
+#[cfg(any(unix, windows))]
+fn adopted_session(
+    session: crate::upgrade::SessionHandover,
+    panes: Vec<Pane>,
+    now: std::time::Instant,
+) -> Result<Session> {
+    // The session's own id is authoritative. A previous image could have been
+    // handed a summary whose id disagreed with it (see `detach`), and letting
+    // that survive the upgrade would keep the session listed under one id
+    // while being looked up under another. Normalizing here is what lets an
+    // upgrade repair a session that had been corrupted.
+    let mut summary = session.summary;
+    summary.id = session.id;
+    Ok(Session {
+        id: session.id,
+        summary,
+        state: session.state,
+        shared_state: session.shared_state,
+        authentication: session
+            .verifier
+            .map(SessionAuthentication::adopt_verifier)
+            .transpose()?,
+        key_envelope: session.key_envelope,
+        failed_authentications: session.failed_authentications,
+        // Restored as a deadline again, from what was left of the window.
+        refuse_until: session.refuse_for.and_then(|left| now.checked_add(left)),
+        panes,
+        keep: session.keep,
+        offered: session.offered,
+        owner: adopt_owner(session.owner, session.owner_started),
+        sealed_to: session.sealed_to,
+    })
+}
+
+/// Moves the identifier counters past every session and pane now held.
+///
+/// Derived from what was actually adopted, not merely taken from the handover.
+/// A counter that lands at or below an existing identifier makes the next
+/// spawn reuse it, and two sessions sharing an id are indistinguishable to
+/// every client: they list identically, and attaching one is a coin toss.
+/// Trusting the handover alone let exactly that happen.
+#[cfg(any(unix, windows))]
+fn continue_ids_after(
+    daemon: &Daemon,
+    sessions: &[Session],
+    handover_session: u64,
+    handover_pane: u64,
+) {
+    let session_ids = sessions
+        .iter()
+        .map(|session| session.id)
+        .collect::<Vec<_>>();
+    let pane_ids = sessions
+        .iter()
+        .flat_map(|session| session.panes.iter())
+        .map(|pane| pane.id)
+        .collect::<Vec<_>>();
+    let (next_session_id, next_pane_id) =
+        next_ids_after(&session_ids, &pane_ids, handover_session, handover_pane);
+    daemon
+        .next_session_id
+        .store(next_session_id, Ordering::SeqCst);
+    daemon.next_pane_id.store(next_pane_id, Ordering::SeqCst);
+}
+
 /// The identifiers a resumed multiplexer must continue from.
 ///
 /// Kept separate so the rule is testable without a live handover: never at or
@@ -451,7 +376,7 @@ pub(super) fn next_ids_after(
 /// reconnected first, and the rest would be reading a terminal nobody was
 /// relaying.
 #[cfg(any(unix, windows))]
-pub(super) fn adopt_attachment(attachment: crate::upgrade::AttachmentHandover) -> Attachment {
+fn adopt_attachment(attachment: crate::upgrade::AttachmentHandover) -> Attachment {
     use crate::upgrade::AttachmentHandover;
     match attachment {
         AttachmentHandover::None => Attachment::None,
@@ -476,314 +401,6 @@ pub(super) fn adopt_owner(owner: Option<u32>, started: Option<u64>) -> Option<Pr
     })
 }
 
-#[cfg(unix)]
-pub(super) fn adopt_handover(
-    daemon: &Arc<Daemon>,
-    handover: crate::upgrade::Handover,
-) -> Result<usize> {
-    let retention = *daemon.retention.lock().unwrap();
-    let mut sessions = daemon.sessions.lock().unwrap();
-    let now = std::time::Instant::now();
-    for session in handover.sessions {
-        // Adopting one twice would leave the multiplexer holding two entries
-        // that no client could tell apart.
-        if sessions.iter().any(|existing| existing.id == session.id) {
-            log::warn!("ignoring session {}, which is already held", session.id);
-            continue;
-        }
-        // The session's own id is authoritative. A previous image could have
-        // been handed a summary whose id disagreed with it (see `detach`), and
-        // letting that survive the upgrade would keep the session listed under
-        // one id while being looked up under another. Normalizing here is what
-        // lets an upgrade repair a session that had been corrupted.
-        let mut summary = session.summary;
-        summary.id = session.id;
-        let mut panes = Vec::new();
-        for pane in session.panes {
-            // SAFETY: it was kept across the exec by the previous image, and is
-            // claimed here exactly once.
-            let descriptor = unsafe { crate::upgrade::claim_inherited_fd(pane.descriptor) }
-                .with_context(|| {
-                    format!("pane {}'s terminal did not survive the upgrade", pane.id)
-                })?;
-            // Reclaimed regardless of who was holding it. An `execv` does not
-            // change parentage, so every one of these shells is still this
-            // process's own child and is reaped here with `waitpid` — which is
-            // the whole reason the upgrade is a re-exec rather than a fresh
-            // process. Treating a held pane as though its child belonged to
-            // somebody else meant the daemon never reaped it (a zombie, and no
-            // exit ever reported) and read a dead pipe as though the process had
-            // ended (a false exit for a shell that was running fine).
-            let pty = tty::reclaim(descriptor, pane.child_pid)?;
-            // Rebuilt at the size the pane is running at, then given the screen
-            // the previous image serialized for it.
-            let mut retained = retention.new_retained(pane.columns, pane.lines);
-            retained.seed(pane.retained);
-            panes.push(Pane {
-                id: pane.id,
-                pty,
-                attachment: adopt_attachment(pane.attachment),
-                attachment_client_id: pane.attachment_client_id,
-                // The size the pane is actually running at, carried across so
-                // arbitration continues from what its viewers are showing.
-                // Restarting from a default silently resized every adopted pane.
-                size: TerminalSize {
-                    columns: pane.columns,
-                    lines: pane.lines,
-                    cell_width: 0,
-                    cell_height: 0,
-                },
-                retained,
-                // An upgrade cannot land mid-handover: the client that would be
-                // waiting for one is the client that asked for the upgrade.
-                handed_over: None,
-                handover_waiters: 0,
-                exited: pane.exited,
-                exit_status: pane.exit_status,
-                pending_input: Vec::new(),
-                clipboard_scanner: zclip::protocol::Scanner::default(),
-            });
-        }
-        sessions.push(Session {
-            id: session.id,
-            summary,
-            state: session.state,
-            shared_state: session.shared_state,
-            authentication: session
-                .verifier
-                .map(SessionAuthentication::adopt_verifier)
-                .transpose()?,
-            key_envelope: session.key_envelope,
-            failed_authentications: session.failed_authentications,
-            // Restored as a deadline again, from what was left of the window.
-            refuse_until: session.refuse_for.and_then(|left| now.checked_add(left)),
-            panes,
-            keep: session.keep,
-            offered: session.offered,
-            owner: adopt_owner(session.owner, session.owner_started),
-            sealed_to: session.sealed_to,
-        });
-    }
-    // Derived from what was actually adopted, not merely taken from the
-    // handover. A counter that lands at or below an existing identifier makes
-    // the next spawn reuse it, and two sessions sharing an id are
-    // indistinguishable to every client: they list identically, and attaching
-    // one is a coin toss. Trusting the handover alone let exactly that happen.
-    let session_ids = sessions
-        .iter()
-        .map(|session| session.id)
-        .collect::<Vec<_>>();
-    let pane_ids = sessions
-        .iter()
-        .flat_map(|session| session.panes.iter())
-        .map(|pane| pane.id)
-        .collect::<Vec<_>>();
-    let (next_session_id, next_pane_id) = next_ids_after(
-        &session_ids,
-        &pane_ids,
-        handover.next_session_id,
-        handover.next_pane_id,
-    );
-    daemon
-        .next_session_id
-        .store(next_session_id, Ordering::SeqCst);
-    daemon.next_pane_id.store(next_pane_id, Ordering::SeqCst);
-    Ok(sessions.len())
-}
-
-#[cfg(windows)]
-pub(super) fn adopt_handover(
-    daemon: &Arc<Daemon>,
-    handover: crate::upgrade::Handover,
-) -> Result<usize> {
-    let mut sessions = daemon.sessions.lock().unwrap();
-    let now = Instant::now();
-    for session in handover.sessions {
-        if sessions.iter().any(|existing| existing.id == session.id) {
-            log::warn!("ignoring session {}, which is already held", session.id);
-            for pane in &session.panes {
-                super::agent_pipe::discard(pane.agent_pipe_instance);
-            }
-            continue;
-        }
-        let mut summary = session.summary;
-        summary.id = session.id;
-        let mut panes = Vec::new();
-        for pane in session.panes {
-            let (child_pid, handles) = daemon
-                .pty_host
-                .handles(pane.console_id, std::process::id())?;
-            anyhow::ensure!(
-                pane.child_pid == 0 || child_pid == 0 || pane.child_pid == child_pid,
-                "pseudoconsole {} changed children during the upgrade",
-                pane.console_id
-            );
-            let mut handles = crate::transport::claim_duplicated(&handles);
-            anyhow::ensure!(
-                handles.len() == 2,
-                "pseudoconsole {} did not return two pipe handles",
-                pane.console_id
-            );
-            let conin = handles.remove(1);
-            let conout = handles.remove(0);
-            let (pty, child_events) = tty::attach(conout, conin, child_pid)
-                .context("attaching an adopted pseudoconsole to the daemon")?;
-            // The previous daemon's listener dies with it; the shell still has
-            // this pane's pipe name, which the instance it passed keeps held.
-            // What the pane fell back to did not survive the handover, so this
-            // daemon's own agent stands in.
-            let agent_pipe = pane.agent_pipe.map(PathBuf::from);
-            if let Some(name) = agent_pipe {
-                super::agent_pipe::adopt(
-                    pane.id,
-                    name,
-                    pane.agent_pipe_instance,
-                    std::env::var_os("SSH_AUTH_SOCK")
-                        .filter(|path| !path.is_empty())
-                        .map(PathBuf::from),
-                );
-            }
-            let retention = *daemon.retention.lock().unwrap();
-            let mut retained = retention.new_retained(pane.columns, pane.lines);
-            retained.seed(pane.retained);
-            panes.push(Pane {
-                id: pane.id,
-                pty,
-                console_id: pane.console_id,
-                child_events,
-                attachment: adopt_attachment(pane.attachment),
-                attachment_client_id: pane.attachment_client_id,
-                size: TerminalSize {
-                    columns: pane.columns,
-                    lines: pane.lines,
-                    cell_width: 0,
-                    cell_height: 0,
-                },
-                retained,
-                handed_over: None,
-                handover_waiters: 0,
-                exited: pane.exited,
-                exit_status: pane.exit_status,
-                pending_input: Vec::new(),
-                clipboard_scanner: zclip::protocol::Scanner::default(),
-            });
-        }
-        sessions.push(Session {
-            id: session.id,
-            summary,
-            state: session.state,
-            shared_state: session.shared_state,
-            authentication: session
-                .verifier
-                .map(SessionAuthentication::adopt_verifier)
-                .transpose()?,
-            key_envelope: session.key_envelope,
-            failed_authentications: session.failed_authentications,
-            refuse_until: session.refuse_for.and_then(|left| now.checked_add(left)),
-            panes,
-            keep: session.keep,
-            offered: session.offered,
-            owner: adopt_owner(session.owner, session.owner_started),
-            sealed_to: session.sealed_to,
-        });
-    }
-    let session_ids = sessions
-        .iter()
-        .map(|session| session.id)
-        .collect::<Vec<_>>();
-    let pane_ids = sessions
-        .iter()
-        .flat_map(|session| session.panes.iter())
-        .map(|pane| pane.id)
-        .collect::<Vec<_>>();
-    let (next_session_id, next_pane_id) = next_ids_after(
-        &session_ids,
-        &pane_ids,
-        handover.next_session_id,
-        handover.next_pane_id,
-    );
-    daemon
-        .next_session_id
-        .store(next_session_id, Ordering::SeqCst);
-    daemon.next_pane_id.store(next_pane_id, Ordering::SeqCst);
-    Ok(sessions.len())
-}
-
-/// Reaps children and tells whoever is holding their terminals.
-///
-/// Windows has no `SIGCHLD`: each PTY carries its own exit watcher, which
-/// signals when its process ends, so this polls those watchers rather than
-/// waiting on a signal.
-#[cfg(windows)]
-pub(super) fn start_reaper(daemon: Arc<Daemon>) -> Result<()> {
-    spawn_worker("zmux reaper", move || {
-        let daemon = daemon.clone();
-        Box::new(move || windows_reaper_loop(daemon))
-    });
-    Ok(())
-}
-
-#[cfg(windows)]
-pub(super) fn windows_reaper_loop(daemon: Arc<Daemon>) {
-    loop {
-        match daemon.pty_host.reap() {
-            Ok(exits) if !exits.is_empty() => {
-                let mut sessions = daemon.sessions.lock().unwrap();
-                for exit in exits {
-                    let Some(pane) = sessions
-                        .iter_mut()
-                        .flat_map(|session| session.panes.iter_mut())
-                        .find(|pane| pane.console_id == exit.console_id)
-                    else {
-                        continue;
-                    };
-                    let result = match exit.exit_code {
-                        Some(code) => pane.child_events.report_exit(code),
-                        None => pane.child_events.report_status_unavailable(),
-                    };
-                    if let Err(error) = result {
-                        log::debug!(
-                            "could not report exit for pseudoconsole {}: {error}",
-                            exit.console_id
-                        );
-                    }
-                }
-            }
-            Ok(_) => {}
-            Err(error) => log::warn!("could not collect pseudoconsole exits: {error:#}"),
-        }
-        let mut exits = Vec::new();
-        {
-            let mut sessions = daemon.sessions.lock().unwrap();
-            for session in sessions.iter_mut() {
-                for pane in session.panes.iter_mut() {
-                    if pane.exited {
-                        continue;
-                    }
-                    if let Some(exit) = observe_pane_exit(session.id, pane) {
-                        exits.push(exit);
-                    }
-                }
-            }
-        }
-        if !exits.is_empty() {
-            wake_drain(&daemon);
-        }
-        for (session_id, pane_id, raw_status, input_sent) in exits {
-            broadcast(
-                &daemon,
-                &Event::PaneExited {
-                    session_id,
-                    pane_id,
-                    raw_status,
-                    input_sent,
-                },
-            );
-        }
-        thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
-
 /// How a terminal reaches the client, which differs by platform.
 ///
 /// Unix attaches the descriptor to the message itself. Windows has no such
@@ -795,85 +412,6 @@ pub(super) struct Handover {
     #[cfg(windows)]
     pub(super) attachments: Vec<()>,
     pub(super) values: Vec<i64>,
-}
-
-#[cfg(unix)]
-pub(super) fn handover_handles(
-    _daemon: &Daemon,
-    pane: &Pane,
-    _client_process_id: u32,
-) -> Result<Handover> {
-    // SAFETY: the borrow lives only until the message has been sent, well
-    // inside the lifetime of the PTY the daemon is holding.
-    let descriptor = unsafe {
-        std::os::fd::BorrowedFd::borrow_raw(std::os::fd::AsRawFd::as_raw_fd(pane.pty.file()))
-    };
-    Ok(Handover {
-        attachments: vec![descriptor],
-        values: Vec::new(),
-    })
-}
-
-#[cfg(windows)]
-pub(super) fn handover_handles(
-    daemon: &Daemon,
-    pane: &Pane,
-    client_process_id: u32,
-) -> Result<Handover> {
-    anyhow::ensure!(
-        client_process_id != 0,
-        "the client did not say which process to hand its terminal to"
-    );
-    let (_, values) = daemon
-        .pty_host
-        .handles(pane.console_id, client_process_id)?;
-    Ok(Handover {
-        attachments: Vec::new(),
-        values,
-    })
-}
-
-/// Stops the Windows daemon reader at the same boundary at which the console
-/// handles are handed to an exclusive client. The reader's internal pipe may
-/// already contain bytes after its last drain pass, so retain and relay those
-/// bytes before the descriptor changes owner.
-#[cfg(windows)]
-pub(super) fn pause_pane_reader(pane: &mut Pane) -> Result<()> {
-    pane.pty
-        .pause_reader()
-        .context("pausing the Windows pseudoconsole reader")?;
-    let mut buffer = [0; 16 * 1024];
-    loop {
-        let read = pane.pty.read_buffered(&mut buffer);
-        if read == 0 {
-            break;
-        }
-        let visible = filter_clipboard_output(pane, &buffer[..read]);
-        pane.retained.push(&visible);
-        record_handover_output(pane, &visible);
-        relay_output(pane, &visible);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-pub(super) fn pause_pane_reader(_pane: &mut Pane) -> Result<()> {
-    Ok(())
-}
-
-/// Reads whatever a detached pane has produced.
-///
-/// The two platforms expose different things to read: a Unix PTY is one
-/// descriptor, while a pseudoconsole is an unblocked pipe with its own buffer.
-#[cfg(unix)]
-pub(super) fn read_pane(pty: &mut tty::Pty, buffer: &mut [u8]) -> std::io::Result<usize> {
-    pty.file().read(buffer)
-}
-
-#[cfg(windows)]
-pub(super) fn read_pane(pty: &mut tty::Pty, buffer: &mut [u8]) -> std::io::Result<usize> {
-    use alacritty_terminal::tty::EventedReadWrite as _;
-    Ok(pty.reader().try_read(buffer))
 }
 
 /// This process's own executable, if it can be established.

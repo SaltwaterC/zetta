@@ -1,3 +1,6 @@
+//! Drawing the tab bar: each tab's title, icons and remote-session stripe, the
+//! layout of the tab row, and dragging tabs to reorder them.
+
 use super::*;
 use crate::command_palette::action_available_in_launch_mode;
 use crate::rename::resolve_tab_title;

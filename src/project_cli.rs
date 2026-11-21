@@ -1,3 +1,6 @@
+//! `zetta project`: opening a project or one of its managed worktrees, and the
+//! subcommands that inspect the registry without a window.
+
 use std::{
     ffi::OsString,
     fs,
@@ -6,7 +9,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 
-use crate::startup::format_help_table;
+use crate::startup::{format_help_table, set_once};
 use crate::{
     config::Config,
     project::{
@@ -74,13 +77,12 @@ fn parse_path_command(arguments: &[OsString]) -> Result<Option<PathBuf>> {
     while let Some(argument) = arguments.next() {
         match argument.to_string_lossy().as_ref() {
             "--path" | "-p" => {
-                anyhow::ensure!(path.is_none(), "--path may only be specified once");
-                path = Some(
-                    arguments
+                set_once(&mut path, "--path", || {
+                    Ok(arguments
                         .next()
                         .context("--path requires a directory")?
-                        .into(),
-                );
+                        .into())
+                })?;
             }
             value if value.starts_with('-') => {
                 anyhow::bail!("unknown project option {value:?}")

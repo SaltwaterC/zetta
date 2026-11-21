@@ -1,4 +1,9 @@
+//! Performance measurement: the `benchmark` workloads, the frame and CPU
+//! metrics they collect, and the versioned JSON report `--profile-report`
+//! writes.
+
 use super::*;
+use zetta_sync::RecoverPoison as _;
 
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
 
@@ -378,7 +383,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.tabs.get(self.active_tab) else {
+        let Some(tab) = self.current_tab() else {
             return;
         };
         let active_pane_id = tab.active_pane;
@@ -389,8 +394,7 @@ impl Zetta {
         let mut pane_ids = vec![active_pane_id];
         let mut added_pane_ids = Vec::with_capacity(PERFORMANCE_PANE_STRESS_COUNT - 1);
         while pane_ids.len() < PERFORMANCE_PANE_STRESS_COUNT {
-            let pane_id = self.next_pane_id;
-            self.next_pane_id += 1;
+            let pane_id = take_next_id(&mut self.next_pane_id);
             pane_ids.push(pane_id);
             added_pane_ids.push(pane_id);
         }
@@ -443,8 +447,7 @@ impl Zetta {
         enable_frame_tracing();
         let generation = self.performance_overlay_generation;
         let (pane_count, minimized_pane_count) = self
-            .tabs
-            .get(self.active_tab)
+            .current_tab()
             .map(|tab| (tab.panes.len(), tab.minimized_panes.len()))
             .unwrap_or_default();
         self.performance_overlay = Some(PerformanceOverlay::new(
@@ -486,9 +489,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         let Some(overlay) = self.performance_overlay.as_mut() else {
-            *status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Err(
+            *status.lock().recover_poison() = Some(Err(
                 "performance overlay was not enabled before report capture".to_owned(),
             ));
             quit_zetta_process(cx);
@@ -509,9 +510,7 @@ impl Zetta {
                 })
                 .unwrap_or_else(Err)
                 .map_err(|error| format!("{error:#}"));
-            *status
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
+            *status.lock().recover_poison() = Some(result);
             cx.update(quit_zetta_process);
         })
         .detach();

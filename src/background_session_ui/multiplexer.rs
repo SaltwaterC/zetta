@@ -907,8 +907,7 @@ impl Zetta {
         let restored_panes = restored_pane_metadata(&state, &summary);
         let restored_metadata = self.prepare_restored_panes(restored_panes.clone(), policy);
         let restored_profiles = self.restored_profiles(&restored_panes, &restored_metadata);
-        let tab_id = self.next_tab_id;
-        self.next_tab_id += 1;
+        let tab_id = take_next_id(&mut self.next_tab_id);
         let mut tab = state.clone().into_tab_by_pane(tab_id, |routing_id, name| {
             restored_profiles
                 .get(&routing_id)

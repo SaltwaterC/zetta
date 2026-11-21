@@ -1,3 +1,6 @@
+//! The settings dialog's frame: its page tabs, the actions in its header, and
+//! the region each page renders into.
+
 use super::*;
 
 use crate::startup::keymap_keystroke_display;

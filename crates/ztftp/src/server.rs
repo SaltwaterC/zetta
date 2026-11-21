@@ -7,10 +7,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    mpsc::{self, Receiver, Sender},
+    mpsc::{self, Sender},
 };
 use std::thread;
 use std::time::{Duration, Instant};
+use zetta_sync::RecoverPoison as _;
+
+use crate::log_reader::LogReader;
 
 use anyhow::{Context as _, Result};
 use time::{OffsetDateTime, macros::format_description};
@@ -23,7 +26,6 @@ use super::{
 };
 
 const SERVER_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const LOG_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_CONCURRENT_TRANSFERS: usize = 32;
 
 pub struct OpenTftpServer {
@@ -66,48 +68,11 @@ pub fn start_server(root: &Path, port: u16, writable: bool) -> Result<OpenTftpSe
         .context("starting TFTP server worker")?;
 
     Ok(OpenTftpServer {
-        reader: Box::new(LogReader {
-            receiver: log_rx,
-            pending: Vec::new(),
-            offset: 0,
-        }),
+        reader: Box::new(LogReader::new(log_rx, "no TFTP log data")),
         writer: Box::new(ServerControl { active }),
         address,
         root,
     })
-}
-
-struct LogReader {
-    receiver: Receiver<Vec<u8>>,
-    pending: Vec<u8>,
-    offset: usize,
-}
-
-impl Read for LogReader {
-    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
-        if output.is_empty() {
-            return Ok(0);
-        }
-        if self.offset == self.pending.len() {
-            match self.receiver.recv_timeout(LOG_POLL_INTERVAL) {
-                Ok(message) => {
-                    self.pending = message;
-                    self.offset = 0;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "no TFTP log data",
-                    ));
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(0),
-            }
-        }
-        let count = output.len().min(self.pending.len() - self.offset);
-        output[..count].copy_from_slice(&self.pending[self.offset..self.offset + count]);
-        self.offset += count;
-        Ok(count)
-    }
 }
 
 struct ServerControl {
@@ -164,15 +129,12 @@ fn register_active_request(
 ) -> bool {
     active_requests
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recover_poison()
         .insert(request.clone())
 }
 
 fn remove_active_request(active_requests: &Mutex<HashSet<RequestKey>>, request: &RequestKey) {
-    active_requests
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(request);
+    active_requests.lock().recover_poison().remove(request);
 }
 
 fn server_loop(

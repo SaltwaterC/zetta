@@ -1,4 +1,7 @@
-#![allow(non_snake_case)]
+#![expect(
+    non_snake_case,
+    reason = "field and method names are fixed by the Windows Terminal handoff ABI"
+)]
 // Windows Terminal's handoff ABI fixes several parameter lists that exceed
 // Clippy's general-purpose argument-count threshold: the two `EstablishPtyHandoff`
 // vtable entries, the `establish_*` implementations behind them, and the two
@@ -24,6 +27,7 @@ use std::{
     thread,
     time::Duration,
 };
+use zetta_sync::RecoverPoison as _;
 
 use anyhow::{Context as _, Result};
 use futures::channel::mpsc::UnboundedSender;
@@ -92,7 +96,6 @@ static JUMP_LIST_UPDATE: Mutex<()> = Mutex::new(());
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-#[allow(non_snake_case)]
 struct TerminalStartupInfo {
     pszTitle: *mut u16,
     pszIconPath: *mut u16,
@@ -112,18 +115,18 @@ struct TerminalStartupInfo {
 ///
 /// Everything but `title` is decoded because the ABI sends it and a partial
 /// decode would desynchronize the rest, not because Zetta applies it yet —
-/// hence the per-field allows rather than one on the struct, so a field added
+/// hence the per-field expects rather than one on the struct, so a field added
 /// later still has to say why it is unread.
 #[derive(Clone, Debug)]
 pub(crate) struct HandoffStartupMetadata {
     pub(crate) title: Option<String>,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
     pub(crate) icon_path: Option<String>,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
     pub(crate) icon_index: i32,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
     pub(crate) geometry: Option<(u32, u32, u32, u32)>,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
     pub(crate) show_window: u16,
 }
 
@@ -192,11 +195,11 @@ pub(crate) fn monitor_handoff_child(
 /// itself rather than stored state.
 struct WindowsHandoffControl {
     signal: OwnedHandle,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "held to keep the console open, never read")]
     reference: OwnedHandle,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "held to keep the console open, never read")]
     server: OwnedHandle,
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "held to keep the console open, never read")]
     client: OwnedHandle,
     signal_lock: Mutex<()>,
 }
@@ -211,10 +214,7 @@ impl PtyControl for WindowsHandoffControl {
         let bytes = unsafe {
             std::slice::from_raw_parts(packet.as_ptr().cast::<u8>(), std::mem::size_of_val(&packet))
         };
-        let _lock = self
-            .signal_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _lock = self.signal_lock.lock().recover_poison();
         if let Err(error) =
             unsafe { WriteFile(HANDLE(self.signal.as_raw_handle()), Some(bytes), None, None) }
         {
@@ -363,7 +363,6 @@ impl TerminalHandoff {
     }
 }
 
-#[allow(non_snake_case)]
 impl ITerminalHandoff_Impl for TerminalHandoff_Impl {
     unsafe fn EstablishPtyHandoff(
         &self,
@@ -378,7 +377,6 @@ impl ITerminalHandoff_Impl for TerminalHandoff_Impl {
     }
 }
 
-#[allow(non_snake_case)]
 impl ITerminalHandoff2_Impl for TerminalHandoff_Impl {
     unsafe fn EstablishPtyHandoff(
         &self,
@@ -402,7 +400,6 @@ impl ITerminalHandoff2_Impl for TerminalHandoff_Impl {
     }
 }
 
-#[allow(non_snake_case)]
 impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
     unsafe fn EstablishPtyHandoff(
         &self,
@@ -1093,9 +1090,7 @@ pub(crate) fn update_profile_jump_list(profiles: Vec<Profile>, hidden_profiles: 
     if let Err(error) = thread::Builder::new()
         .name("zetta-jump-list".to_owned())
         .spawn(move || {
-            let _update = JUMP_LIST_UPDATE
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _update = JUMP_LIST_UPDATE.lock().recover_poison();
             if generation != JUMP_LIST_GENERATION.load(Ordering::Relaxed) {
                 return;
             }

@@ -1,3 +1,6 @@
+//! Project commands: the named commands a project file registers, validated and
+//! bounded in size, and the command-line form that invokes one.
+
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,

@@ -1,3 +1,7 @@
+//! The cooked-mode line editor: what `ReadConsole` does with keys while line
+//! input is on, from editing and history to its popups and the wakeup
+//! characters cmd.exe completes with.
+
 // Protocol/native call sequences derived from Microsoft Terminal.
 // Copyright (c) Microsoft Corporation. Licensed under the MIT license;
 // see LICENSE-MIT-Microsoft for the retained permission notice.

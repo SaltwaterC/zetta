@@ -1,3 +1,7 @@
+//! Reading and writing what the settings dialog edits: the configuration, the
+//! keymap, pane templates and profiles, one submodule each, and the pages they
+//! belong to.
+
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
