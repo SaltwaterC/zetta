@@ -19,6 +19,11 @@ ZOSH_CLIENT ?= $(ZOSH)
 ZOSH_SERVER ?= $(ZOSH)
 X11 ?= 0
 RELEASE ?= 0
+# Linux: whether `make install` grants the TFTP server cap_net_bind_service.
+# Left empty, a root install grants it and a user-local install only checks
+# for it, so installing never asks for a sudo password; set it to 1 to grant
+# it on a user-local install too (through sudo), or 0 to skip the step.
+SETCAP ?=
 
 ifneq ($(OS),Windows_NT)
 UNAME_S := $(shell uname -s)
@@ -265,7 +270,8 @@ WINDOWS_ZMUX_UPGRADE_ARGS := $(if $(call tool_enabled,$(ZMUX)), -UpgradeMux,)
 	clippy-platforms clippy-features clippy-linux clippy-windows clippy-macos \
 	can-check-linux can-check-windows can-check-macos conformance-windows \
 	validate-windows \
-	install install-binary install-capabilities install-assets install-user-path uninstall \
+	install install-binary install-capabilities check-capabilities install-assets \
+	install-user-path uninstall \
 	uninstall-binary uninstall-assets uninstall-user-path refresh-desktop-caches upgrade-mux clean
 
 all: fmt lint test build
@@ -780,6 +786,8 @@ install-binary:
 
 install-capabilities:
 
+check-capabilities:
+
 install-assets:
 	powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1 -Action InstallShortcut
 
@@ -926,6 +934,8 @@ endif
 
 install-capabilities:
 
+check-capabilities:
+
 install-user-path:
 ifeq ($(IS_ROOT),)
 ifeq ($(DESTDIR),)
@@ -987,7 +997,7 @@ install:
 	fi
 	$(MAKE) install-binary
 	$(MAKE) upgrade-mux
-	$(MAKE) install-capabilities
+	$(if $(LINUX_CAPABILITIES_STEP),$(MAKE) $(LINUX_CAPABILITIES_STEP))
 	$(MAKE) install-assets
 	$(MAKE) install-user-path
 
@@ -1105,11 +1115,19 @@ else
 endif
 endif
 
+# Which of the two targets below `make install` runs; see SETCAP.
+ifeq ($(strip $(SETCAP)),)
+LINUX_CAPABILITIES_STEP := $(if $(IS_ROOT),install-capabilities,check-capabilities)
+else ifneq ($(call tool_enabled,$(SETCAP)),)
+LINUX_CAPABILITIES_STEP := install-capabilities
+else
+LINUX_CAPABILITIES_STEP :=
+endif
+
 # Grants cap_net_bind_service so the TFTP server can bind port 69. The
 # installed binary does it (`zetta tftp setcap`): it checks first, and only
-# setcap runs as root, through sudo, so a user-local install no longer has to
-# run as root to get it. A root install fails if the grant fails, as before; a
-# user-local one that cannot grant it (no terminal, sudo declined) is still
+# setcap runs as root, through sudo. A root install fails if the grant fails;
+# a user-local one that cannot grant it (no terminal, sudo declined) is still
 # installed and says how to grant it later.
 install-capabilities:
 	@if [ "$$(uname -s)" = "Linux" ] && [ -n "$(call tool_enabled,$(TFTP_SERVER))" ]; then \
@@ -1127,6 +1145,14 @@ install-capabilities:
 					echo "Zetta is installed, but its TFTP server cannot bind port 69 until you run: zetta tftp setcap" >&2; \
 			fi; \
 		fi; \
+	fi
+
+# What a user-local `make install` runs instead: it reports a missing grant
+# and never asks for sudo, so installing does not stop at a password prompt.
+check-capabilities:
+	@if [ "$$(uname -s)" = "Linux" ] && [ -n "$(call tool_enabled,$(TFTP_SERVER))" ] && [ -z "$(DESTDIR)" ]; then \
+		"$(BINDIR)/zetta" tftp setcap --check >/dev/null 2>&1 || \
+			echo "The TFTP server cannot bind port 69 until you run: zetta tftp setcap (or install with SETCAP=1)"; \
 	fi
 
 install-user-path:

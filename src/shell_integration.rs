@@ -52,8 +52,17 @@ impl ShellIntegration {
         } else {
             ""
         };
+        // Fish adds a second `complete -c` source rather than replacing the
+        // first, so the lazy loader would stay registered beside the code under
+        // test and source whatever `zetta init fish --completions` on PATH
+        // prints: the installed binary's completions, not these.
+        let loaded = if self == Self::Fish {
+            "set -g __zetta_completions_loaded 1\n"
+        } else {
+            ""
+        };
         format!(
-            "{}\n{initialize}{}",
+            "{loaded}{}\n{initialize}{}",
             self.script(),
             self.completion_script()
         )

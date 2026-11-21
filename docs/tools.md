@@ -136,7 +136,8 @@ home directory or a checkout.
 
 Binding port 69 may require privileges or firewall permission. On Linux, run
 `zetta tftp setcap` to grant the installed binaries only the required
-`cap_net_bind_service` capability; `make install` runs it for you, and the
+`cap_net_bind_service` capability. A root `make install` grants it, and a
+user-local one only reports that it is missing unless run with `SETCAP=1`; the
 [installation guide](installation.md) explains when it asks for `sudo`. TFTP moves to a
 dynamic UDP port after the initial request, so firewalls must permit related
 transfer traffic.

@@ -430,18 +430,27 @@ installed binaries. Plain `make` builds debug executables; it does not refresh
 
 The TFTP servers need the `cap_net_bind_service` capability to bind UDP port
 69: `zetta` for server panes, and `ztftp` for `zetta tftp server`. Installing
-replaces both files, which drops a capability granted earlier, so every Linux
-`make install` runs `zetta tftp setcap` after copying them. It checks both
-binaries and does nothing when they already have the capability, or when
+replaces both files, which drops a capability granted earlier, so it has to be
+granted again after each install. `zetta tftp setcap` does that: it checks
+both binaries and does nothing when they already have the capability, or when
 `net.ipv4.ip_unprivileged_port_start` already lets every user bind port 69.
 Otherwise it runs `sudo setcap cap_net_bind_service=+ep` on exactly those two
-files, so a user-local install asks for a password only for that step and is
-not run as root. Without a terminal to ask on, or if the grant is declined,
-the install still succeeds and prints the command to run later:
+files.
+
+A user-local `make install` never asks for a password: it only checks, and if
+the capability is missing it says so and leaves the TFTP server unable to bind
+port 69 until you grant it. A root install grants it, since root needs no
+`sudo` for it. The `SETCAP` variable changes that: `SETCAP=1` grants it on a
+user-local install too, through `sudo`, and `SETCAP=0` skips the step on
+either. A user-local install that cannot grant it, because there is no
+terminal to ask on or the grant is declined, still succeeds and prints the
+command to run later.
 
 ```sh
-zetta tftp setcap          # grant it if missing
-zetta tftp setcap --check  # report only; exit 1 when it is missing
+make install RELEASE=1             # user-local; reports a missing capability
+make install RELEASE=1 SETCAP=1    # user-local; grants it through sudo
+zetta tftp setcap                  # grant it later, if missing
+zetta tftp setcap --check          # report only; exit 1 when it is missing
 ```
 
 `setcap` comes from `libcap2-bin` on Debian and Ubuntu, `libcap` on Fedora and

@@ -99,8 +99,13 @@ function __zetta_tree_complete --argument-names node
             end
         end
         __zetta_tree_values $operand_kind $current $config
-        if test $ended = 0; and contains -- $operand_kind nothing any
-            __zetta_tree_options $node $given $used
+        # Fish matches a typed word anywhere in a candidate, and shows those
+        # matches only when nothing starts with the word, so a word that is
+        # not an option yet can still name one: `a` finds `--allow-failure`.
+        if test $ended = 0
+            if contains -- $operand_kind nothing any; or test -n "$current"
+                __zetta_tree_options $node $given $used
+            end
         end
     end
 end
