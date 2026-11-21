@@ -128,20 +128,35 @@ fn wait_command_process(
         .build_std_command(Some(command[0].clone()), &command[1..]);
     #[cfg(unix)]
     if !is_terminal_foreground {
-        use std::os::unix::process::CommandExt as _;
-        // SAFETY: `setsid` is async-signal-safe and only affects this
-        // about-to-be-replaced child's own session; nothing else is read,
-        // written, or allocated.
-        unsafe {
-            child.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        detached_from_terminal(&mut child);
     }
     child
+}
+
+/// Starts `command` in a session of its own, so it has no controlling
+/// terminal: a shell it runs leaves job control off and finds `$TTY` empty.
+///
+/// Tests that drive real shells use it too. An interactive Bash that inherits
+/// the terminal `make test` runs in takes that terminal's foreground, or
+/// stops the whole job with SIGTTIN when a parallel one already has; and zsh
+/// runs `preexec` for every line it reads from a pipe, so a piped integration
+/// script writes its OSC 133 marks into that terminal.
+#[cfg(unix)]
+pub(crate) fn detached_from_terminal(
+    command: &mut std::process::Command,
+) -> &mut std::process::Command {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: `setsid` is async-signal-safe and only affects this
+    // about-to-be-replaced child's own session; nothing else is read,
+    // written, or allocated.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        })
+    }
 }
 
 /// Whether this process's stdin is a controlling terminal on which this

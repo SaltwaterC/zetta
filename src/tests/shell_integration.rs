@@ -176,5 +176,8 @@ pub(super) fn clean_shell_command(program: impl AsRef<std::ffi::OsStr>) -> std::
         .env_remove("ZETTA_PANE_ROUTING_ID")
         .env_remove("ZETTA_NO_MUX")
         .env_remove("__ZETTA_COMMAND_MARKER_NONCE");
+    // Nor let it reach the terminal the tests were started from.
+    #[cfg(unix)]
+    crate::startup::detached_from_terminal(&mut command);
     command
 }

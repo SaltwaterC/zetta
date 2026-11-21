@@ -748,7 +748,7 @@ fn run_bash_prompt_command(layer: PosixLayer, rc: &str, input: &str) -> String {
     let directory = tempfile::tempdir().unwrap();
     let rc_path = directory.path().join("bashrc");
     std::fs::write(&rc_path, rc).unwrap();
-    let mut child = Command::new("bash")
+    let mut child = crate::startup::detached_from_terminal(&mut Command::new("bash"))
         .args(["--noprofile", "--rcfile"])
         .arg(&rc_path)
         .arg("-i")
@@ -873,7 +873,7 @@ fn run_wsl_bash(profile: &str, input: &str) -> String {
         format!("#!/bin/sh\ncat '{}'\n", integration.display()),
     );
 
-    let mut child = Command::new("/bin/sh")
+    let mut child = crate::startup::detached_from_terminal(&mut Command::new("/bin/sh"))
         .args(["-c", wsl_cwd_tracker(), "zetta-wsl-cwd"])
         .current_dir(&home)
         .env_clear()

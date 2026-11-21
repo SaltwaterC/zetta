@@ -83,6 +83,8 @@ pub(crate) use arg_parsing::{
 #[cfg(not(feature = "tftp-client"))]
 pub(crate) use cli_help::{TftpCommand, parse_tftp_args, tftp_help};
 pub(crate) use cli_help::{command_help, format_help_table};
+#[cfg(all(unix, test))]
+pub(crate) use cli_modes::detached_from_terminal;
 #[cfg(test)]
 pub(crate) use keybindings::RENAME_TAB_KEYBINDING;
 pub(crate) use keybindings::{
