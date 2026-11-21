@@ -673,6 +673,9 @@ fn unavailable_multiplexer_starts_a_local_terminal(cx: &mut gpui::TestAppContext
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         terminal::terminal_settings::TerminalSettings::init(cx);
     });
+    // This test starts a real shell, whose pty threads deliver its output
+    // whenever it arrives rather than when the test scheduler runs them.
+    cx.executor().allow_parking();
     let (zetta, cx) = cx.add_window_view(|window, cx| {
         let mut config = Config::defaults(None, None);
         config.profiles.clear();
@@ -706,6 +709,17 @@ fn unavailable_multiplexer_starts_a_local_terminal(cx: &mut gpui::TestAppContext
         assert!(zetta.mux_panes.mux_pane_id(pane.id).is_none());
         assert!(!zetta.no_mux, "later launches must still retry the daemon");
     });
+    // Join the pty loop, and the parser thread it owns, before teardown. Left
+    // running, the shell's output can wake the terminal's event task after
+    // the scheduler has finished the test, which panics on the parser thread
+    // and aborts the whole test binary.
+    let terminal = zetta.read_with(cx, |zetta, _| {
+        let pane = zetta.tabs.last().unwrap().active_pane().unwrap();
+        pane.terminal.clone().unwrap()
+    });
+    terminal
+        .update(cx, |terminal, _| terminal.stop_pty_loop())
+        .unwrap();
 }
 
 #[cfg(feature = "zmux")]
