@@ -133,14 +133,18 @@ impl RemoteTransport {
 
     /// Starts the bridge in the host's dialect. A Windows client may not know
     /// it yet: the POSIX bridge failing is what finds out.
+    #[cfg_attr(
+        windows,
+        expect(
+            unused_variables,
+            reason = "Windows has no SSH control master to start"
+        )
+    )]
     pub(super) fn start_link(&self, state: &mut RemoteState) -> Result<BridgeLink> {
         #[cfg(unix)]
         let control = Some(self.ensure_master(state)?);
         #[cfg(windows)]
-        let control: Option<PathBuf> = {
-            let _ = state;
-            None
-        };
+        let control: Option<PathBuf> = { None };
         let known = remote_host::learned(&self.target);
         let platform = known.unwrap_or(HostPlatform::Posix);
         match self.spawn_link(control.as_deref(), platform) {

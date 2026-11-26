@@ -2,7 +2,7 @@
 //! names each is registered under. `command_tree` owns what a description
 //! means; this owns what the commands are.
 
-#[cfg(any(feature = "zmux", feature = "zosh-client"))]
+#[cfg(ssh_clients)]
 use super::{Attached, attached};
 use super::{
     CommandSpec, Delimiter, Helper, LEAF, OptionSpec, Registration, Values, alone, exits, instead,

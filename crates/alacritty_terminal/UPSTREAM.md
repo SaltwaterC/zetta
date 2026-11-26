@@ -364,3 +364,37 @@ files touched are `term/mod.rs` (the field, the resize hooks, the scroll and
 `swap_alt` updates), `term/handler.rs` (the mark, `clear_screen`,
 `reset_state`) and `term/reflow.rs` (the snapshot and the published fields, so
 off-thread history reflow treats the prompt the same way).
+
+## Zetta patch: invariants checked rather than assumed
+
+Each is a place where terminal output or the platform decides whether an
+invariant holds:
+
+- `Row::new` asserts at least one column, which upstream only
+  `debug_assert`ed; a NaN cell width casts to zero columns, and release builds
+  then indexed an empty row. `Row` implements `Default` without a `T: Default`
+  bound, as an empty row that allocates nothing.
+- `Storage::swap` swaps two live rows in place and moves history rows through
+  an empty row, instead of holding two raw pointers from two `&mut self`
+  borrows. Pinned by
+  `swapping_moves_rows_between_the_viewport_and_shared_archived_history`.
+- `DecodedChunks::row` keeps the last chunk's address *and length*, indexes the
+  rows with a bounds check, and is `unsafe` only to extend their lifetime; the
+  address is exposed when stored so the pointer rebuilt from it keeps its
+  provenance.
+- `Cell::reset_all` asserts the erased template owns no `extra` before copying
+  it bitwise into every cell, which would otherwise share an `Arc` it does not
+  count.
+- `tty/windows/conpty.rs` loads `conpty.dll` with `LoadLibraryExW` from the
+  application directory or System32 only, never `PATH`. A binary without the
+  runtime beside it gets the inbox ConPTY, so the root `build.rs` stages it
+  beside `zetta.exe` and `crates/terminal/build.rs` beside that crate's test
+  binaries (`build_support/conpty_runtime.rs`); before, those tests quietly
+  depended on an installed Zetta being on `PATH`. It also refuses a
+  palette-ready event that
+  already exists, and holds the palette helper's process and thread as
+  `OwnedHandle`s (`PaletteHelper`).
+- `tty/unix.rs` sets a master non-blocking, finds the foreground group to
+  redraw and signals a child it is terminating through `rustix`, which this
+  crate already depended on, instead of raw `libc`; `set_nonblocking` is a
+  safe function of `AsFd`. The upstream tests keep their `libc::kill`s.

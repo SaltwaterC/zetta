@@ -10,7 +10,7 @@ fn shared_summary() -> BackgroundSessionSummary {
         authentication_required: false,
         active_pane: 10,
         layout: BackgroundPaneLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: crate::protocol::SplitAxis::Horizontal,
             first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
             first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
             second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
@@ -136,7 +136,7 @@ fn headless_create_requests_round_trip_the_recursive_layout() {
         operation_id: SharedOperationId::new(ClientId::new("headless"), 4),
         title: "remote shell".to_owned(),
         replacement: SharedDraftLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: crate::protocol::SplitAxis::Horizontal,
             first_ratio: 600,
             first: Box::new(SharedDraftLayout::Draft { draft_id: 1 }),
             second: Box::new(SharedDraftLayout::Draft { draft_id: 2 }),
@@ -391,7 +391,7 @@ fn shared_state_normalization_reconciles_stale_presentation_panes() {
     let mut summary = shared_summary();
     summary.active_pane = 5;
     summary.layout = BackgroundPaneLayout::Split {
-        axis: "horizontal".to_owned(),
+        axis: crate::protocol::SplitAxis::Horizontal,
         first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 4 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 5 }),
@@ -509,7 +509,7 @@ fn shared_batch_wire_carries_exact_layout_and_draft_mapping() {
         operation_id: SharedOperationId::new(ClientId::new("batch"), 9),
         target_pane_id: Some(10),
         replacement: SharedDraftLayout::Split {
-            axis: "vertical".to_owned(),
+            axis: crate::protocol::SplitAxis::Vertical,
             first_ratio: 240,
             first: Box::new(SharedDraftLayout::Draft { draft_id: 1 }),
             second: Box::new(SharedDraftLayout::Existing { pane_id: 10 }),

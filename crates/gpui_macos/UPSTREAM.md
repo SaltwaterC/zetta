@@ -8,7 +8,9 @@ Retain these Zetta changes when synchronizing:
 
 - tolerate input-source agent restarts and missing keyboard-layout data;
 - gate AppKit text-input contexts while the application or input source is
-  inactive, avoiding stale-context recursion and use-after-free paths;
+  inactive, avoiding stale-context recursion and use-after-free paths. A
+  view's context loses its gate before the view releases it, so a context
+  AppKit keeps alive cannot forward to the freed view;
 - observe authoritative keyboard-source notifications and defer safe mapper
   replacement to the main queue;
 - retain pasteboard objects and copy custom pasteboard data before its

@@ -85,7 +85,7 @@ fn mosh_describes_every_option_the_zosh_launcher_accepts() {
 
 /// The spellings a parser takes `SPELLING=VALUE` for, read from its source:
 /// the quoted options from `start` up to `end`.
-#[cfg(any(feature = "zmux", feature = "zosh-client"))]
+#[cfg(ssh_clients)]
 fn attaching_spellings(source: &'static str, start: &str, end: &str) -> Vec<&'static str> {
     let from = source.find(start).unwrap() + start.len();
     let to = from + source[from..].find(end).unwrap();
@@ -99,7 +99,7 @@ fn attaching_spellings(source: &'static str, start: &str, end: &str) -> Vec<&'st
 
 /// Whether some option of the tree registered as `command` accepts `spelling`
 /// with its value attached.
-#[cfg(any(feature = "zmux", feature = "zosh-client"))]
+#[cfg(ssh_clients)]
 fn attaches(command: &str, spelling: &str) -> bool {
     let registration = REGISTRATIONS
         .iter()

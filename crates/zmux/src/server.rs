@@ -53,9 +53,7 @@ use crate::{
     process_status::ProcessIdentity,
     protocol::{BackgroundPaneLayout, BackgroundSessionSummary},
     retention::Retention,
-    transport::{
-        Connection, Endpoint, Listener, Stream, peer_is_this_user, random_hex, token_matches,
-    },
+    transport::{Connection, Endpoint, Listener, PeerProcess, Stream, random_hex, token_matches},
 };
 
 #[cfg(feature = "session-persistence")]

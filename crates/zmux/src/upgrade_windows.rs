@@ -22,7 +22,7 @@
 use std::{
     fs::{self, File},
     io::{BufRead, Read as _, Write},
-    os::windows::io::{AsRawHandle as _, FromRawHandle as _},
+    os::windows::io::{AsRawHandle as _, FromRawHandle as _, IntoRawHandle as _},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
@@ -31,8 +31,8 @@ use std::{
 use anyhow::{Context as _, Result};
 use windows::Win32::{
     Foundation::{DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE},
-    Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType},
-    System::{Pipes::CreatePipe, Threading::GetCurrentProcess},
+    Storage::FileSystem::{FILE_TYPE, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType},
+    System::Threading::GetCurrentProcess,
 };
 use zeroize::Zeroizing;
 
@@ -107,21 +107,20 @@ fn send_handover_to(
 ) -> Result<()> {
     let encoded =
         Zeroizing::new(serde_json::to_vec(handover).context("serializing the Windows handover")?);
-    let mut read = HANDLE::default();
-    let mut write = HANDLE::default();
     // Not inheritable: the replacement is given the read end explicitly, and
     // nothing else this daemon starts may receive either end.
-    unsafe { CreatePipe(&mut read, &mut write, None, 0) }
-        .context("creating the Windows handover pipe")?;
-    // SAFETY: CreatePipe returned this handle, which nothing else owns.
-    let mut writer = unsafe { File::from_raw_handle(write.0 as _) };
+    let (read, mut writer) = std::io::pipe().context("creating the Windows handover pipe")?;
     let mut remote = HANDLE::default();
     // DUPLICATE_CLOSE_SOURCE closes this process's read end even on failure,
     // which leaves the replacement's copy the only one.
+    // SAFETY: `read` is released from its owner here, and the call closes it,
+    // so it is closed exactly once; `process` is a live process handle the
+    // caller holds — the replacement's `Child`, or this process's pseudo
+    // handle in the tests — and `remote` is writable storage.
     unsafe {
         DuplicateHandle(
             GetCurrentProcess(),
-            read,
+            HANDLE(read.into_raw_handle()),
             process,
             &mut remote,
             0,
@@ -208,14 +207,16 @@ fn receive_handover_from(mut announce: impl BufRead) -> Result<Handover> {
         .ok()
         .filter(|value| *value != 0)
         .context("the previous daemon sent an unusable handover handle")?;
-    // SAFETY: the previous daemon duplicated this handle into this process
-    // for it to own, and nothing else here knows its value.
-    let pipe = unsafe { File::from_raw_handle(value as _) };
-    let lifetime_lock = receive_lifetime_lock(&mut announce);
+    // Checked before it is owned: a value that is not the pipe may be a handle
+    // something else in this process holds, which owning would close.
     anyhow::ensure!(
-        unsafe { GetFileType(HANDLE(pipe.as_raw_handle())) } == FILE_TYPE_PIPE,
+        is_file_of_type(value, FILE_TYPE_PIPE),
         "the handover handle is not a pipe"
     );
+    // SAFETY: the previous daemon duplicated this handle into this process
+    // for it to own, nothing else here knows its value, and it is the pipe.
+    let pipe = unsafe { File::from_raw_handle(value as _) };
+    let lifetime_lock = receive_lifetime_lock(&mut announce);
     let mut encoded = Zeroizing::new(Vec::new());
     pipe.take(MAX_HANDOVER_BYTES)
         .read_to_end(&mut encoded)
@@ -235,9 +236,22 @@ fn receive_lifetime_lock(announce: &mut impl BufRead) -> Option<File> {
         .parse::<usize>()
         .ok()
         .filter(|value| *value != 0)?;
+    if !is_file_of_type(value, FILE_TYPE_DISK) {
+        log::warn!("the previous daemon's lifetime lock handle is not a file; not adopted");
+        return None;
+    }
     // SAFETY: as for the pipe: the previous daemon duplicated this handle into
-    // this process for it to own, and nothing else here knows its value.
+    // this process for it to own, nothing else here knows its value, and it
+    // is a file.
     Some(unsafe { File::from_raw_handle(value as _) })
+}
+
+/// Whether the handle value `value` names an open object of `kind`. Asking
+/// only reads: an invalid value is reported as `FILE_TYPE_UNKNOWN`.
+fn is_file_of_type(value: usize, kind: FILE_TYPE) -> bool {
+    // SAFETY: `GetFileType` validates the handle and reads nothing through it
+    // that a closed or foreign value could make unsafe.
+    (unsafe { GetFileType(HANDLE(value as _)) }) == kind
 }
 
 fn parse_handover(encoded: &[u8], version: u32) -> Result<Handover> {

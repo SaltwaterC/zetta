@@ -158,7 +158,7 @@ impl Zetta {
                     .min_h_0()
                     .flex()
                     .flex_col()
-                    .when(self.tab_move_mode, |body| body.key_context("TabMove"))
+                    .when(self.tab_move_mode(), |body| body.key_context("TabMove"))
                     .child(div().min_h_0().flex_1().child(content))
                     .when_some(maximized_pane, |body, pane| {
                         body.child(self.render_maximized_pane_bar(

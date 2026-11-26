@@ -39,8 +39,9 @@ eight are not, because each is expensive or impossible to undo:
    boundaries"). Getting this backwards silently disables every cache below.
 4. **Gate platforms and features at the `mod` declaration**, and prefer the
    `cfg` aliases `build.rs` emits over respelling a predicate.
-5. **Suppress lints with `#[expect(..)]`, not `#[allow(..)]`**, except where a
-   lint fires only on some platform or feature arm.
+5. **Suppress lints with `#[expect(..)]`, never `#[allow(..)]`.** Where a lint
+   fires only on some platform or feature arm, gate the `expect` to exactly
+   those arms with `cfg_attr`.
 6. **Take a lock with `.recover_poison()`** (`zetta_sync::RecoverPoison`)
    unless it guards an invariant a panic can break — then `unwrap` and say so
    at the lock. That covers `lock`, `read`, `write`, `get_mut`, `into_inner`
@@ -71,6 +72,12 @@ eight are not, because each is expensive or impossible to undo:
   its own crate, with no dependencies, so the application, `zmux`, `zosh` and
   every other Zetta-authored crate can share it; import it as
   `use zetta_sync::RecoverPoison as _;`.
+- `crates/zetta_layout` holds the pane-layout tree algebra — move, swap, rotate
+  and the `SplitAxis` the protocol carries — written once against its
+  `LayoutTree` trait, which both the application's `PaneLayout` and `zmux`'s
+  `BackgroundPaneLayout` implement. A shared session has to rearrange
+  identically for its owner and its viewers, so a layout operation belongs
+  there rather than in either tree's own methods.
 - A change to a `zed/` crate is made by forking it under `crates/`, never by
   editing the submodule. Cargo resolves a dependency edge from the manifest that
   declares it, so forking a crate that other `zed/` crates depend on means
@@ -144,15 +151,31 @@ pedantic lints were considered and deliberately *not* adopted, with the reason
 for each; read it before adding another, and add the reason there rather than
 sprinkling `#[allow]`s.
 
+It also denies `undocumented_unsafe_blocks`, in the root and every
+Zetta-authored crate: an `unsafe` block or `unsafe impl` carries a
+`// SAFETY:` comment saying why what it relies on holds *there*, directly above
+the block or the statement holding it. "FFI call" is not a reason; name the
+handle that is open, the buffer that is long enough, or the thread that is the
+only one. Most of these sit in `cfg` arms, so the clippy run for that platform
+is what checks a new one.
+
 Suppress a lint with `#[expect(<lint>, reason = "...")]`, not `#[allow(..)]`.
 An `expect` is reported by `unfulfilled_lint_expectations` once the lint stops
 firing, so a suppression cannot outlive what it was for; an `allow` that has
 become unnecessary is invisible and accumulates. Three
 `#[allow(clippy::too_many_arguments)]` in this tree were found suppressing
-nothing at all. Use `allow` only where the lint genuinely fires sometimes and
-not others across the platform or feature matrix, and say which in the reason.
-`cfg_attr`-gated suppressions stay `allow`, because whether they fire is exactly
-what the `cfg` decides.
+nothing at all.
+
+That holds for a lint that fires on some platform or feature arms and not
+others: write `#[cfg_attr(<the arms it fires on>, expect(<lint>, reason =
+"..."))]`, and say in the reason why those arms. The predicate has to match
+where the lint fires *exactly*, across the whole platform and feature matrix;
+too narrow and the lint fires unsuppressed, too wide and the `expect` is
+unfulfilled. Either is a build failure, and that is deliberate: a broken build
+on some combination is preferred to a suppression that silently outlives its
+reason. Fix a failure by correcting the predicate (or the code), never by
+falling back to `allow`. Upstream forks under `crates/` keep upstream's own
+`allow`s; lines Zetta adds to them follow this rule.
 
 `clippy::too_many_arguments` is not a suppression of first resort. Reach for the
 borrowed `Copy` bundle described above first, and check whether the bundle
@@ -164,10 +187,11 @@ counts `self`, `&mut Window` and `&mut Context<Self>`, so a GPUI method with
 five real parameters trips it; that is a legitimate reason, and naming it is the
 point.
 
-`#[allow(dead_code)]` is a last resort. If only tests reach an item, say
-`#[cfg(test)]`; if only one platform constructs it, say
-`#[cfg_attr(not(windows), allow(dead_code))]` and why. A bare allow on
-something nothing reaches at all means the item should be deleted.
+Suppressing `dead_code` is a last resort. If only tests reach an item, say
+`#[cfg(test)]`; if only one platform constructs it, gate the item to that
+platform, or failing that say `#[cfg_attr(not(windows), expect(dead_code,
+reason = ".."))]` and why. A suppression on something nothing reaches at all
+means the item should be deleted.
 
 `make lint` lints only the host's `cfg` arms and the host's feature set, so the
 denied lints above are *not* verified anywhere else by it — twelve violations of
@@ -176,6 +200,13 @@ arms. `make clippy-linux`, `clippy-windows`, `clippy-macos`, `clippy-features`
 and `clippy-platforms` run the matching `check-*` target's exact command with
 `clippy -- -D warnings` instead, which also fails an `#[expect(..)]` that has
 stopped firing on that platform. Run the one covering what you changed.
+
+`crates/zmux` dev-depends on itself with its default features, so any
+`--all-targets` run there unifies `session-persistence` back in:
+`cargo clippy --all-targets --no-default-features` lints the default feature
+set and passes vacuously. Lint its reduced feature sets on the library alone —
+`cargo clippy --no-default-features` and `--no-default-features --features
+scrollback-buffer`, the set the application links without persistence.
 
 ## Tests
 
@@ -266,6 +297,7 @@ Run `cargo clippy --all-targets` for broader Rust changes when practical.
 (cd crates/alacritty_terminal && cargo test)
 (cd crates/terminal && cargo test)
 (cd crates/zetta_cli_help && cargo test)
+(cd crates/zetta_layout && cargo test)
 (cd crates/zetta_profiles && cargo test)
 (cd crates/zetta_sync && cargo test)
 (cd crates/zmux && cargo build --bin zmux && cargo test)
@@ -483,7 +515,8 @@ as separate artifacts associated with the JSON report.
   `any(feature = "http-server", feature = "tftp-server")`, `tftp_enabled` for
   `any(feature = "tftp-server", feature = "tftp-client")`, `byte_stream_panes`
   for `any(feature = "serial-console", feature = "http-server", feature =
-  "tftp-server")`, and `cli_services` for "any CLI service feature is
+  "tftp-server")`, `ssh_clients` for `any(feature = "zmux", feature =
+  "zosh-client")`, and `cli_services` for "any CLI service feature is
   enabled". Add a new alias in `build.rs` (with a matching
   `cargo::rustc-check-cfg` line) rather than adding another ad hoc multi-clause
   predicate.

@@ -17,6 +17,8 @@ struct TestProcess(HANDLE);
 impl TestProcess {
     fn open(process_id: u32) -> Self {
         Self(
+            // SAFETY: `OpenProcess` takes no pointers; the handle it returns
+            // is owned by this `TestProcess` and closed in its `Drop`.
             unsafe {
                 OpenProcess(
                     PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
@@ -30,6 +32,8 @@ impl TestProcess {
 
     fn is_alive(&self) -> bool {
         let mut exit_code = 0;
+        // SAFETY: `self.0` is the open handle this value owns, and
+        // `exit_code` is a writable `u32`.
         unsafe { GetExitCodeProcess(self.0, &mut exit_code) }
             .expect("reading the cleanup test process status");
         exit_code == STILL_ACTIVE.0 as u32
@@ -38,6 +42,8 @@ impl TestProcess {
 
 impl Drop for TestProcess {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is owned by this value, still open, and closed only
+        // here, once.
         unsafe {
             let _ = TerminateProcess(self.0, 1);
             let _ = CloseHandle(self.0);

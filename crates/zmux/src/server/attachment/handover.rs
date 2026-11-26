@@ -108,8 +108,12 @@ pub(super) fn await_handover(
         // changing — panes are split and closed, tabs are renamed — long after it
         // was first offered. Using the stale copy handed a joining client the
         // layout as of whenever sharing was switched on.
-        let state = session.state.clone();
-        let summary = Box::new(catalog_summary(session));
+        let target = AttachTarget {
+            session_id,
+            pane_id,
+            state: session.state.clone(),
+            summary: Box::new(catalog_summary(session)),
+        };
         let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
             return respond_unlocked(
                 sessions,
@@ -128,17 +132,7 @@ pub(super) fn await_handover(
         match pane.attachment {
             Attachment::Shared(_) => {
                 finish_handover_waiter(pane, false);
-                return attach_shared(
-                    daemon,
-                    sessions,
-                    session_id,
-                    pane_id,
-                    attacher.clone(),
-                    state,
-                    summary,
-                    connection,
-                    None,
-                );
+                return attach_shared(daemon, sessions, target, attacher.clone(), connection, None);
             }
             Attachment::None => {
                 finish_handover_waiter(pane, true);
@@ -148,11 +142,8 @@ pub(super) fn await_handover(
                     return attach_shared(
                         daemon,
                         sessions,
-                        session_id,
-                        pane_id,
+                        target,
                         attacher.clone(),
-                        state,
-                        summary,
                         connection,
                         None,
                     );
@@ -160,12 +151,9 @@ pub(super) fn await_handover(
                 return attach_exclusive(
                     daemon,
                     sessions,
-                    session_id,
-                    pane_id,
+                    target,
                     client_process_id,
                     client_id,
-                    state,
-                    summary,
                     connection,
                 );
             }
@@ -182,12 +170,9 @@ pub(super) fn await_handover(
                     return attach_exclusive(
                         daemon,
                         sessions,
-                        session_id,
-                        pane_id,
+                        target,
                         client_process_id,
                         client_id,
-                        state,
-                        summary,
                         connection,
                     );
                 }
@@ -211,12 +196,9 @@ pub(super) fn await_handover(
                 return attach_exclusive(
                     daemon,
                     sessions,
-                    session_id,
-                    pane_id,
+                    target,
                     client_process_id,
                     client_id,
-                    state,
-                    summary,
                     connection,
                 );
             }

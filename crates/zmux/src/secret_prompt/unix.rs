@@ -28,34 +28,34 @@ pub(super) fn read_secret(prompt: &str) -> Result<Zeroizing<String>> {
 /// Configures byte-at-a-time, no-echo input for as long as it is held, and
 /// restores the terminal however the caller leaves — including by `?`, which
 /// is why this is a guard and not a pair of calls.
+///
+/// It holds its own duplicate of the terminal, so the caller keeps the one it
+/// passed free to read and write through while the guard is alive.
 pub(super) struct EchoOff {
-    pub(super) descriptor: std::os::unix::io::RawFd,
-    pub(super) original: libc::termios,
+    pub(super) terminal: std::os::fd::OwnedFd,
+    pub(super) original: rustix::termios::Termios,
 }
 
 impl EchoOff {
-    pub(super) fn disable<T: std::os::unix::io::AsRawFd>(terminal: &T) -> Result<Self> {
-        let descriptor = terminal.as_raw_fd();
-        let mut original = unsafe { std::mem::zeroed::<libc::termios>() };
-        // SAFETY: `descriptor` is a live terminal and `original` is a valid
-        // `termios` this call fills in.
-        anyhow::ensure!(
-            unsafe { libc::tcgetattr(descriptor, &mut original) } == 0,
-            "could not read the terminal's settings to hide the session secret"
-        );
-        let mut hidden = original;
-        hidden.c_lflag &= !(libc::ECHO | libc::ICANON | libc::ISIG | libc::IEXTEN);
-        hidden.c_cc[libc::VMIN] = 1;
-        hidden.c_cc[libc::VTIME] = 0;
-        // SAFETY: as above, with settings derived from what was just read.
-        anyhow::ensure!(
-            unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &hidden) } == 0,
-            "could not hide the session secret as it is typed"
-        );
-        Ok(Self {
-            descriptor,
-            original,
-        })
+    pub(super) fn disable(terminal: &impl std::os::fd::AsFd) -> Result<Self> {
+        use rustix::termios::{
+            LocalModes, OptionalActions, SpecialCodeIndex, tcgetattr, tcsetattr,
+        };
+
+        let terminal = terminal
+            .as_fd()
+            .try_clone_to_owned()
+            .context("duplicating the terminal to hide the session secret")?;
+        let original = tcgetattr(&terminal)
+            .context("could not read the terminal's settings to hide the session secret")?;
+        let mut hidden = original.clone();
+        hidden.local_modes &=
+            !(LocalModes::ECHO | LocalModes::ICANON | LocalModes::ISIG | LocalModes::IEXTEN);
+        hidden.special_codes[SpecialCodeIndex::VMIN] = 1;
+        hidden.special_codes[SpecialCodeIndex::VTIME] = 0;
+        tcsetattr(&terminal, OptionalActions::Now, &hidden)
+            .context("could not hide the session secret as it is typed")?;
+        Ok(Self { terminal, original })
     }
 }
 
@@ -134,8 +134,11 @@ pub(super) fn read_masked_secret(
 
 impl Drop for EchoOff {
     fn drop(&mut self) {
-        // SAFETY: restoring settings this guard read from the same descriptor.
-        unsafe { libc::tcsetattr(self.descriptor, libc::TCSANOW, &self.original) };
+        let _ = rustix::termios::tcsetattr(
+            &self.terminal,
+            rustix::termios::OptionalActions::Now,
+            &self.original,
+        );
     }
 }
 

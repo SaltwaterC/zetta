@@ -1,17 +1,7 @@
-#![expect(
-    non_snake_case,
-    reason = "field and method names are fixed by the Windows Terminal handoff ABI"
-)]
-// Windows Terminal's handoff ABI fixes several parameter lists that exceed
-// Clippy's general-purpose argument-count threshold: the two `EstablishPtyHandoff`
-// vtable entries, the `establish_*` implementations behind them, and the two
-// `duplicate_*_handoff_request` helpers that mirror their signatures. Module-wide
-// rather than ten identical attributes, and an `expect` so it is reported if the
-// ABI ever stops needing it.
-#![expect(
-    clippy::too_many_arguments,
-    reason = "the Windows Terminal handoff ABI fixes these parameter lists"
-)]
+//! Windows shell integration: registering Zetta as the default terminal, the
+//! taskbar jump list of profiles, and the application identity both rely on.
+//! The COM server that receives a console handed over by Windows lives in
+//! `handoff`.
 
 use std::{
     collections::HashSet,
@@ -34,15 +24,12 @@ use futures::channel::mpsc::UnboundedSender;
 use terminal::{ConsolePalette, PtyControl, PtyHandover};
 use windows::{
     Win32::{
-        Foundation::{
-            DUPLICATE_SAME_ACCESS, DuplicateHandle, E_FAIL, E_INVALIDARG, HANDLE, PROPERTYKEY,
-            RPC_E_CHANGED_MODE, S_OK,
-        },
+        Foundation::{E_FAIL, E_INVALIDARG, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, S_OK},
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE,
             FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
             FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-            SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
+            SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT,
         },
         System::Com::{
             CLSCTX_INPROC_SERVER, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
@@ -54,9 +41,7 @@ use windows::{
             CreateNamedPipeW, NAMED_PIPE_MODE, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
             PIPE_TYPE_BYTE, PIPE_WAIT,
         },
-        System::Threading::{
-            GetCurrentProcess, GetExitCodeProcess, GetProcessId, INFINITE, WaitForSingleObject,
-        },
+        System::Threading::{GetExitCodeProcess, GetProcessId, INFINITE, WaitForSingleObject},
         UI::Shell::{
             Common::{IObjectArray, IObjectCollection},
             DestinationList, EnumerableObjectCollection, ICustomDestinationList, IShellLinkW,
@@ -94,590 +79,31 @@ const DEFAULT_TERMINAL_BACKUP_PATH: &str = "Software\\Zetta\\DefaultTerminal";
 static JUMP_LIST_GENERATION: AtomicU64 = AtomicU64::new(0);
 static JUMP_LIST_UPDATE: Mutex<()> = Mutex::new(());
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct TerminalStartupInfo {
-    pszTitle: *mut u16,
-    pszIconPath: *mut u16,
-    iconIndex: i32,
-    dwX: u32,
-    dwY: u32,
-    dwXSize: u32,
-    dwYSize: u32,
-    dwXCountChars: u32,
-    dwYCountChars: u32,
-    dwFillAttribute: u32,
-    dwFlags: u32,
-    wShowWindow: u16,
-}
+mod handoff;
+pub(crate) use handoff::{WindowsHandoffRequest, monitor_handoff_child, start_handoff_server};
 
-/// The startup metadata the Windows Terminal handoff ABI hands over.
-///
-/// Everything but `title` is decoded because the ABI sends it and a partial
-/// decode would desynchronize the rest, not because Zetta applies it yet —
-/// hence the per-field expects rather than one on the struct, so a field added
-/// later still has to say why it is unread.
-#[derive(Clone, Debug)]
-pub(crate) struct HandoffStartupMetadata {
-    pub(crate) title: Option<String>,
-    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
-    pub(crate) icon_path: Option<String>,
-    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
-    pub(crate) icon_index: i32,
-    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
-    pub(crate) geometry: Option<(u32, u32, u32, u32)>,
-    #[expect(dead_code, reason = "decoded to keep the ABI in step; not applied yet")]
-    pub(crate) show_window: u16,
-}
-
-/// The six handles are duplicated while the COM call is active. The handoff
-/// provider owns the originals and is allowed to close them as soon as the
-/// method returns, so retaining the duplicates is part of the protocol rather
-/// than an optimization.
-pub(crate) struct WindowsHandoffRequest {
-    pub(crate) conin: OwnedHandle,
-    pub(crate) conout: OwnedHandle,
-    pub(crate) signal: OwnedHandle,
-    pub(crate) reference: OwnedHandle,
-    pub(crate) server: OwnedHandle,
-    pub(crate) client: OwnedHandle,
-    pub(crate) child_pid: u32,
-    pub(crate) startup: Option<HandoffStartupMetadata>,
-}
-
-impl WindowsHandoffRequest {
-    pub(crate) fn duplicate_child_handle(&self) -> std::io::Result<OwnedHandle> {
-        self.client.try_clone()
-    }
-
-    pub(crate) fn into_handover(self) -> PtyHandover {
-        let control = Arc::new(WindowsHandoffControl {
-            signal: self.signal,
-            reference: self.reference,
-            server: self.server,
-            client: self.client,
-            signal_lock: Mutex::new(()),
-        });
-        PtyHandover {
-            conout: self.conout,
-            conin: self.conin,
-            child_pid: self.child_pid,
-            replay: Vec::new(),
-            control,
-        }
-    }
-}
-
-pub(crate) fn monitor_handoff_child(
-    handle: OwnedHandle,
-    mut child_events: terminal::AttachedChildEvents,
-) {
-    thread::Builder::new()
-        .name("zetta-handoff-child".to_owned())
-        .spawn(move || {
-            let process = HANDLE(handle.as_raw_handle());
-            unsafe {
-                WaitForSingleObject(process, INFINITE);
-            }
-            let mut exit_code = 0;
-            if unsafe { GetExitCodeProcess(process, &mut exit_code) }.is_ok() {
-                let _ = child_events.report_exit(exit_code as i32);
-            } else {
-                let _ = child_events.report_status_unavailable();
-            }
-        })
-        .ok();
-}
-
-/// Only `signal` is ever read; the other three handles are held so the console
-/// they belong to stays open for as long as the handover does. Dropping them
-/// early closes the client's end of the protocol, so these fields are the hold
-/// itself rather than stored state.
-struct WindowsHandoffControl {
-    signal: OwnedHandle,
-    #[expect(dead_code, reason = "held to keep the console open, never read")]
-    reference: OwnedHandle,
-    #[expect(dead_code, reason = "held to keep the console open, never read")]
-    server: OwnedHandle,
-    #[expect(dead_code, reason = "held to keep the console open, never read")]
-    client: OwnedHandle,
-    signal_lock: Mutex<()>,
-}
-
-impl PtyControl for WindowsHandoffControl {
-    fn resize(&self, columns: u16, lines: u16) {
-        // This is the private signal packet used by Microsoft's ConPTY host.
-        // The signal handle is the host-side pipe duplicated during handoff;
-        // keeping the write here preserves resizing after the session moves
-        // into Zetta rather than merely retaining the lifetime handles.
-        let packet = [8_u16, columns, lines];
-        let bytes = unsafe {
-            std::slice::from_raw_parts(packet.as_ptr().cast::<u8>(), std::mem::size_of_val(&packet))
-        };
-        let _lock = self.signal_lock.lock().recover_poison();
-        if let Err(error) =
-            unsafe { WriteFile(HANDLE(self.signal.as_raw_handle()), Some(bytes), None, None) }
-        {
-            log::debug!("could not resize the handed-off Windows console: {error}");
-        }
-    }
-
-    fn set_console_palette(&self, _palette: ConsolePalette) {}
-}
-
-#[interface("59D55CCE-FC8A-48B4-ACE8-0A9286C6557F")]
-unsafe trait ITerminalHandoff: windows_core::IUnknown {
-    fn EstablishPtyHandoff(
-        &self,
-        input: HANDLE,
-        output: HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-    ) -> HRESULT;
-}
-
-#[interface("AA6B364F-4A50-4176-9002-0AE755E7B5EF")]
-unsafe trait ITerminalHandoff2: windows_core::IUnknown {
-    fn EstablishPtyHandoff(
-        &self,
-        input: HANDLE,
-        output: HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-        startup: TerminalStartupInfo,
-    ) -> HRESULT;
-}
-
-#[interface("6F23DA90-15C5-4203-9DB0-64E73F1B1B00")]
-unsafe trait ITerminalHandoff3: windows_core::IUnknown {
-    fn EstablishPtyHandoff(
-        &self,
-        input: *mut HANDLE,
-        output: *mut HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-        startup: *const TerminalStartupInfo,
-    ) -> HRESULT;
-}
-
-#[implement(ITerminalHandoff, ITerminalHandoff2, ITerminalHandoff3)]
-struct TerminalHandoff {
-    commands: UnboundedSender<crate::process_control::ProcessControlCommand>,
-}
-
-impl TerminalHandoff {
-    fn submit(&self, request: WindowsHandoffRequest) -> bool {
-        let (completion, completed) = channel();
-        if self
-            .commands
-            .unbounded_send(
-                crate::process_control::ProcessControlCommand::OpenWindowsHandoff {
-                    request,
-                    completion,
-                },
-            )
-            .is_err()
-        {
-            return false;
-        }
-        completed
-            .recv_timeout(Duration::from_secs(10))
-            .is_ok_and(|accepted| accepted)
-    }
-
-    fn establish_legacy(
-        &self,
-        input: HANDLE,
-        output: HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-        startup: Option<&TerminalStartupInfo>,
-    ) -> HRESULT {
-        let child_pid = unsafe { GetProcessId(client) };
-        if child_pid == 0 {
-            return E_INVALIDARG;
-        }
-        let Ok(request) = duplicate_legacy_handoff_request(
-            input, output, signal, reference, server, client, child_pid, startup,
-        ) else {
-            return E_FAIL;
-        };
-        if self.submit(request) { S_OK } else { E_FAIL }
-    }
-
-    fn establish_v3(
-        &self,
-        input: *mut HANDLE,
-        output: *mut HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-        startup: &TerminalStartupInfo,
-    ) -> HRESULT {
-        let child_pid = unsafe { GetProcessId(client) };
-        if child_pid == 0 {
-            return E_INVALIDARG;
-        }
-        let Ok((server_pipe, client_pipe)) = create_handoff_pipe() else {
-            return E_FAIL;
-        };
-        let Ok(conin) = duplicate_handle(HANDLE(server_pipe.as_raw_handle())) else {
-            return E_FAIL;
-        };
-        let Ok(returned_output) = duplicate_handle(HANDLE(client_pipe.as_raw_handle())) else {
-            return E_FAIL;
-        };
-        let Ok(request) = duplicate_handoff_request(
-            server_pipe,
-            conin,
-            signal,
-            reference,
-            server,
-            client,
-            child_pid,
-            Some(startup),
-        ) else {
-            return E_FAIL;
-        };
-        if !self.submit(request) {
-            return E_FAIL;
-        }
-
-        // ITerminalHandoff3 transfers ownership of these handles to the COM
-        // caller. Do this only after the application accepted the request so
-        // failed handoffs do not leak handles into the caller's process.
-        unsafe {
-            *input = HANDLE(client_pipe.into_raw_handle());
-            *output = HANDLE(returned_output.into_raw_handle());
-        }
-        S_OK
-    }
-}
-
-impl ITerminalHandoff_Impl for TerminalHandoff_Impl {
-    unsafe fn EstablishPtyHandoff(
-        &self,
-        input: HANDLE,
-        output: HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-    ) -> HRESULT {
-        self.establish_legacy(input, output, signal, reference, server, client, None)
-    }
-}
-
-impl ITerminalHandoff2_Impl for TerminalHandoff_Impl {
-    unsafe fn EstablishPtyHandoff(
-        &self,
-        input: HANDLE,
-        output: HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-        startup: TerminalStartupInfo,
-    ) -> HRESULT {
-        self.establish_legacy(
-            input,
-            output,
-            signal,
-            reference,
-            server,
-            client,
-            Some(&startup),
-        )
-    }
-}
-
-impl ITerminalHandoff3_Impl for TerminalHandoff_Impl {
-    unsafe fn EstablishPtyHandoff(
-        &self,
-        input: *mut HANDLE,
-        output: *mut HANDLE,
-        signal: HANDLE,
-        reference: HANDLE,
-        server: HANDLE,
-        client: HANDLE,
-        startup: *const TerminalStartupInfo,
-    ) -> HRESULT {
-        if input.is_null() || output.is_null() || startup.is_null() {
-            return E_INVALIDARG;
-        }
-        self.establish_v3(input, output, signal, reference, server, client, unsafe {
-            &*startup
-        })
-    }
-}
-
-#[implement(IClassFactory)]
-struct TerminalHandoffFactory {
-    commands: UnboundedSender<crate::process_control::ProcessControlCommand>,
-}
-
-impl IClassFactory_Impl for TerminalHandoffFactory_Impl {
-    fn CreateInstance(
-        &self,
-        punkouter: Ref<windows_core::IUnknown>,
-        riid: *const windows_core::GUID,
-        ppvobject: *mut *mut c_void,
-    ) -> windows_core::Result<()> {
-        if ppvobject.is_null() || riid.is_null() {
-            return Err(windows_core::Error::from(E_INVALIDARG));
-        }
-        unsafe {
-            *ppvobject = std::ptr::null_mut();
-        }
-        if punkouter.is_some() {
-            return Err(windows_core::Error::from(E_INVALIDARG));
-        }
-        let object: ITerminalHandoff3 = TerminalHandoff {
-            commands: self.commands.clone(),
-        }
-        .into();
-        unsafe { object.query(riid, ppvobject).ok() }
-    }
-
-    fn LockServer(&self, _: windows_core::BOOL) -> windows_core::Result<()> {
-        Ok(())
-    }
-}
-
-fn duplicate_legacy_handoff_request(
-    input: HANDLE,
-    output: HANDLE,
-    signal: HANDLE,
-    reference: HANDLE,
-    server: HANDLE,
-    client: HANDLE,
-    child_pid: u32,
-    startup: Option<&TerminalStartupInfo>,
-) -> windows_core::Result<WindowsHandoffRequest> {
-    // `input` is the handle the terminal reads from and `output` is the
-    // handle it writes to. The names are from the COM contract, not from
-    // Zetta's `conin`/`conout` fields.
-    duplicate_handoff_request(
-        duplicate_handle(input)?,
-        duplicate_handle(output)?,
-        signal,
-        reference,
-        server,
-        client,
-        child_pid,
-        startup,
-    )
-}
-
-fn duplicate_handoff_request(
-    conout: OwnedHandle,
-    conin: OwnedHandle,
-    signal: HANDLE,
-    reference: HANDLE,
-    server: HANDLE,
-    client: HANDLE,
-    child_pid: u32,
-    startup: Option<&TerminalStartupInfo>,
-) -> windows_core::Result<WindowsHandoffRequest> {
-    Ok(WindowsHandoffRequest {
-        conin,
-        conout,
-        signal: duplicate_handle(signal)?,
-        reference: duplicate_handle(reference)?,
-        server: duplicate_handle(server)?,
-        client: duplicate_handle(client)?,
-        child_pid,
-        startup: startup.map(startup_metadata),
-    })
-}
-
-/// Creates the duplex endpoint required by ITerminalHandoff3. The server side
-/// stays in Zetta; the overlapped client side is returned to OpenConsole and
-/// is passed to ConPTY as both its input and output handle.
-///
-/// Both ends are opened here and travel as handles, so the name is never
-/// published and nothing needs to find the pipe by it. That makes everything
-/// about the name a matter of keeping other accounts out: the pipe namespace
-/// is machine-wide, a pipe's DACL is its first creator's, and the default DACL
-/// lets other accounts read. So the name is random, the first (and only)
-/// instance refuses a name somebody already holds, the DACL admits only this
-/// account and SYSTEM, and the client end will not let the server impersonate
-/// it beyond identification should it ever be connected to the wrong server.
-fn create_handoff_pipe() -> windows_core::Result<(OwnedHandle, OwnedHandle)> {
-    create_handoff_pipe_named(&handoff_pipe_name()?)
-}
-
-fn create_handoff_pipe_named(name: &str) -> windows_core::Result<(OwnedHandle, OwnedHandle)> {
-    let name = HSTRING::from(name);
-    let pipe_mode = NAMED_PIPE_MODE(
-        PIPE_TYPE_BYTE.0 | PIPE_READMODE_BYTE.0 | PIPE_WAIT.0 | PIPE_REJECT_REMOTE_CLIENTS.0,
-    );
-    let security = crate::private_fs::UserOnlySecurity::new(
-        crate::private_fs::UserOnlySecurityTarget::Object,
-    )?;
-    let server = unsafe {
-        CreateNamedPipeW(
-            &name,
-            PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
-            pipe_mode,
-            1,
-            128 * 1024,
-            128 * 1024,
-            0,
-            Some(std::ptr::from_ref(security.attributes())),
-        )
-    };
-    if server.is_invalid() {
-        return Err(windows_core::Error::from_win32());
-    }
-    // SAFETY: CreateNamedPipeW returned a valid, newly owned handle.
-    let server = unsafe { OwnedHandle::from_raw_handle(server.0) };
-    let client = unsafe {
-        CreateFileW(
-            &name,
-            FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
-            FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0),
-            None,
-            OPEN_EXISTING,
-            handoff_client_flags(),
-            None,
-        )?
-    };
-    // SAFETY: CreateFileW returned a valid, newly owned handle.
-    let client = unsafe { OwnedHandle::from_raw_handle(client.0) };
-    Ok((server, client))
-}
-
-/// A pipe name nobody can predict: 128 random bits.
-fn handoff_pipe_name() -> windows_core::Result<String> {
-    let mut nonce = [0_u8; 16];
-    getrandom::fill(&mut nonce).map_err(|_| windows_core::Error::from(E_FAIL))?;
-    Ok(format!(
-        r"\\.\pipe\ZettaTerminalHandoff-{}",
-        nonce
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    ))
-}
-
-/// The client end's open flags: overlapped for ConPTY, and identification-only
-/// impersonation for whichever server it reaches.
-fn handoff_client_flags() -> FILE_FLAGS_AND_ATTRIBUTES {
-    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION
-}
-
-fn duplicate_handle(handle: HANDLE) -> windows_core::Result<OwnedHandle> {
-    if handle.is_invalid() {
-        return Err(windows_core::Error::from(E_INVALIDARG));
-    }
-    let process = unsafe { GetCurrentProcess() };
-    let mut duplicate = HANDLE::default();
-    unsafe {
-        DuplicateHandle(
-            process,
-            handle,
-            process,
-            &mut duplicate,
-            0,
-            false,
-            DUPLICATE_SAME_ACCESS,
-        )?;
-        Ok(OwnedHandle::from_raw_handle(duplicate.0))
-    }
-}
-
-fn startup_metadata(info: &TerminalStartupInfo) -> HandoffStartupMetadata {
-    HandoffStartupMetadata {
-        title: bstr_to_string(info.pszTitle),
-        icon_path: bstr_to_string(info.pszIconPath),
-        icon_index: info.iconIndex,
-        geometry: (info.dwXSize != 0 && info.dwYSize != 0).then_some((
-            info.dwX,
-            info.dwY,
-            info.dwXSize,
-            info.dwYSize,
-        )),
-        show_window: info.wShowWindow,
-    }
-}
-
-fn bstr_to_string(value: *mut u16) -> Option<String> {
-    if value.is_null() {
-        return None;
-    }
-    let mut length = 0;
-    // BSTRs carry their length immediately before the pointer, but callers
-    // may provide a null-terminated compatible string. Bound the fallback so
-    // malformed COM data cannot make the broker scan unbounded memory.
-    while length < 32 * 1024 && unsafe { *value.add(length) } != 0 {
-        length += 1;
-    }
-    Some(String::from_utf16_lossy(unsafe {
-        std::slice::from_raw_parts(value, length)
-    }))
-}
-
-/// Starts the out-of-process COM class object used by Windows console
-/// delegation. The thread stays alive for the lifetime of the embedding
-/// process; GPUI owns the application lifetime and shuts down the process when
-/// the last window/session is gone.
-pub(crate) fn start_handoff_server(
-    commands: UnboundedSender<crate::process_control::ProcessControlCommand>,
-) -> Result<()> {
-    thread::Builder::new()
-        .name("zetta-terminal-handoff".to_owned())
-        .spawn(move || {
-            let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            if initialized.is_err() {
-                eprintln!(
-                    "Could not initialize the Windows terminal handoff COM server: {initialized}"
-                );
-                return;
-            }
-            let factory: IClassFactory = TerminalHandoffFactory { commands }.into();
-            let cookie = unsafe {
-                CoRegisterClassObject(
-                    &ZETTA_TERMINAL_HANDOFF_CLSID,
-                    &factory,
-                    CLSCTX_LOCAL_SERVER,
-                    REGCLS_MULTIPLEUSE,
-                )
-            };
-            if let Err(error) = cookie {
-                eprintln!("Could not register the Windows terminal handoff COM server: {error}");
-                unsafe { CoUninitialize() };
-                return;
-            }
-            loop {
-                thread::park();
-            }
-        })
-        .context("starting the Windows terminal handoff COM server")?;
-    Ok(())
-}
-
+/// `!Send`: the apartment belongs to the thread that joined it, and only that
+/// thread may leave it.
 struct ComApartment {
     uninitialize: bool,
+    _thread_bound: std::marker::PhantomData<*const ()>,
 }
 
 impl ComApartment {
     fn initialize() -> windows::core::Result<Self> {
+        // SAFETY: CoInitializeEx takes no pointers (the reserved argument is
+        // None); it only sets this thread's apartment, and `uninitialize`
+        // records whether Drop owes it the matching CoUninitialize.
         let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         if result.is_ok() {
-            Ok(Self { uninitialize: true })
+            Ok(Self {
+                uninitialize: true,
+                _thread_bound: std::marker::PhantomData,
+            })
         } else if result == RPC_E_CHANGED_MODE {
             Ok(Self {
                 uninitialize: false,
+                _thread_bound: std::marker::PhantomData,
             })
         } else {
             result.ok()?;
@@ -689,6 +115,9 @@ impl ComApartment {
 impl Drop for ComApartment {
     fn drop(&mut self) {
         if self.uninitialize {
+            // SAFETY: balances the CoInitializeEx that succeeded in
+            // `initialize`; every ComApartment is a local dropped on the
+            // thread that created it, after the COM objects used under it.
             unsafe { CoUninitialize() };
         }
     }
@@ -1107,30 +536,35 @@ pub(crate) fn update_profile_jump_list(profiles: Vec<Profile>, hidden_profiles: 
 }
 
 fn set_process_app_id() -> Result<()> {
+    // SAFETY: the temporary HSTRING is a valid NUL-terminated wide string
+    // that outlives the call, which copies it.
     unsafe { SetCurrentProcessExplicitAppUserModelID(&HSTRING::from(ZETTA_APP_ID)) }
         .context("setting the Zetta AppUserModelID")
 }
 
 fn set_shortcut_app_id(shortcut_path: &Path) -> Result<()> {
-    unsafe {
-        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-            .context("creating a Shell link")?;
-        let persist: IPersistFile = link.cast().context("opening the shortcut storage")?;
-        let shortcut_path = HSTRING::from(shortcut_path.as_os_str());
-        persist
-            .Load(&shortcut_path, STGM_READWRITE)
-            .context("loading the Start Menu shortcut")?;
+    // SAFETY: the caller holds a ComApartment on this thread, and the CLSID
+    // and IID references are static.
+    let link: IShellLinkW = unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }
+        .context("creating a Shell link")?;
+    let persist: IPersistFile = link.cast().context("opening the shortcut storage")?;
+    let shortcut_path = HSTRING::from(shortcut_path.as_os_str());
+    // SAFETY: `persist` holds a live reference to the link object, and the
+    // path HSTRING outlives the call.
+    unsafe { persist.Load(&shortcut_path, STGM_READWRITE) }
+        .context("loading the Start Menu shortcut")?;
 
-        let store: IPropertyStore = link.cast().context("opening shortcut properties")?;
-        let app_id = PROPVARIANT::from(ZETTA_APP_ID);
-        store
-            .SetValue(&PKEY_APP_USER_MODEL_ID, &app_id)
-            .context("setting the shortcut AppUserModelID")?;
-        store.Commit().context("committing shortcut properties")?;
-        persist
-            .Save(&shortcut_path, true)
-            .context("saving the Start Menu shortcut")?;
-    }
+    let store: IPropertyStore = link.cast().context("opening shortcut properties")?;
+    let app_id = PROPVARIANT::from(ZETTA_APP_ID);
+    // SAFETY: `store` is a live interface on the loaded link, and the key and
+    // PROPVARIANT are borrowed for the call, which copies the value.
+    unsafe { store.SetValue(&PKEY_APP_USER_MODEL_ID, &app_id) }
+        .context("setting the shortcut AppUserModelID")?;
+    // SAFETY: `store` is a live interface on the loaded link.
+    unsafe { store.Commit() }.context("committing shortcut properties")?;
+    // SAFETY: `persist` is a live interface, and the path HSTRING outlives the
+    // call.
+    unsafe { persist.Save(&shortcut_path, true) }.context("saving the Start Menu shortcut")?;
     Ok(())
 }
 
@@ -1153,70 +587,82 @@ fn write_profile_jump_list(profiles: &[Profile], hidden_profiles: &HashSet<Strin
         target.display()
     );
 
-    unsafe {
-        let list: ICustomDestinationList =
-            CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER)
-                .context("creating the destination list")?;
-        list.SetAppID(&HSTRING::from(ZETTA_APP_ID))
-            .context("selecting the Zetta destination list")?;
+    // SAFETY: the caller holds a ComApartment on this thread, and the CLSID
+    // and IID references are static.
+    let list: ICustomDestinationList =
+        unsafe { CoCreateInstance(&DestinationList, None, CLSCTX_INPROC_SERVER) }
+            .context("creating the destination list")?;
+    // SAFETY: `list` is a live interface, and the temporary HSTRING outlives
+    // the call, which copies it.
+    unsafe { list.SetAppID(&HSTRING::from(ZETTA_APP_ID)) }
+        .context("selecting the Zetta destination list")?;
 
-        let mut slots = 0;
-        let _removed: IObjectArray = list
-            .BeginList(&mut slots)
-            .context("opening the Zetta destination list")?;
-        let update = (|| -> Result<()> {
-            let tasks: IObjectCollection =
-                CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER)
-                    .context("creating the profile task collection")?;
-            for profile in visible_profile_jump_list_profiles(profiles, hidden_profiles) {
-                let link = create_profile_link(&target, profile)?;
-                tasks
-                    .AddObject(&link)
-                    .with_context(|| format!("adding profile {:?}", profile.name))?;
-            }
-            list.AddUserTasks(&tasks).context("adding profile tasks")?;
-            list.CommitList().context("committing profile tasks")?;
-            Ok(())
-        })();
-        if update.is_err() {
-            _ = list.AbortList();
+    let mut slots = 0;
+    // SAFETY: `list` is a live interface, and `slots` is a writable u32 that
+    // outlives the call.
+    let _removed: IObjectArray =
+        unsafe { list.BeginList(&mut slots) }.context("opening the Zetta destination list")?;
+    let update = (|| -> Result<()> {
+        // SAFETY: still on the caller's COM apartment thread; the CLSID and
+        // IID references are static.
+        let tasks: IObjectCollection =
+            unsafe { CoCreateInstance(&EnumerableObjectCollection, None, CLSCTX_INPROC_SERVER) }
+                .context("creating the profile task collection")?;
+        for profile in visible_profile_jump_list_profiles(profiles, hidden_profiles) {
+            let link = create_profile_link(&target, profile)?;
+            // SAFETY: `tasks` and `link` are live interfaces; the collection
+            // takes its own reference to the link.
+            unsafe { tasks.AddObject(&link) }
+                .with_context(|| format!("adding profile {:?}", profile.name))?;
         }
-        update
+        // SAFETY: `list` is a live interface with a list begun above, and
+        // `tasks` is a live collection it takes its own reference to.
+        unsafe { list.AddUserTasks(&tasks) }.context("adding profile tasks")?;
+        // SAFETY: `list` is a live interface with a list begun above.
+        unsafe { list.CommitList() }.context("committing profile tasks")?;
+        Ok(())
+    })();
+    if update.is_err() {
+        // SAFETY: `list` is a live interface whose list was begun above and
+        // not committed.
+        _ = unsafe { list.AbortList() };
     }
+    update
 }
 
 fn create_profile_link(target: &Path, profile: &Profile) -> Result<IShellLinkW> {
-    unsafe {
-        let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
-            .context("creating a profile Shell link")?;
-        let (icon_path, icon_index) = profile.icon.jump_list_icon_location(target);
-        let icon_path = HSTRING::from(icon_path.as_os_str());
-        let target = HSTRING::from(target.as_os_str());
-        let arguments = HSTRING::from(profile_jump_list_arguments(&profile.name));
-        let description = HSTRING::from(format!("Open Zetta with {}", profile.name));
-        link.SetPath(&target)
-            .context("setting the profile target")?;
-        link.SetArguments(&arguments)
-            .context("setting the profile arguments")?;
-        link.SetDescription(&description)
-            .context("setting the profile description")?;
-        link.SetIconLocation(&icon_path, icon_index)
-            .context("setting the profile icon")?;
-        if let Some(home) = env::var_os("USERPROFILE") {
-            link.SetWorkingDirectory(&HSTRING::from(home.as_os_str()))
-                .context("setting the profile working directory")?;
-        }
-
-        let store: IPropertyStore = link.cast().context("opening profile task properties")?;
-        let title = PROPVARIANT::from(profile.name.as_str());
-        store
-            .SetValue(&PKEY_TITLE, &title)
-            .context("setting the profile task title")?;
-        store
-            .Commit()
-            .context("committing profile task properties")?;
-        Ok(link)
+    // SAFETY: the caller holds a ComApartment on this thread, and the CLSID
+    // and IID references are static.
+    let link: IShellLinkW = unsafe { CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER) }
+        .context("creating a profile Shell link")?;
+    let (icon_path, icon_index) = profile.icon.jump_list_icon_location(target);
+    let icon_path = HSTRING::from(icon_path.as_os_str());
+    let target = HSTRING::from(target.as_os_str());
+    let arguments = HSTRING::from(profile_jump_list_arguments(&profile.name));
+    let description = HSTRING::from(format!("Open Zetta with {}", profile.name));
+    // SAFETY: `link` is a live interface, and `target` outlives the call,
+    // which copies the string.
+    unsafe { link.SetPath(&target) }.context("setting the profile target")?;
+    // SAFETY: `link` is live; `arguments` outlives the call.
+    unsafe { link.SetArguments(&arguments) }.context("setting the profile arguments")?;
+    // SAFETY: `link` is live; `description` outlives the call.
+    unsafe { link.SetDescription(&description) }.context("setting the profile description")?;
+    // SAFETY: `link` is live; `icon_path` outlives the call.
+    unsafe { link.SetIconLocation(&icon_path, icon_index) }.context("setting the profile icon")?;
+    if let Some(home) = env::var_os("USERPROFILE") {
+        // SAFETY: `link` is live; the temporary HSTRING outlives the call.
+        unsafe { link.SetWorkingDirectory(&HSTRING::from(home.as_os_str())) }
+            .context("setting the profile working directory")?;
     }
+
+    let store: IPropertyStore = link.cast().context("opening profile task properties")?;
+    let title = PROPVARIANT::from(profile.name.as_str());
+    // SAFETY: `store` is a live interface on the link, and the key and
+    // PROPVARIANT are borrowed for the call, which copies the value.
+    unsafe { store.SetValue(&PKEY_TITLE, &title) }.context("setting the profile task title")?;
+    // SAFETY: `store` is a live interface on the link.
+    unsafe { store.Commit() }.context("committing profile task properties")?;
+    Ok(link)
 }
 
 fn profile_jump_list_arguments(profile_name: &str) -> String {

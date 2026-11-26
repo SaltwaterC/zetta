@@ -19,7 +19,11 @@ use std::{
     collections::HashMap,
     fs::{File, OpenOptions},
     io,
-    os::windows::{ffi::OsStrExt as _, fs::OpenOptionsExt as _, io::FromRawHandle as _},
+    os::windows::{
+        ffi::OsStrExt as _,
+        fs::OpenOptionsExt as _,
+        io::{AsRawHandle as _, FromRawHandle as _, IntoRawHandle as _, OwnedHandle, RawHandle},
+    },
     path::{Path, PathBuf},
     sync::{
         Arc, LazyLock, Mutex,
@@ -33,20 +37,18 @@ use zetta_sync::RecoverPoison as _;
 use windows::{
     Win32::{
         Foundation::{
-            CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle,
-            ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL,
-            INVALID_HANDLE_VALUE, LocalFree,
+            DUPLICATE_CLOSE_SOURCE, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_NO_DATA,
+            ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL, INVALID_HANDLE_VALUE, LocalFree,
         },
         Security::{
             ACL,
             Authorization::{
-                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-                GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+                SDDL_REVISION_1, SE_KERNEL_OBJECT,
             },
             DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetTokenInformation, IsWellKnownSid,
             OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
-            TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TOKEN_USER, TokenOwner, TokenUser,
-            WinLocalSystemSid,
+            TOKEN_INFORMATION_CLASS, TOKEN_OWNER, TOKEN_QUERY, TokenOwner, WinLocalSystemSid,
         },
         Storage::FileSystem::{
             FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX, SECURITY_IDENTIFICATION,
@@ -60,10 +62,11 @@ use windows::{
             Threading::{GetCurrentProcess, OpenProcessToken},
         },
     },
-    core::{BOOL, PCWSTR, PWSTR},
+    core::{BOOL, PCWSTR},
 };
 
 use super::{MAX_FRAME, relay_frames, upstream_candidates};
+use crate::private_fs::windows_impl::token_user;
 
 /// How long a connection waits for a busy upstream agent to free an instance.
 const UPSTREAM_BUSY_WAIT_MS: u32 = 2_000;
@@ -147,7 +150,7 @@ fn start(
     let wide_name = wide(&name);
     let first = user_only_descriptor().and_then(|descriptor| {
         let handle = first_instance(&wide_name, &descriptor, first)?;
-        Ok((descriptor, handle.0 as usize))
+        Ok((descriptor, handle))
     });
     let (descriptor, first) = match first {
         Ok(first) => first,
@@ -181,7 +184,7 @@ fn start(
     Some(name)
 }
 
-fn first_instance(name: &[u16], descriptor: &str, first: FirstInstance) -> io::Result<HANDLE> {
+fn first_instance(name: &[u16], descriptor: &str, first: FirstInstance) -> io::Result<OwnedHandle> {
     match first {
         FirstInstance::Create => create_instance(name, descriptor, true),
         FirstInstance::CreateAfterRelease => {
@@ -195,11 +198,12 @@ fn first_instance(name: &[u16], descriptor: &str, first: FirstInstance) -> io::R
             }
         }
         FirstInstance::Adopted(value) => {
-            let handle = HANDLE(value as _);
-            if let Err(error) = instance_is_private(handle) {
-                let _ = unsafe { CloseHandle(handle) };
-                return Err(error);
-            }
+            // SAFETY: the previous daemon duplicated this instance into this
+            // process for it to own ([`hand_over`]), and it is claimed once:
+            // `adopt` and `discard` are the two ends of that, and an upgrade
+            // calls one of them per handed-over pane.
+            let handle = unsafe { OwnedHandle::from_raw_handle(value as RawHandle) };
+            instance_is_private(&handle)?;
             Ok(handle)
         }
     }
@@ -225,10 +229,14 @@ pub(in crate::server) fn hand_over(
     let duplicated = user_only_descriptor().and_then(|descriptor| {
         let instance = create_instance(&wide(&name), &descriptor, false)?;
         let mut remote = HANDLE::default();
+        // SAFETY: `process` is the replacement's handle, which the upgrade
+        // holds open across this call. `DUPLICATE_CLOSE_SOURCE` closes the
+        // instance whether or not the duplication succeeds, so it is given up
+        // here rather than dropped.
         unsafe {
             DuplicateHandle(
                 GetCurrentProcess(),
-                instance,
+                HANDLE(instance.into_raw_handle()),
                 process,
                 &mut remote,
                 0,
@@ -254,7 +262,9 @@ pub(in crate::server) fn hand_over(
 /// adopting after all.
 pub(in crate::server) fn discard(instance: Option<u64>) {
     if let Some(value) = instance.and_then(|value| usize::try_from(value).ok()) {
-        let _ = unsafe { CloseHandle(HANDLE(value as _)) };
+        // SAFETY: as in `first_instance`: the previous daemon duplicated this
+        // instance into this process, and it is claimed only here or there.
+        drop(unsafe { OwnedHandle::from_raw_handle(value as RawHandle) });
     }
 }
 
@@ -286,31 +296,31 @@ fn accept_loop(
     pane_id: u64,
     name: &[u16],
     descriptor: &str,
-    first: usize,
+    first: OwnedHandle,
     fallback: Option<PathBuf>,
     stop: &AtomicBool,
 ) {
-    let mut pending = HANDLE(first as _);
+    let mut pending = first;
     loop {
         if stop.load(Ordering::Acquire) {
-            let _ = unsafe { CloseHandle(pending) };
             return;
         }
-        if let Err(error) = unsafe { ConnectNamedPipe(pending, None) } {
+        // SAFETY: `pending` is an instance this loop owns, open until it is
+        // dropped or handed to a relay below.
+        if let Err(error) = unsafe { ConnectNamedPipe(raw(&pending), None) } {
             let code = error.code().0 as u32 & 0xffff;
             if code == ERROR_NO_DATA.0 {
                 // A client that came and went: the instance can listen again.
-                let _ = unsafe { DisconnectNamedPipe(pending) };
+                // SAFETY: as above.
+                let _ = unsafe { DisconnectNamedPipe(raw(&pending)) };
                 continue;
             }
             if code != ERROR_PIPE_CONNECTED.0 {
                 log::warn!("pane {pane_id}'s agent pipe stopped listening: {error}");
-                let _ = unsafe { CloseHandle(pending) };
                 return;
             }
         }
         if stop.load(Ordering::Acquire) {
-            let _ = unsafe { CloseHandle(pending) };
             return;
         }
         // Created while `pending` still exists, so the name is never without
@@ -319,18 +329,23 @@ fn accept_loop(
             Ok(next) => next,
             Err(error) => {
                 log::warn!("pane {pane_id}'s agent pipe could not add an instance: {error}");
-                let _ = unsafe { DisconnectNamedPipe(pending) };
+                // SAFETY: as above.
+                let _ = unsafe { DisconnectNamedPipe(raw(&pending)) };
                 thread::sleep(CREATE_RETRY);
                 continue;
             }
         };
-        let client = unsafe { File::from_raw_handle(pending.0 as _) };
+        let client = File::from(std::mem::replace(&mut pending, next));
         let fallback = fallback.clone();
         let _ = thread::Builder::new()
             .name(format!("zmux-agent-relay-{pane_id}"))
             .spawn(move || relay_connection(pane_id, client, fallback.as_deref()));
-        pending = next;
     }
+}
+
+/// The `windows` crate's view of a handle this module owns.
+fn raw(handle: &OwnedHandle) -> HANDLE {
+    HANDLE(handle.as_raw_handle())
 }
 
 fn relay_connection(pane_id: u64, mut client: File, fallback: Option<&Path>) {
@@ -372,6 +387,7 @@ fn connect_upstream(path: &Path) -> io::Result<File> {
     match open() {
         Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY.0 as i32) => {
             let wide = wide(path);
+            // SAFETY: `wide` is a NUL-terminated name that outlives the call.
             let _ = unsafe { WaitNamedPipeW(PCWSTR(wide.as_ptr()), UPSTREAM_BUSY_WAIT_MS) };
             open()
         }
@@ -379,12 +395,14 @@ fn connect_upstream(path: &Path) -> io::Result<File> {
     }
 }
 
-fn create_instance(name: &[u16], descriptor: &str, first: bool) -> io::Result<HANDLE> {
+fn create_instance(name: &[u16], descriptor: &str, first: bool) -> io::Result<OwnedHandle> {
     let sddl = descriptor
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
     let mut security = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+    // SAFETY: `sddl` is NUL-terminated and outlives the call; `security`
+    // receives a descriptor this function frees below.
     unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             PCWSTR(sddl.as_ptr()),
@@ -404,6 +422,8 @@ fn create_instance(name: &[u16], descriptor: &str, first: bool) -> io::Result<HA
     } else {
         PIPE_ACCESS_DUPLEX
     };
+    // SAFETY: `name` is NUL-terminated (`wide`), and `attributes` points at
+    // `security`, which stays allocated until after the call.
     let handle = unsafe {
         CreateNamedPipeW(
             PCWSTR(name.as_ptr()),
@@ -416,32 +436,40 @@ fn create_instance(name: &[u16], descriptor: &str, first: bool) -> io::Result<HA
             Some(&attributes),
         )
     };
-    let error = (handle == INVALID_HANDLE_VALUE).then(io::Error::last_os_error);
+    let created = if handle == INVALID_HANDLE_VALUE {
+        Err(io::Error::last_os_error())
+    } else {
+        // SAFETY: `CreateNamedPipeW` succeeded, so `handle` is a new instance
+        // nothing else owns.
+        Ok(unsafe { OwnedHandle::from_raw_handle(handle.0) })
+    };
+    // SAFETY: `security` came from `LocalAlloc` inside the conversion above,
+    // and the new instance keeps its own copy of the descriptor.
     unsafe { LocalFree(Some(HLOCAL(security.0))) };
-    error.map_or(Ok(handle), Err)
+    created
 }
 
 /// Checks that a pipe instance this process did not create is one only this
 /// account can use: owned by this account — or by the token's default owner,
 /// which for an elevated token is the Administrators group — and granting
 /// access to nobody but this account and SYSTEM.
-fn instance_is_private(handle: HANDLE) -> io::Result<()> {
-    let user = token_information(TokenUser)?;
+fn instance_is_private(handle: &OwnedHandle) -> io::Result<()> {
+    // SAFETY: the current-process pseudo-handle is always open and needs no
+    // closing.
+    let user = token_user(unsafe { GetCurrentProcess() })?;
+    let user_sid = user.sid();
     let token_owner = token_information(TokenOwner)?;
-    // SAFETY: both buffers were filled by GetTokenInformation for these
-    // classes and are aligned for the structures read here.
-    let (user_sid, owner_sid) = unsafe {
-        (
-            (*user.as_ptr().cast::<TOKEN_USER>()).User.Sid,
-            (*token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner,
-        )
-    };
+    // SAFETY: the buffer was filled by GetTokenInformation for `TokenOwner`
+    // and is aligned for `TOKEN_OWNER`.
+    let owner_sid = unsafe { (*token_owner.as_ptr().cast::<TOKEN_OWNER>()).Owner };
     let mut owner = PSID::default();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut security = PSECURITY_DESCRIPTOR::default();
+    // SAFETY: `handle` is open for the duration, and every out-pointer is a
+    // local this function reads only on success.
     let status = unsafe {
         GetSecurityInfo(
-            handle,
+            raw(handle),
             SE_KERNEL_OBJECT,
             OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
             Some(&mut owner),
@@ -454,7 +482,11 @@ fn instance_is_private(handle: HANDLE) -> io::Result<()> {
     if status.is_err() {
         return Err(io::Error::from_raw_os_error(status.0 as i32));
     }
+    // SAFETY: `owner` and `dacl` point into `security`, freed only after this,
+    // and both SIDs point into the token buffers still alive above.
     let verdict = unsafe { descriptor_is_private(owner, dacl, user_sid, owner_sid) };
+    // SAFETY: `GetSecurityInfo` allocated `security` with `LocalAlloc`, and
+    // nothing reads it after this.
     unsafe { LocalFree(Some(HLOCAL(security.0))) };
     verdict
 }
@@ -475,6 +507,9 @@ unsafe fn descriptor_is_private(
             format!("the agent pipe instance {what}"),
         ))
     };
+    // SAFETY: the caller guarantees `owner`, `dacl` and both SIDs are valid
+    // (see `# Safety`). Each ACE pointer comes from `GetAce` on that DACL, and
+    // its header is read before the type it announces.
     unsafe {
         if owner.is_invalid()
             || (EqualSid(owner, user).is_err() && EqualSid(owner, token_owner).is_err())
@@ -507,24 +542,32 @@ unsafe fn descriptor_is_private(
 
 /// One of this process's token information classes, in a buffer aligned for
 /// the structure it holds.
+/// One class of this process's token information, aligned for the structure
+/// it holds. `token_user` reads the user; this is for the rest.
 fn token_information(class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<u64>> {
+    let mut token = HANDLE::default();
+    // SAFETY: the pseudo-handle `GetCurrentProcess` returns needs no closing,
+    // and `token` is written only on success.
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }
+        .map_err(io::Error::other)?;
+    // SAFETY: `OpenProcessToken` succeeded, so this process owns `token`.
+    let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
+    let mut length = 0_u32;
+    // SAFETY: a size query: no buffer, and `length` receives the size needed.
+    let _ = unsafe { GetTokenInformation(raw(&token), class, None, 0, &mut length) };
+    let mut buffer = vec![0_u64; (length as usize).div_ceil(8)];
+    // SAFETY: `buffer` holds at least `length` bytes, the size just queried.
     unsafe {
-        let mut token = HANDLE::default();
-        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).map_err(io::Error::other)?;
-        let mut length = 0_u32;
-        let _ = GetTokenInformation(token, class, None, 0, &mut length);
-        let mut buffer = vec![0_u64; (length as usize).div_ceil(8)];
-        let queried = GetTokenInformation(
-            token,
+        GetTokenInformation(
+            raw(&token),
             class,
             Some(buffer.as_mut_ptr().cast()),
             length,
             &mut length,
-        );
-        let _ = CloseHandle(token);
-        queried.map_err(io::Error::other)?;
-        Ok(buffer)
+        )
     }
+    .map_err(io::Error::other)?;
+    Ok(buffer)
 }
 
 /// A DACL granting this account and SYSTEM, by the account's own SID.
@@ -533,15 +576,10 @@ fn token_information(class: TOKEN_INFORMATION_CLASS) -> io::Result<Vec<u64>> {
 /// Administrators group, so a pipe created from an elevated SSH login would
 /// refuse the same account's non-elevated processes, and the reverse.
 fn user_only_descriptor() -> io::Result<String> {
-    let user = token_information(TokenUser)?;
-    unsafe {
-        let user = &*user.as_ptr().cast::<TOKEN_USER>();
-        let mut sid = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut sid).map_err(io::Error::other)?;
-        let text = sid.to_string().map_err(io::Error::other);
-        LocalFree(Some(HLOCAL(sid.0.cast())));
-        Ok(format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", text?))
-    }
+    // SAFETY: the current-process pseudo-handle is always open and needs no
+    // closing.
+    let user = token_user(unsafe { GetCurrentProcess() })?.sid_string()?;
+    Ok(format!("D:P(A;;GA;;;{user})(A;;GA;;;SY)"))
 }
 
 fn wide(path: &Path) -> Vec<u16> {

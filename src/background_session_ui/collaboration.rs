@@ -10,7 +10,7 @@ use super::*;
 
 use super::multiplexer::AttachedPaneKind;
 use crate::mux::SharedSessionKey;
-use crate::session_state::{AxisState, LayoutState, PaneState, TabState};
+use crate::session_state::{LayoutState, PaneState, TabState};
 use zmux::messages::SharedSessionState;
 use zmux::protocol::{BackgroundPaneLayout, BackgroundPaneSummary};
 

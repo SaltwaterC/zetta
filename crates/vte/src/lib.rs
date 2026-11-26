@@ -741,16 +741,26 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         }
 
         let text = &bytes[..plain_chars];
-        let complete = match str::from_utf8(text) {
+        // Zetta patch: a read that ends inside a character is the common way for text to be
+        // invalid, so that character is set aside before validating rather than found by it. The
+        // rest is then a `str` without taking `from_utf8`'s word for where the valid prefix ends,
+        // which only text that is invalid elsewhere has to check again.
+        let whole = text.len() - partial_character_len(text);
+        let complete = match str::from_utf8(&text[..whole]) {
             Ok(parsed) => {
                 Self::ground_dispatch(performer, parsed);
-                plain_chars
+                if whole == plain_chars {
+                    plain_chars
+                } else {
+                    whole + Self::ground_dispatch_lossy(performer, &text[whole..])
+                }
             },
             // Handle invalid and partial utf8.
             Err(err) => {
                 // Dispatch all the valid bytes.
                 let valid_bytes = err.valid_up_to();
-                let parsed = unsafe { str::from_utf8_unchecked(&text[..valid_bytes]) };
+                let parsed = str::from_utf8(&text[..valid_bytes])
+                    .expect("bytes before `valid_up_to` are valid UTF-8");
                 Self::ground_dispatch(performer, parsed);
                 valid_bytes + Self::ground_dispatch_lossy(performer, &text[valid_bytes..])
             },
@@ -903,45 +913,27 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         self.partial_utf8_len += to_copy;
 
         // Parse the unicode character.
-        match str::from_utf8(&self.partial_utf8[..self.partial_utf8_len]) {
-            // If the entire buffer is valid, use the first character and continue parsing.
-            Ok(parsed) => {
-                let c = unsafe { parsed.chars().next().unwrap_unchecked() };
+        //
+        // Zetta patch: decoded by `decode_utf8`, which judges the first character as
+        // `str::from_utf8` does, rather than by unchecked conversions of what `from_utf8` passed.
+        // Only the first character matters: bytes after it belong to the next one.
+        match decode_utf8(&self.partial_utf8[..self.partial_utf8_len]) {
+            // If the character is complete, print it and continue parsing after it.
+            Utf8::Char(c, width) => {
                 performer.print(c);
 
                 self.partial_utf8_len = 0;
-                c.len_utf8() - old_bytes
+                width - old_bytes
             },
-            Err(err) => {
-                let valid_bytes = err.valid_up_to();
-                // If we have any valid bytes, that means we partially copied another
-                // utf8 character into `partial_utf8`. Since we only care about the
-                // first character, we just ignore the rest.
-                if valid_bytes > 0 {
-                    let c = unsafe {
-                        let parsed = str::from_utf8_unchecked(&self.partial_utf8[..valid_bytes]);
-                        parsed.chars().next().unwrap_unchecked()
-                    };
+            // If the partial character was also invalid, emit the replacement character.
+            Utf8::Invalid(invalid_len) => {
+                performer.print('�');
 
-                    performer.print(c);
-
-                    self.partial_utf8_len = 0;
-                    return c.len_utf8() - old_bytes;
-                }
-
-                match err.error_len() {
-                    // If the partial character was also invalid, emit the replacement
-                    // character.
-                    Some(invalid_len) => {
-                        performer.print('�');
-
-                        self.partial_utf8_len = 0;
-                        invalid_len - old_bytes
-                    },
-                    // If the character still isn't complete, wait for more data.
-                    None => to_copy,
-                }
+                self.partial_utf8_len = 0;
+                invalid_len - old_bytes
             },
+            // If the character still isn't complete, wait for more data.
+            Utf8::Incomplete => to_copy,
         }
     }
 
@@ -951,29 +943,52 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
     /// one call, so a performer can write a line of plain text without a call
     /// per character.
     #[inline]
-    fn ground_dispatch<P: Perform>(performer: &mut P, text: &str) {
-        let bytes = text.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            let run_end = i + printable_ascii_len(&bytes[i..]);
-            if run_end > i {
-                performer.print_ascii(&bytes[i..run_end]);
-                i = run_end;
-                if i == bytes.len() {
-                    break;
-                }
+    ///
+    /// The text left is carried as the `Chars` iterator's own remainder, so
+    /// taking a character costs no check that it starts on a boundary.
+    fn ground_dispatch<P: Perform>(performer: &mut P, mut text: &str) {
+        loop {
+            let run = printable_ascii_len(text.as_bytes());
+            if run > 0 {
+                performer.print_ascii(&text.as_bytes()[..run]);
+                // A run of ASCII ends on a character boundary.
+                text = &text[run..];
             }
 
-            // SAFETY: `i` is on a character boundary: every byte before it was
-            // ASCII or part of a character consumed whole, and `i < len`.
-            let c = unsafe { text.get_unchecked(i..).chars().next().unwrap_unchecked() };
+            let mut chars = text.chars();
+            let Some(c) = chars.next() else { break };
             match c {
                 '\x00'..='\x1f' | '\u{80}'..='\u{9f}' => performer.execute(c as u8),
                 _ => performer.print(c),
             }
-            i += c.len_utf8();
+            text = chars.as_str();
         }
     }
+}
+
+/// Zetta patch: the length of the character `bytes` ends inside, if any: a lead
+/// byte among the last three that announces more bytes than follow it.
+///
+/// Whatever comes before it is untouched, so a sequence this sets aside is
+/// one `str::from_utf8` would have stopped at anyway; it only finds it
+/// without validating the text first.
+#[inline]
+fn partial_character_len(bytes: &[u8]) -> usize {
+    // Most text between escapes ends in ASCII.
+    if bytes.last().is_none_or(u8::is_ascii) {
+        return 0;
+    }
+    for back in 1..=bytes.len().min(3) {
+        let width = match bytes[bytes.len() - back] {
+            0x80..=0xBF => continue,
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => return 0,
+        };
+        return if back < width { back } else { 0 };
+    }
+    0
 }
 
 /// The first character of some bytes, judged as [`str::from_utf8`] judges it.
@@ -1005,6 +1020,7 @@ fn decode_utf8(bytes: &[u8]) -> Utf8 {
         0xF4 => (4, 0x80..=0x8F),
         _ => return Utf8::Invalid(1),
     };
+    let mut code = u32::from(first) & (0x7F >> width);
     for index in 1..width {
         let Some(&byte) = bytes.get(index) else {
             return Utf8::Incomplete;
@@ -1013,10 +1029,13 @@ fn decode_utf8(bytes: &[u8]) -> Utf8 {
         if !valid {
             return Utf8::Invalid(index);
         }
+        code = (code << 6) | u32::from(byte & 0x3F);
     }
-    // SAFETY: the bytes up to `width` were validated above.
-    let c = unsafe { str::from_utf8_unchecked(&bytes[..width]).chars().next().unwrap_unchecked() };
-    Utf8::Char(c, width)
+    // The ranges above exclude surrogates and everything past U+10FFFF, so this is a character.
+    match char::from_u32(code) {
+        Some(c) => Utf8::Char(c, width),
+        None => Utf8::Invalid(1),
+    }
 }
 
 /// What lossy ground dispatch does with one byte, looked up rather than
@@ -2116,6 +2135,29 @@ mod tests {
             let mut ignoring = IgnoringDispatcher::default();
             Parser::new().advance(&mut ignoring, &bytes);
             assert_eq!(unignored(ignoring.0.dispatched), unignored(upstream), "{bytes:x?}");
+        }
+    }
+
+    /// Zetta patch: a character split across two reads is decoded by `decode_utf8`
+    /// when the second arrives, and must come out as it does from one read.
+    #[test]
+    fn a_character_split_across_reads_dispatches_as_one_read_does() {
+        let cases: [&[u8]; 4] = [
+            b"a\xF0\x9F\x98\x80b\xF0\x9F\x98c\xF0\x9Fd\xF0e",
+            b"\xE0\x80\xE0\xA0\x80\xED\x9F\xBF\xED\xA0\x80",
+            b"\xF0\x8F\xBF\xBF\xF0\x90\x80\x80\xF4\x8F\xBF\xBF\xF4\x90\x80\x80",
+            b"\xC2\xA9\xE6\x97\xA5\xC2\x1b[m\xE6\x97",
+        ];
+        for bytes in cases {
+            let mut whole = Dispatcher::default();
+            Parser::new().advance(&mut whole, bytes);
+            for split in 1..bytes.len() {
+                let mut parts = Dispatcher::default();
+                let mut parser = Parser::new();
+                parser.advance(&mut parts, &bytes[..split]);
+                parser.advance(&mut parts, &bytes[split..]);
+                assert_eq!(parts.dispatched, whole.dispatched, "{bytes:x?} split at {split}");
+            }
         }
     }
 

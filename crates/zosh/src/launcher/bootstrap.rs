@@ -413,7 +413,9 @@ pub(super) fn unsupported_server_output_for_command(output: &str, command: &Mosh
 pub(super) fn is_unsupported_server_output_for(output: &str, server: &str) -> bool {
     let server = server.to_ascii_lowercase();
     let server_command = shlex::split(&server).unwrap_or_else(|| vec![server.clone()]);
-    let server_name = server_command.last().map(String::as_str).unwrap_or(&server);
+    let server_name = server_command
+        .last()
+        .map_or(server.as_str(), String::as_str);
     let server_name = Path::new(server_name)
         .file_name()
         .and_then(|name| name.to_str())

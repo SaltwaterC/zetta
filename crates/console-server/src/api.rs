@@ -105,7 +105,7 @@ fn object_kind(number: u32) -> Option<Kind> {
 impl Server {
     pub(super) fn api(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         packet: &Packet,
         available: usize,
     ) -> io::Result<(i32, usize)> {
@@ -202,7 +202,7 @@ impl Server {
     /// CONSOLE_WRITECONSOLE_MSG: NumBytes, then Unicode; the text follows.
     fn write_console(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -216,7 +216,7 @@ impl Server {
     /// name, then the initial text, which only Unicode reads may pass.
     fn read_console(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {

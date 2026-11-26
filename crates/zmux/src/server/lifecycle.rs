@@ -46,12 +46,7 @@ fn pane_start_directory(requested: Option<PathBuf>) -> Option<PathBuf> {
 
 /// The account's home directory, when it has a usable one.
 fn home_directory() -> Option<PathBuf> {
-    #[cfg(windows)]
-    let home = std::env::var_os("USERPROFILE");
-    #[cfg(not(windows))]
-    let home = std::env::var_os("HOME");
-    home.map(PathBuf::from)
-        .filter(|home| !home.as_os_str().is_empty() && home.is_dir())
+    crate::paths::home_dir().filter(|home| !home.as_os_str().is_empty() && home.is_dir())
 }
 
 /// The directory a pane is running in, read from the process the daemon
@@ -151,6 +146,13 @@ fn authenticate_resume(
     Ok(Some(Response::AuthenticationFailed))
 }
 
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        unused_variables,
+        reason = "without persistence there is no record to resume"
+    )
+)]
 pub(super) fn resume(
     daemon: &Arc<Daemon>,
     request: crate::messages::ResumeRequest,
@@ -162,7 +164,6 @@ pub(super) fn resume(
     } = caller;
     #[cfg(not(feature = "session-persistence"))]
     {
-        let _ = (daemon, request, peer_process_id);
         connection.send(&Response::Error {
             message: "resume needs the session-persistence feature".to_owned(),
         })
@@ -529,6 +530,13 @@ pub(super) fn resize_pane(daemon: &Arc<Daemon>, context: ResizePaneContext<'_>) 
     Ok(())
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        unused_variables,
+        reason = "only a Windows pseudoconsole has a palette to set"
+    )
+)]
 pub(super) fn set_console_palette(
     daemon: &Arc<Daemon>,
     session_id: u64,
@@ -575,8 +583,6 @@ pub(super) fn set_console_palette(
         .pty_host
         .set_console_palette(pane.console_id, palette)
         .context("updating the pseudoconsole palette")?;
-    #[cfg(not(windows))]
-    let _ = (daemon, pane, palette);
     Ok(())
 }
 

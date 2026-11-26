@@ -589,12 +589,7 @@ impl Zetta {
                 };
                 self.with_next_tab_in_group(group, |this| {
                     this.open_tab_with_profile_context(
-                        profile,
-                        None,
-                        NewTabOrigin::GroupEntry,
-                        None,
-                        None,
-                        TerminalLaunch::Spawn,
+                        NewTabRequest::new(profile, None, NewTabOrigin::GroupEntry),
                         window,
                         cx,
                     );

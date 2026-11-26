@@ -82,19 +82,15 @@ impl Drop for InheritedAcrossExec<'_> {
 
 /// Sets or clears a descriptor's close-on-exec flag.
 pub fn set_close_on_exec(descriptor: BorrowedFd<'_>, close: bool) -> Result<()> {
-    let raw = descriptor.as_raw_fd();
-    // SAFETY: the borrow keeps the descriptor open for the call.
-    let flags = unsafe { libc::fcntl(raw, libc::F_GETFD) };
-    anyhow::ensure!(flags >= 0, "reading descriptor flags: {}", last_error());
-    let flags = if close {
-        flags | libc::FD_CLOEXEC
-    } else {
-        flags & !libc::FD_CLOEXEC
-    };
-    // SAFETY: as above, with a flag set derived from the one just read.
-    let result = unsafe { libc::fcntl(raw, libc::F_SETFD, flags) };
-    anyhow::ensure!(result >= 0, "setting close-on-exec: {}", last_error());
-    Ok(())
+    use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
+
+    let mut flags = fcntl_getfd(descriptor)
+        .map_err(std::io::Error::from)
+        .context("reading descriptor flags")?;
+    flags.set(FdFlags::CLOEXEC, close);
+    fcntl_setfd(descriptor, flags)
+        .map_err(std::io::Error::from)
+        .context("setting close-on-exec")
 }
 
 /// Takes ownership of a descriptor the previous image left open across the
@@ -195,6 +191,9 @@ pub fn write_handover(handover: &Handover) -> Result<std::fs::File> {
 /// I/O safety check fires on the close — so a handover naming a descriptor
 /// this image did not inherit has to be rejected before it is claimed.
 pub fn descriptor_is_open(descriptor: RawFd) -> bool {
+    // A number rather than a borrowed descriptor is the point here, so this
+    // stays on `libc`: rustix's `fcntl_getfd` needs a `BorrowedFd`, which
+    // asserts the descriptor is open.
     // SAFETY: `F_GETFD` only reads the descriptor's flags and reports an error
     // for one that is not open.
     unsafe { libc::fcntl(descriptor, libc::F_GETFD) >= 0 }
@@ -221,12 +220,12 @@ pub fn read_handover(descriptor: RawFd) -> Result<Handover> {
 
 #[cfg(target_os = "linux")]
 fn tempfile_anonymous() -> Result<std::fs::File> {
-    let name = c"zmux-handover";
-    // SAFETY: the name is a valid C string and the flags are a valid set.
-    let raw = unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) };
-    anyhow::ensure!(raw >= 0, "creating the handover: {}", last_error());
-    // SAFETY: memfd_create returned a fresh descriptor this owns.
-    Ok(unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(raw) })
+    use rustix::fs::{MemfdFlags, memfd_create};
+
+    let descriptor = memfd_create(c"zmux-handover", MemfdFlags::CLOEXEC)
+        .map_err(std::io::Error::from)
+        .context("creating the handover")?;
+    Ok(descriptor.into())
 }
 
 #[cfg(not(target_os = "linux"))]

@@ -36,10 +36,16 @@ fn register_class() -> io::Result<()> {
         let class = WNDCLASSEXW {
             cbSize: size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(window_proc),
+            // SAFETY: a null name asks for this executable's own module
+            // handle, which needs no release.
             hInstance: unsafe { GetModuleHandleW(std::ptr::null()) },
             lpszClassName: class_name().as_ptr(),
+            // SAFETY: WNDCLASSEXW is integers, handles and nullable pointers,
+            // for which all-zero is valid.
             ..unsafe { std::mem::zeroed() }
         };
+        // SAFETY: class is fully initialized with its own size, and its class
+        // name is the NUL-terminated 'static string from class_name().
         unsafe { RegisterClassExW(&class) != 0 }
     });
     if registered {
@@ -57,9 +63,14 @@ unsafe extern "system" fn window_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // SAFETY: hwnd is the window this procedure is being called for.
     let visibility = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Visibility;
     let report = |shown: bool| {
         if !visibility.is_null() {
+            // SAFETY: a non-null user-data value is only ever the Box that
+            // PseudoWindow::create leaked into it, freed on WM_DESTROY after
+            // the slot is cleared; window procedures run on the window's own
+            // thread, so it cannot be freed while this runs.
             unsafe { (*visibility)(shown) };
         }
     };
@@ -81,6 +92,9 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             if !visibility.is_null() {
+                // SAFETY: the slot is cleared before the Box it held, which
+                // create leaked into it, is reclaimed exactly once; later
+                // messages see null. hwnd is this window.
                 unsafe {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                     drop(Box::from_raw(visibility as *mut Visibility));
@@ -89,6 +103,7 @@ unsafe extern "system" fn window_proc(
             }
             0
         }
+        // SAFETY: forwards this window's own message unchanged.
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
@@ -102,6 +117,10 @@ impl PseudoWindow {
         let thread = std::thread::Builder::new()
             .name("console-window".into())
             .spawn(move || {
+                // SAFETY: the class was registered above with a 'static
+                // NUL-terminated name, a null title, menu and create
+                // parameter are allowed, and the owner is a window handle
+                // or null (a stale one only makes the call fail).
                 let hwnd = unsafe {
                     CreateWindowExW(
                         WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
@@ -123,10 +142,15 @@ impl PseudoWindow {
                     return;
                 }
                 let boxed = Box::into_raw(Box::new(visibility));
+                // SAFETY: hwnd was created on this thread; the slot takes
+                // ownership of `boxed`, which window_proc frees on WM_DESTROY.
                 unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, boxed as isize) };
                 let _ = sender.send(Ok(hwnd as usize));
+                // SAFETY: MSG is plain data; all-zero is valid.
                 let mut message: MSG = unsafe { std::mem::zeroed() };
+                // SAFETY: message is a writable local MSG.
                 while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
+                    // SAFETY: message was just filled in by GetMessageW.
                     unsafe {
                         TranslateMessage(&message);
                         DispatchMessageW(&message);
@@ -150,6 +174,8 @@ impl Drop for PseudoWindow {
     fn drop(&mut self) {
         // WM_CLOSE reaches DefWindowProc, which destroys the window on its
         // own thread; WM_DESTROY then ends the message loop.
+        // SAFETY: PostMessageW passes no pointers; a window that is already
+        // gone only makes it fail.
         unsafe {
             PostMessageW(self.hwnd as HWND, WM_CLOSE, 0, 0);
         }

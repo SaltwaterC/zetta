@@ -448,11 +448,7 @@ pub(super) fn map_background_layout_state(
             first,
             second,
         } => LayoutState::Split {
-            axis: if axis.eq_ignore_ascii_case("vertical") {
-                AxisState::Vertical
-            } else {
-                AxisState::Horizontal
-            },
+            axis: *axis,
             first_ratio: *first_ratio,
             first: Box::new(map_background_layout_state(first, mux_to_local)?),
             second: Box::new(map_background_layout_state(second, mux_to_local)?),
@@ -592,11 +588,7 @@ pub(super) fn map_background_layout(
             first,
             second,
         } => PaneLayout::Split {
-            axis: if axis.eq_ignore_ascii_case("vertical") {
-                SplitAxis::Vertical
-            } else {
-                SplitAxis::Horizontal
-            },
+            axis: *axis,
             first_ratio: *first_ratio,
             first: Box::new(map_background_layout(first, mux_to_local)?),
             second: Box::new(map_background_layout(second, mux_to_local)?),
@@ -639,7 +631,7 @@ pub(super) fn remap_summary_layout(
             first,
             second,
         } => BackgroundPaneLayout::Split {
-            axis: axis.clone(),
+            axis: *axis,
             first_ratio: *first_ratio,
             first: Box::new(remap_summary_layout(first, local_to_mux)?),
             second: Box::new(remap_summary_layout(second, local_to_mux)?),
@@ -724,7 +716,7 @@ pub(super) fn apply_pane_overlay(
     pane.overlay_font_size = overlay
         .font_size
         .as_deref()
-        .and_then(crate::OverlayFontSize::parse);
+        .and_then(|size| size.parse().ok());
     pane.overlay_opacity = overlay.opacity;
     pane.overlay_color = overlay.color.map(|[h, s, l, a]| gpui::Hsla { h, s, l, a });
 }

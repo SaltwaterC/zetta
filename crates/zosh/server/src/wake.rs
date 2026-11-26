@@ -27,22 +27,22 @@ pub struct Waker(WakeTarget);
 #[derive(Clone)]
 enum WakeTarget {
     #[cfg_attr(
-        unix,
-        allow(
+        all(unix, not(test)),
+        expect(
             dead_code,
             reason = "on Unix only tests wake a thread rather than the loop's pipe"
         )
     )]
     Thread(Thread),
     #[cfg(unix)]
-    Pipe(Arc<std::os::fd::OwnedFd>),
+    Pipe(Arc<std::os::unix::net::UnixStream>),
 }
 
 impl Waker {
     /// Wakes the calling thread out of a park.
     #[cfg_attr(
         all(unix, not(test)),
-        allow(dead_code, reason = "the Unix loop is woken through its pipe")
+        expect(dead_code, reason = "the Unix loop is woken through its pipe")
     )]
     pub fn current_thread() -> Self {
         Self(WakeTarget::Thread(thread::current()))
@@ -53,15 +53,10 @@ impl Waker {
             WakeTarget::Thread(thread) => thread.unpark(),
             #[cfg(unix)]
             WakeTarget::Pipe(write) => {
-                use std::os::fd::AsRawFd as _;
-                let byte = [1_u8];
-                // SAFETY: the descriptor is owned by the pipe this waker holds
-                // a reference to, and the buffer is one byte long. A full pipe
-                // already means a pending wake-up, so a failed write needs no
-                // handling.
-                unsafe {
-                    libc::write(write.as_raw_fd(), byte.as_ptr().cast(), 1);
-                }
+                use std::io::Write as _;
+                // A full socket buffer already means a pending wake-up, so a
+                // failed write needs no handling.
+                let _ = (&**write).write(&[1]);
             }
         }
     }
@@ -71,32 +66,21 @@ impl Waker {
 /// come from.
 #[cfg(unix)]
 pub struct WakePipe {
-    read: std::os::fd::OwnedFd,
-    write: Arc<std::os::fd::OwnedFd>,
+    read: std::os::unix::net::UnixStream,
+    write: Arc<std::os::unix::net::UnixStream>,
 }
 
 #[cfg(unix)]
 impl WakePipe {
+    /// A connected socket pair rather than a pipe: `UnixStream::pair` creates
+    /// both ends close-on-exec in the same call, so a shell spawned meanwhile
+    /// cannot inherit either.
     pub fn new() -> std::io::Result<Self> {
-        use std::os::fd::{FromRawFd as _, OwnedFd};
-
-        let mut descriptors = [0 as libc::c_int; 2];
-        // SAFETY: `pipe` fills the two-element array it is given.
-        if unsafe { libc::pipe(descriptors.as_mut_ptr()) } < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        // SAFETY: `pipe` returned these descriptors and nothing else owns them.
-        let (read, write) = unsafe {
-            (
-                OwnedFd::from_raw_fd(descriptors[0]),
-                OwnedFd::from_raw_fd(descriptors[1]),
-            )
-        };
+        let (read, write) = std::os::unix::net::UnixStream::pair()?;
         // Neither end may block: a wake-up must not stall the thread raising
-        // it, and the loop empties the pipe without waiting.
-        for descriptor in [&read, &write] {
-            crate::session_io::set_nonblocking_cloexec(descriptor)?;
-        }
+        // it, and the loop empties the socket without waiting.
+        read.set_nonblocking(true)?;
+        write.set_nonblocking(true)?;
         Ok(Self {
             read,
             write: Arc::new(write),
@@ -107,17 +91,15 @@ impl WakePipe {
         Waker(WakeTarget::Pipe(Arc::clone(&self.write)))
     }
 
-    pub fn descriptor(&self) -> std::os::fd::RawFd {
-        use std::os::fd::AsRawFd as _;
-        self.read.as_raw_fd()
+    pub fn descriptor(&self) -> std::os::fd::BorrowedFd<'_> {
+        use std::os::fd::AsFd as _;
+        self.read.as_fd()
     }
 
     pub fn drain(&self) {
+        use std::io::Read as _;
         let mut bytes = [0_u8; 64];
-        // SAFETY: the descriptor is owned by this value and the buffer is as
-        // long as the count passed with it.
-        while unsafe { libc::read(self.descriptor(), bytes.as_mut_ptr().cast(), bytes.len()) } > 0 {
-        }
+        while (&self.read).read(&mut bytes).is_ok_and(|read| read > 0) {}
     }
 }
 

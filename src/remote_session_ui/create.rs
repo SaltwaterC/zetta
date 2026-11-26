@@ -78,7 +78,7 @@ pub(super) fn build_remote_create_layout(
                 next_draft_id,
             )?;
             Ok(zmux::messages::SharedDraftLayout::Split {
-                axis: axis.as_str().to_owned(),
+                axis: (*axis).into(),
                 first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
                 first: Box::new(first),
                 second: Box::new(second),

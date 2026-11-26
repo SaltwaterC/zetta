@@ -13,7 +13,13 @@ mod render;
 mod sealed;
 mod submit;
 
-#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        dead_code,
+        reason = "`ResumeDisk`, and without zmux the remote prompts, have no caller"
+    )
+)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionAuthenticationPromptMode {
     /// Choosing the secret for an action that widens a session's reach.

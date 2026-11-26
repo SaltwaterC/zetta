@@ -242,6 +242,13 @@ impl Zetta {
     /// nothing and a correct secret is reported as "no longer available".
     ///
     /// Returns `true` once it has handled the submission.
+    #[cfg_attr(
+        not(feature = "zmux"),
+        expect(
+            unused_variables,
+            reason = "without a multiplexer there is nothing to hand the secret to"
+        )
+    )]
     pub(super) fn submit_multiplexed_authentication(
         &mut self,
         mode: SessionAuthenticationPromptMode,
@@ -251,7 +258,6 @@ impl Zetta {
     ) -> bool {
         #[cfg(not(feature = "zmux"))]
         {
-            let _ = (mode, secret, window, cx);
             false
         }
         #[cfg(feature = "zmux")]

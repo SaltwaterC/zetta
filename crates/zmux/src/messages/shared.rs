@@ -3,6 +3,7 @@
 //! pane drafts a shared spawn carries.
 
 use super::*;
+use crate::protocol::SplitAxis;
 
 /// The monotonically increasing version of a daemon-owned shared session.
 ///
@@ -245,7 +246,7 @@ impl SharedSessionState {
                 validate_layout_panes(layout, |pane_id| self.contains_pane(pane_id))?;
                 let mut current = self.pane_ids().collect::<Vec<_>>();
                 let mut replacement = Vec::new();
-                collect_layout_pane_ids(layout, &mut replacement);
+                zetta_layout::collect_pane_ids(layout, &mut replacement);
                 current.sort_unstable();
                 replacement.sort_unstable();
                 anyhow::ensure!(
@@ -373,7 +374,7 @@ impl SharedSessionState {
             SharedSessionOperation::SwapPanes {
                 first_pane_id,
                 second_pane_id,
-            } => swap_layout_panes(
+            } => zetta_layout::swap_pane_ids(
                 &mut self.presentation.layout,
                 *first_pane_id,
                 *second_pane_id,
@@ -514,6 +515,26 @@ pub enum SharedRotationDirection {
     CounterClockwise,
 }
 
+impl From<SharedPaneDirection> for zetta_layout::PaneDirection {
+    fn from(direction: SharedPaneDirection) -> Self {
+        match direction {
+            SharedPaneDirection::Left => Self::Left,
+            SharedPaneDirection::Right => Self::Right,
+            SharedPaneDirection::Up => Self::Up,
+            SharedPaneDirection::Down => Self::Down,
+        }
+    }
+}
+
+impl From<SharedRotationDirection> for zetta_layout::PaneRotationDirection {
+    fn from(direction: SharedRotationDirection) -> Self {
+        match direction {
+            SharedRotationDirection::Clockwise => Self::Clockwise,
+            SharedRotationDirection::CounterClockwise => Self::CounterClockwise,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedSessionOperationRequest {
@@ -556,7 +577,7 @@ pub enum SharedDraftLayout {
         draft_id: u64,
     },
     Split {
-        axis: String,
+        axis: SplitAxis,
         first_ratio: u16,
         first: Box<SharedDraftLayout>,
         second: Box<SharedDraftLayout>,

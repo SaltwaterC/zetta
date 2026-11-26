@@ -143,6 +143,10 @@ trait ApplicationOpenUrlsExt {
 }
 
 impl ApplicationOpenUrlsExt for gpui::Application {
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(unused_variables, reason = "only macOS forwards opened URLs")
+    )]
     fn with_open_url_handler(
         self,
         control_tx: futures::channel::mpsc::UnboundedSender<ProcessControlCommand>,
@@ -151,8 +155,6 @@ impl ApplicationOpenUrlsExt for gpui::Application {
         self.on_open_urls(move |urls| {
             let _ = control_tx.unbounded_send(ProcessControlCommand::OpenUrls(urls));
         });
-        #[cfg(not(target_os = "macos"))]
-        let _ = control_tx;
         self
     }
 }

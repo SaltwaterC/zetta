@@ -95,12 +95,14 @@ pub(crate) fn build_zosh_pane(
         reader,
         writer,
         title,
-        cursor_shape,
-        alternate_scroll,
-        max_scroll_history_lines,
-        window_id,
-        executor,
-        PathStyle::local(),
+        terminal::DisplayOnlySettings {
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            window_id,
+            background_executor: executor,
+            path_style: PathStyle::local(),
+        },
     )
     .with_raw_output()
     .with_working_directory(working_directory)

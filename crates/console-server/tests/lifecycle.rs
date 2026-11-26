@@ -80,6 +80,7 @@ fn programs_started_from_the_console_outlive_it() {
         .trim()
         .parse()
         .unwrap();
+    use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Foundation::STILL_ACTIVE;
     use windows_sys::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
@@ -87,25 +88,30 @@ fn programs_started_from_the_console_outlive_it() {
     };
     // Hold this test's detached child directly. tasklist/taskkill depend on
     // access to system-wide process enumeration, which a sandbox may deny.
-    let detached = console_server::native::Handle::new(unsafe {
-        OpenProcess(
+    // SAFETY: OpenProcess takes only integers, and returns null or a new
+    // handle nothing else owns.
+    let detached = unsafe {
+        console_server::native::adopt(OpenProcess(
             PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
             0,
             pid,
-        )
-    })
+        ))
+    }
     .unwrap();
     session.close();
     drop(session);
     std::thread::sleep(Duration::from_secs(7));
     let mut exit_code = 0;
     assert_ne!(
-        unsafe { GetExitCodeProcess(detached.raw(), &mut exit_code) },
+        // SAFETY: detached owns the open process handle; exit_code is a
+        // writable local.
+        unsafe { GetExitCodeProcess(detached.as_raw_handle(), &mut exit_code) },
         0
     );
     let listed = exit_code == STILL_ACTIVE as u32;
     if listed {
-        assert_ne!(unsafe { TerminateProcess(detached.raw(), 0) }, 0);
+        // SAFETY: detached owns the open process handle.
+        assert_ne!(unsafe { TerminateProcess(detached.as_raw_handle(), 0) }, 0);
     }
     let _ = std::fs::remove_file(&marker);
     assert!(listed, "the detached program died with the console");
@@ -147,6 +153,7 @@ fn ctrl_c_interrupts_a_python_script() {
     wait_for(&output, "READY");
     let process = session.child_handle().unwrap();
     assert_eq!(session.input(b"\x03").unwrap(), 1);
+    // SAFETY: `process` is an owned handle that stays open across the wait.
     let exited = unsafe { WaitForSingleObject(process.as_raw_handle(), 5000) };
     session.close();
     assert_eq!(exited, WAIT_OBJECT_0, "Python did not exit after Ctrl+C");

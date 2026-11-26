@@ -494,6 +494,9 @@ fn reads_custom_msys2_root_from_an_installer_shortcut() {
     let temporary = tempfile::tempdir().unwrap();
     let shortcut = temporary.path().join("MSYS2 MSYS.lnk");
     let root = temporary.path().join("custom MSYS2 installation");
+    // SAFETY: COM is initialized on this thread before any interface is made
+    // and uninitialized after the inner scope drops them; every HSTRING
+    // argument outlives its call.
     unsafe {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap();
         {
@@ -532,6 +535,9 @@ fn registry_strings_of_odd_length_are_read_within_their_size() {
     struct ScratchKey(HKEY, HSTRING);
     impl Drop for ScratchKey {
         fn drop(&mut self) {
+            // SAFETY: `self.0` is the key RegCreateKeyExW opened, owned solely
+            // by this guard and closed once; the path HSTRING outlives the
+            // delete.
             unsafe {
                 let _ = RegCloseKey(self.0);
                 let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &self.1);
@@ -545,6 +551,8 @@ fn registry_strings_of_odd_length_are_read_within_their_size() {
     ));
     let mut key = HKEY::default();
     assert_eq!(
+        // SAFETY: `path` is a NUL-terminated HSTRING, and `key` is a writable
+        // out-pointer; the optional pointers are omitted.
         unsafe {
             RegCreateKeyExW(
                 HKEY_CURRENT_USER,
@@ -577,11 +585,14 @@ fn registry_strings_of_odd_length_are_read_within_their_size() {
         (w!("one byte"), &b"x"[..]),
     ] {
         assert_eq!(
+            // SAFETY: `key.0` is open, `name` is a static NUL-terminated
+            // string, and the data slice passes its own length.
             unsafe { RegSetValueExW(key.0, name, None, REG_SZ, Some(data)) },
             ERROR_SUCCESS
         );
     }
     assert_eq!(
+        // SAFETY: as above, with a four-byte DWORD value.
         unsafe { RegSetValueExW(key.0, w!("number"), None, REG_DWORD, Some(&[1, 0, 0, 0])) },
         ERROR_SUCCESS
     );

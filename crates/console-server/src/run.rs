@@ -37,8 +37,9 @@ pub fn run(options: Options) -> io::Result<()> {
             Err(mpsc::RecvTimeoutError::Timeout)
         ) {
             timeout_flag.store(true, Ordering::Release);
+            // SAFETY: the job handle is kept open by this thread's Arc clone.
             unsafe {
-                TerminateJobObject(job.raw(), 124);
+                TerminateJobObject(std::os::windows::io::AsRawHandle::as_raw_handle(&*job), 124);
             }
         }
     });

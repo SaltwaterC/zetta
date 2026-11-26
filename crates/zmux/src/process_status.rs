@@ -8,19 +8,18 @@
 
 #[cfg(unix)]
 pub(crate) fn is_running(process_id: u32) -> bool {
-    let Ok(process_id) = libc::pid_t::try_from(process_id) else {
+    let Some(process_id) = i32::try_from(process_id)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
         return false;
     };
-    if process_id == 0 {
-        return false;
+    // Signal zero delivers no signal; it only asks whether this PID exists and
+    // whether the caller may signal it.
+    match rustix::process::test_kill_process(process_id) {
+        Ok(()) => true,
+        Err(error) => error == rustix::io::Errno::PERM,
     }
-
-    // SAFETY: signal zero delivers no signal; it only asks whether this PID
-    // exists and whether the caller may signal it.
-    if unsafe { libc::kill(process_id, 0) } == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]
@@ -150,24 +149,29 @@ pub(crate) fn start_time(pid: u32) -> Option<u64> {
 
 #[cfg(windows)]
 pub(crate) fn start_time(pid: u32) -> Option<u64> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
     use windows::Win32::{
-        Foundation::{CloseHandle, FILETIME},
+        Foundation::{FILETIME, HANDLE},
         System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
     };
 
-    // SAFETY: the access right is valid for `OpenProcess`, and the handle is
-    // closed below on every path.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    // SAFETY: the access right is valid for `OpenProcess`.
+    let opened = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    // SAFETY: `OpenProcess` succeeded, so this function owns the handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(opened.0) };
     let [mut created, mut exited, mut kernel, mut user] = [FILETIME::default(); 4];
     // SAFETY: `process` is open with the access `GetProcessTimes` needs, and
     // every destination is a writable `FILETIME`.
-    let times =
-        unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) };
-    // SAFETY: `process` came from `OpenProcess` and is closed exactly once.
     unsafe {
-        let _ = CloseHandle(process);
+        GetProcessTimes(
+            HANDLE(process.as_raw_handle()),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
     }
-    times.ok()?;
+    .ok()?;
     Some(u64::from(created.dwHighDateTime) << 32 | u64::from(created.dwLowDateTime))
 }
 

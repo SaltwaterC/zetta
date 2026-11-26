@@ -44,6 +44,10 @@ pub(crate) fn enable_ctrl_c(process: HANDLE) -> io::Result<()> {
 }
 
 fn query<T>(process: HANDLE, class: u32, information: &mut T) -> io::Result<()> {
+    // SAFETY: `information` is an exclusive borrow of size_of::<T>() bytes,
+    // the length passed, and the returned-length pointer may be null. The
+    // callers pick T to match the class (ProcessBasicInformation for 0, a
+    // pointer-sized PEB address for 26), so the kernel writes a whole T.
     let status = unsafe {
         NtQueryInformationProcess(
             process,
@@ -75,6 +79,10 @@ fn reset_flags(process: HANDLE, peb: usize, pointer_size: usize) -> io::Result<(
     }
     let enabled = (flags & !1).to_le_bytes();
     let mut written = 0;
+    // SAFETY: the source is the local `enabled`, readable for its length, and
+    // `written` is a writable local. The target address is in the suspended
+    // child's address space, not ours, so a wrong one fails the call rather
+    // than corrupting this process.
     let ok = unsafe {
         WriteProcessMemory(
             process,
@@ -94,8 +102,12 @@ fn reset_flags(process: HANDLE, peb: usize, pointer_size: usize) -> io::Result<(
 }
 
 fn read<const N: usize>(process: HANDLE, address: usize, length: usize) -> io::Result<[u8; N]> {
+    assert!(length <= N, "a read of {length} bytes into {N}");
     let mut bytes = [0; N];
     let mut received = 0;
+    // SAFETY: `bytes` is writable for N bytes, and `length` <= N was just
+    // asserted. The source address is in the child's address space, which
+    // the kernel validates.
     let ok = unsafe {
         ReadProcessMemory(
             process,

@@ -12,11 +12,14 @@ pub(super) fn system_directory() -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt as _;
     use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
 
+    // SAFETY: with no buffer the call writes nothing and returns the length
+    // the path needs, terminator included.
     let length = unsafe { GetSystemDirectoryW(None) } as usize;
     if length == 0 {
         return None;
     }
     let mut buffer = vec![0u16; length];
+    // SAFETY: the slice passes its own length, which bounds what is written.
     let written = unsafe { GetSystemDirectoryW(Some(&mut buffer)) } as usize;
     (written > 0 && written < buffer.len()).then(|| {
         buffer.truncate(written);
@@ -180,74 +183,84 @@ pub(super) fn registry_string(
     String::from_utf16(&units).ok()
 }
 
+/// An open registry key, closed when dropped.
+pub(super) struct RegistryKey(windows::Win32::System::Registry::HKEY);
+
+impl RegistryKey {
+    /// Opens `path` under `parent` with `access`, or `None` when it cannot be.
+    pub(super) fn open(
+        parent: windows::Win32::System::Registry::HKEY,
+        path: windows::core::PCWSTR,
+        access: windows::Win32::System::Registry::REG_SAM_FLAGS,
+    ) -> Option<Self> {
+        use windows::Win32::{Foundation::ERROR_SUCCESS, System::Registry::RegOpenKeyExW};
+
+        let mut key = windows::Win32::System::Registry::HKEY::default();
+        // SAFETY: `parent` is a predefined or open key the caller holds,
+        // `path` is a NUL-terminated name it keeps alive for the call, and
+        // `key` is written only on success.
+        (unsafe { RegOpenKeyExW(parent, path, None, access, &mut key) } == ERROR_SUCCESS)
+            .then_some(Self(key))
+    }
+
+    pub(super) fn raw(&self) -> windows::Win32::System::Registry::HKEY {
+        self.0
+    }
+}
+
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        // SAFETY: the key was opened for this value alone, and is closed once.
+        let _ = unsafe { windows::Win32::System::Registry::RegCloseKey(self.0) };
+    }
+}
+
 pub(super) fn msys2_registered_installation_roots() -> Vec<PathBuf> {
     use windows::{
         Win32::{
             Foundation::ERROR_SUCCESS,
-            System::Registry::{
-                HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegEnumKeyW, RegOpenKeyExW,
-            },
+            System::Registry::{HKEY_CURRENT_USER, KEY_READ, RegEnumKeyW},
         },
         core::w,
     };
 
-    let mut uninstall = HKEY::default();
     // The official MSYS2 installer registers its per-user uninstall entry here.
-    // SAFETY: `uninstall` is a valid output pointer and is closed below.
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
-            None,
-            KEY_READ,
-            &mut uninstall,
-        )
-    } != ERROR_SUCCESS
-    {
+    let Some(uninstall) = RegistryKey::open(
+        HKEY_CURRENT_USER,
+        w!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+        KEY_READ,
+    ) else {
         return Vec::new();
-    }
+    };
 
     let mut roots = Vec::new();
     for index in 0.. {
         let mut name = [0_u16; 256];
+        // SAFETY: `uninstall` is the key opened above and still open, and
         // RegEnumKeyW writes at most the supplied buffer length.
-        let result = unsafe { RegEnumKeyW(uninstall, index, Some(&mut name)) };
+        let result = unsafe { RegEnumKeyW(uninstall.raw(), index, Some(&mut name)) };
         if result != ERROR_SUCCESS {
             break;
         }
         if !name.contains(&0) {
             continue;
         }
-        let mut entry = HKEY::default();
-        // SAFETY: The enumerated name is terminated in the local buffer, and `entry`
-        // is a valid output pointer.
-        if unsafe {
-            RegOpenKeyExW(
-                uninstall,
-                windows::core::PCWSTR(name.as_ptr()),
-                None,
-                KEY_READ,
-                &mut entry,
-            )
-        } != ERROR_SUCCESS
-        {
+        // The enumerated name is NUL-terminated in the local buffer.
+        let Some(entry) = RegistryKey::open(
+            uninstall.raw(),
+            windows::core::PCWSTR(name.as_ptr()),
+            KEY_READ,
+        ) else {
             continue;
-        }
-        let is_msys2 = registry_string(entry, w!("DisplayName")).is_some_and(|display_name| {
-            display_name.eq_ignore_ascii_case("MSYS2")
-                || display_name.to_ascii_lowercase().starts_with("msys2 ")
-        });
-        if is_msys2 && let Some(location) = registry_string(entry, w!("InstallLocation")) {
+        };
+        let is_msys2 =
+            registry_string(entry.raw(), w!("DisplayName")).is_some_and(|display_name| {
+                display_name.eq_ignore_ascii_case("MSYS2")
+                    || display_name.to_ascii_lowercase().starts_with("msys2 ")
+            });
+        if is_msys2 && let Some(location) = registry_string(entry.raw(), w!("InstallLocation")) {
             roots.push(PathBuf::from(location));
         }
-        // SAFETY: `entry` was opened successfully in this iteration.
-        unsafe {
-            let _ = RegCloseKey(entry);
-        }
-    }
-    // SAFETY: `uninstall` was opened successfully above.
-    unsafe {
-        let _ = RegCloseKey(uninstall);
     }
     roots
 }
@@ -314,7 +327,7 @@ pub(super) fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
             Foundation::ERROR_SUCCESS,
             System::Registry::{
                 HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_32KEY,
-                KEY_WOW64_64KEY, RegCloseKey, RegEnumKeyW, RegEnumValueW, RegOpenKeyExW,
+                KEY_WOW64_64KEY, RegEnumKeyW, RegEnumValueW,
             },
         },
         core::{PCWSTR, PWSTR},
@@ -375,16 +388,9 @@ pub(super) fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
                 .take_while(|unit| *unit != 0)
                 .chain([0])
                 .collect::<Vec<_>>();
-            let mut child = HKEY::default();
-            // SAFETY: The name is NUL-terminated and `child` is a valid output pointer.
-            if unsafe { RegOpenKeyExW(key, PCWSTR(name.as_ptr()), None, KEY_READ, &mut child) }
-                == ERROR_SUCCESS
-            {
-                add_value(roots, child, windows::core::w!("native"));
-                // SAFETY: `child` was opened successfully above.
-                unsafe {
-                    let _ = RegCloseKey(child);
-                }
+            // The name is NUL-terminated.
+            if let Some(child) = RegistryKey::open(key, PCWSTR(name.as_ptr()), KEY_READ) {
+                add_value(roots, child.raw(), windows::core::w!("native"));
             }
             index += 1;
         }
@@ -409,15 +415,11 @@ pub(super) fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
         for view in views {
             for (path, kind) in key_paths {
                 let path = path.encode_utf16().chain([0]).collect::<Vec<_>>();
-                let mut key = HKEY::default();
-                // SAFETY: `path` is NUL-terminated and `key` is a valid output pointer.
-                if unsafe {
-                    RegOpenKeyExW(hive, PCWSTR(path.as_ptr()), None, KEY_READ | view, &mut key)
-                } != ERROR_SUCCESS
-                {
+                let Some(key) = RegistryKey::open(hive, PCWSTR(path.as_ptr()), KEY_READ | view)
+                else {
                     continue;
-                }
-
+                };
+                let key = key.raw();
                 match kind {
                     0 => add_values(&mut roots, key),
                     1 => {
@@ -425,10 +427,6 @@ pub(super) fn cygwin_registered_installation_roots() -> Vec<PathBuf> {
                         add_value(&mut roots, key, PCWSTR::null());
                     }
                     _ => add_legacy_mount_values(&mut roots, key),
-                }
-                // SAFETY: `key` was opened successfully above.
-                unsafe {
-                    let _ = RegCloseKey(key);
                 }
             }
         }

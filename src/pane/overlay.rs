@@ -21,18 +21,6 @@ pub(crate) enum OverlayFontSize {
 impl OverlayFontSize {
     pub(crate) const DEFAULT: Self = Self::ExtraLarge;
 
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "sm" => Some(Self::Small),
-            "base" => Some(Self::Base),
-            "lg" => Some(Self::Large),
-            "xl" => Some(Self::ExtraLarge),
-            "2xl" => Some(Self::ExtraExtraLarge),
-            "3xl" => Some(Self::ExtraExtraExtraLarge),
-            _ => None,
-        }
-    }
-
     pub(crate) fn cli_name(self) -> &'static str {
         match self {
             Self::Small => "sm",
@@ -41,6 +29,18 @@ impl OverlayFontSize {
             Self::ExtraLarge => "xl",
             Self::ExtraExtraLarge => "2xl",
             Self::ExtraExtraExtraLarge => "3xl",
+        }
+    }
+
+    /// The name the settings editor shows for this size.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Small => "Small (sm)",
+            Self::Base => "Base",
+            Self::Large => "Large (lg)",
+            Self::ExtraLarge => "Extra large (xl)",
+            Self::ExtraExtraLarge => "2x large (2xl)",
+            Self::ExtraExtraExtraLarge => "3x large (3xl)",
         }
     }
 
@@ -73,6 +73,30 @@ impl OverlayFontSize {
     pub(crate) fn step(self, delta: isize) -> Self {
         let next = (self.index() as isize + delta).rem_euclid(Self::ALL.len() as isize) as usize;
         Self::ALL[next]
+    }
+}
+
+/// Parses the spelling `zetta overlay --size`, the control socket and pane
+/// templates all share.
+impl std::str::FromStr for OverlayFontSize {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|size| size.cli_name() == value)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown overlay size {value:?}; expected one of {}",
+                    Self::CLI_NAMES.join(", ")
+                )
+            })
+    }
+}
+
+impl std::fmt::Display for OverlayFontSize {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.cli_name())
     }
 }
 

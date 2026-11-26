@@ -3,24 +3,30 @@ use super::*;
 #[test]
 fn parse_recognizes_exact_names_and_rejects_unknown_values() {
     assert_eq!(
-        BuiltinSound::parse("zetta-default"),
+        "zetta-default".parse::<BuiltinSound>().ok(),
         Some(BuiltinSound::Default)
     );
-    assert_eq!(BuiltinSound::parse("zetta-ok"), Some(BuiltinSound::Ok));
     assert_eq!(
-        BuiltinSound::parse("zetta-alarm"),
+        "zetta-ok".parse::<BuiltinSound>().ok(),
+        Some(BuiltinSound::Ok)
+    );
+    assert_eq!(
+        "zetta-alarm".parse::<BuiltinSound>().ok(),
         Some(BuiltinSound::Alarm)
     );
-    assert_eq!(BuiltinSound::parse("zetta-gong"), Some(BuiltinSound::Gong));
-    assert_eq!(BuiltinSound::parse("Zetta-Default"), None);
-    assert_eq!(BuiltinSound::parse("bell"), None);
-    assert_eq!(BuiltinSound::parse(""), None);
+    assert_eq!(
+        "zetta-gong".parse::<BuiltinSound>().ok(),
+        Some(BuiltinSound::Gong)
+    );
+    assert_eq!("Zetta-Default".parse::<BuiltinSound>().ok(), None);
+    assert_eq!("bell".parse::<BuiltinSound>().ok(), None);
+    assert_eq!("".parse::<BuiltinSound>().ok(), None);
 }
 
 #[test]
 fn every_builtin_sound_round_trips_through_its_name() {
     for sound in BuiltinSound::ALL {
-        assert_eq!(BuiltinSound::parse(sound.name()), Some(sound));
+        assert_eq!(sound.name().parse::<BuiltinSound>().ok(), Some(sound));
     }
 }
 

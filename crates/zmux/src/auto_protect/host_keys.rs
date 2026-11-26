@@ -187,8 +187,8 @@ fn expand_known_hosts_path(path: &str) -> Option<PathBuf> {
         return None;
     }
     if let Some(rest) = path.strip_prefix('~') {
-        let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })?;
-        return Some(PathBuf::from(home).join(rest.trim_start_matches(['/', '\\'])));
+        let home = crate::paths::home_dir()?;
+        return Some(home.join(rest.trim_start_matches(['/', '\\'])));
     }
     // Windows OpenSSH prints its system directory under this placeholder.
     if let Some(rest) = path.strip_prefix("__PROGRAMDATA__") {

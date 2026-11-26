@@ -118,9 +118,13 @@ pub fn system_shell() -> String {
 /// to open a shell at all.
 pub fn profiles(config_path: &Path) -> Vec<ProfileDefinition> {
     let mut profiles = discovered_profiles();
-    match config_file::configured_profiles(config_path) {
-        Ok(configured) => config_file::merge(&mut profiles, configured),
-        Err(error) => log_read_failure(config_path, &error),
+    // A file that cannot be read is not reported here: this crate has no `log`
+    // dependency, because it is linked into the daemon, the application and
+    // the terminal and only one of those installs a logger. The file is
+    // reported where it is opened; here it only decides whether the discovered
+    // set stands alone.
+    if let Ok(configured) = config_file::configured_profiles(config_path) {
+        config_file::merge(&mut profiles, configured);
     }
     profiles
 }
@@ -132,14 +136,6 @@ pub fn resolve(config_path: &Path, name: &str) -> Option<ProfileCommand> {
         .into_iter()
         .find(|profile| profile.name.eq_ignore_ascii_case(name))
         .map(|profile| profile.command)
-}
-
-fn log_read_failure(config_path: &Path, error: &anyhow::Error) {
-    // No `log` dependency: this crate is linked into the daemon, the
-    // application, and the terminal, and only one of those installs a logger.
-    // A configuration file that cannot be read is reported where it is opened;
-    // here it only decides whether the discovered set stands alone.
-    let _ = (config_path, error);
 }
 
 #[cfg(test)]

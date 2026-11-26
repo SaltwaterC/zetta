@@ -413,7 +413,7 @@ impl MuxRuntime {
     pub(crate) fn is_degraded(&self) -> bool {
         self.retention_state
             .lock()
-            .unwrap()
+            .recover_poison()
             .degraded_reason
             .is_some()
     }
@@ -660,20 +660,27 @@ impl MuxPtyControl {
 }
 
 impl PtyControl for MuxPtyControl {
+    #[cfg_attr(
+        not(windows),
+        expect(
+            unused_variables,
+            reason = "only a Windows pseudoconsole is resized through the daemon"
+        )
+    )]
     fn resize(&self, columns: u16, lines: u16) {
         #[cfg(windows)]
         let _ = self
             .requests
             .send(PtyControlRequest::Resize { columns, lines });
-        #[cfg(not(windows))]
-        let _ = (columns, lines);
     }
 
+    #[cfg_attr(
+        not(windows),
+        expect(unused_variables, reason = "only Windows consoles take a palette")
+    )]
     fn set_console_palette(&self, palette: ConsolePalette) {
         #[cfg(windows)]
         let _ = self.requests.send(PtyControlRequest::Palette(palette));
-        #[cfg(not(windows))]
-        let _ = palette;
     }
 }
 

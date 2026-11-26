@@ -31,6 +31,9 @@ vt100 = "0.16"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Already in the graph at this version; the safe spelling of the terminal and
+# peer-credential calls.
+rustix = { version = "1.1.4", features = ["net", "process", "termios"] }
 signal-hook = "0.4.4"
 
 [target.'cfg(windows)'.dependencies]
@@ -48,3 +51,10 @@ windows = { version = "0.61", features = [
 
 [patch.crates-io]
 vt100 = { path = "../vt100" }
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"
+undocumented_unsafe_blocks = "deny"

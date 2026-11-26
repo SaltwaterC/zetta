@@ -4,7 +4,7 @@ use super::*;
 impl Server {
     pub(super) fn set_title(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -35,7 +35,7 @@ impl Server {
     }
     pub(super) fn get_title(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -72,7 +72,7 @@ impl Server {
     /// exactly its length gets every byte and no terminator.
     fn reply_title_ansi(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
         title: &str,

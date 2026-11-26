@@ -309,6 +309,7 @@ fn the_handover_never_reaches_a_named_path() {
 }
 
 fn close_on_exec(descriptor: &impl std::os::fd::AsRawFd) -> bool {
+    // SAFETY: `F_GETFD` only reads the flags of a descriptor the caller owns.
     let flags = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_GETFD) };
     assert!(flags >= 0);
     flags & libc::FD_CLOEXEC != 0
@@ -348,6 +349,7 @@ fn an_inherited_descriptor_is_claimed_close_on_exec() {
     // As across the `execv`: the same descriptor, now owned by the new image.
     let descriptor = file.into_raw_fd();
 
+    // SAFETY: `into_raw_fd` gave up the only owner, and it is claimed once.
     let claimed = unsafe { claim_inherited_fd(descriptor) }.unwrap();
     // Left inheritable, it would reach every shell the replacement starts.
     assert!(close_on_exec(&claimed));
@@ -356,6 +358,7 @@ fn an_inherited_descriptor_is_claimed_close_on_exec() {
 #[test]
 fn a_descriptor_that_was_not_inherited_is_not_claimed() {
     // Claiming one would abort the process when it was closed.
+    // SAFETY: nothing owns `-1`, and the call refuses it before taking it.
     assert!(unsafe { claim_inherited_fd(-1) }.is_err());
 }
 

@@ -17,12 +17,11 @@
 //! zosh-server is a separate crate and includes this file by path, as it does
 //! `windows_pipe.rs`.
 
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+use std::os::fd::AsRawFd as _;
 use std::{
     io,
-    os::{
-        fd::AsRawFd as _,
-        unix::{fs::DirBuilderExt as _, net::UnixStream},
-    },
+    os::unix::{fs::DirBuilderExt as _, net::UnixStream},
     path::Path,
 };
 
@@ -36,8 +35,7 @@ pub(super) fn create_private_dir(path: &Path) -> io::Result<()> {
 
 /// The user this process acts as, which is who a socket it opens serves.
 pub(super) fn this_user() -> libc::uid_t {
-    // SAFETY: geteuid only reads the calling process's effective user ID.
-    unsafe { libc::geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 /// Whether the peer of `stream` may use an agent socket opened for `owner`.
@@ -53,25 +51,9 @@ pub(super) fn uid_may_connect(uid: libc::uid_t, owner: libc::uid_t) -> bool {
 fn peer_uid(stream: &UnixStream) -> io::Result<libc::uid_t> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        let mut credentials = std::mem::MaybeUninit::<libc::ucred>::uninit();
-        let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        // SAFETY: the socket is connected, and the destination and its length
-        // describe the same `ucred`.
-        let result = unsafe {
-            libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_PEERCRED,
-                credentials.as_mut_ptr().cast(),
-                &mut length,
-            )
-        };
-        if result != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: getsockopt filled the structure after returning zero.
-        Ok(unsafe { credentials.assume_init() }.uid)
+        Ok(rustix::net::sockopt::socket_peercred(stream)?.uid.as_raw())
     }
+    // rustix wraps no `getpeereid`, so the other platforms stay on `libc`.
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let mut uid = 0;

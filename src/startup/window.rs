@@ -300,11 +300,14 @@ pub(crate) fn quit_zetta_process(cx: &mut App) {
 /// another Zetta process that has not quit yet. So this is a no-op whenever
 /// anything still depends on the daemon, and only actually stops it once
 /// nothing does.
+#[cfg_attr(
+    not(feature = "zmux"),
+    expect(
+        unused_variables,
+        reason = "only a zmux build has a multiplexer to stop"
+    )
+)]
 pub(super) fn shutdown_multiplexer_if_idle(cx: &App) {
-    #[cfg(not(feature = "zmux"))]
-    {
-        let _ = cx;
-    }
     #[cfg(feature = "zmux")]
     {
         // Idle remote SSH logins are kept for a while in case they are
@@ -400,7 +403,7 @@ pub(crate) fn open_dormant_or_new_window(cx: &mut App) -> Result<()> {
 
 /// Opens a new OS window from process-wide configuration without selecting a
 /// dormant entity or applying a project from another window.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(target_os = "macos")]
 pub(crate) fn open_fresh_zetta_window(cx: &mut App) -> Result<()> {
     open_fresh_zetta_window_with_profile_and_activation_token(cx, None, None)
 }

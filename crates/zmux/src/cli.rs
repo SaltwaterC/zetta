@@ -208,7 +208,7 @@ impl MuxArguments {
     /// spelled.
     fn set_value(&mut self, option: &'static str, value: &str) -> Result<()> {
         match option {
-            "--retention" => self.retention = retention::Retention::parse(value)?,
+            "--retention" => self.retention = value.parse()?,
             "--retention-bytes" => {
                 set_once(&mut self.retention_bytes, option, || {
                     value
@@ -721,6 +721,13 @@ impl MuxArguments {
         })
     }
 
+    #[cfg_attr(
+        not(feature = "session-persistence"),
+        expect(
+            unused_variables,
+            reason = "only a persistence build resumes a disk session"
+        )
+    )]
     fn run_resume(self) -> Result<()> {
         let session = self.session.context_missing()?;
         #[cfg(feature = "session-persistence")]
@@ -745,7 +752,6 @@ impl MuxArguments {
         }
         #[cfg(not(feature = "session-persistence"))]
         {
-            let _ = session;
             anyhow::bail!(
                 "resume needs the session-persistence feature, which this multiplexer \
                  was built without"
@@ -826,6 +832,10 @@ impl MuxArguments {
         Ok(())
     }
 
+    #[cfg_attr(
+        not(any(unix, windows)),
+        expect(unused_variables, reason = "no other platform runs the multiplexer")
+    )]
     fn run_forget(self) -> Result<()> {
         let session = self.session.context_missing()?;
         if ran_remotely(&self.remote, &self.identity_paths, "forget", &session)? {
@@ -869,7 +879,6 @@ impl MuxArguments {
             }
             #[cfg(not(any(unix, windows)))]
             {
-                let _ = session;
                 anyhow::bail!("the multiplexer is not yet supported on this platform")
             }
         }
@@ -941,6 +950,13 @@ fn run_stop(force: bool) -> Result<()> {
 
 /// The recipients a private daemon-options file names. The file is removed
 /// once read.
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        unused_variables,
+        reason = "daemon options only carry persistence recipients"
+    )
+)]
 fn read_daemon_options(path: &Path) -> Result<Vec<String>> {
     #[cfg(feature = "session-persistence")]
     {
@@ -953,7 +969,6 @@ fn read_daemon_options(path: &Path) -> Result<Vec<String>> {
     }
     #[cfg(not(feature = "session-persistence"))]
     {
-        let _ = path;
         anyhow::bail!(
             "--daemon-options needs the session-persistence feature, which this \
              multiplexer was built without"

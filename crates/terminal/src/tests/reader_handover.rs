@@ -84,12 +84,14 @@ fn byte_stream_terminal(
             Box::new(reader),
             Box::new(writer),
             String::new(),
-            CursorShape::default(),
-            AlternateScroll::On,
-            None,
-            0,
-            &cx.background_executor().clone(),
-            PathStyle::local(),
+            crate::DisplayOnlySettings {
+                cursor_shape: CursorShape::default(),
+                alternate_scroll: AlternateScroll::On,
+                max_scroll_history_lines: None,
+                window_id: 0,
+                background_executor: &cx.background_executor().clone(),
+                path_style: PathStyle::local(),
+            },
         )
         .subscribe(cx)
     })

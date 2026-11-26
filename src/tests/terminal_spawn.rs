@@ -28,7 +28,7 @@ fn complete_shared_batch_layout_preserves_template_axes_ratios_and_drafts() {
     else {
         panic!("template root was not preserved")
     };
-    assert_eq!(axis, "vertical");
+    assert_eq!(axis, SplitAxis::Vertical);
     assert_eq!(first_ratio, 200);
     assert!(matches!(
         *first,
@@ -43,7 +43,7 @@ fn complete_shared_batch_layout_preserves_template_axes_ratios_and_drafts() {
     else {
         panic!("nested template split was not preserved")
     };
-    assert_eq!(axis, "horizontal");
+    assert_eq!(axis, SplitAxis::Horizontal);
     assert_eq!(first_ratio, 420);
     assert!(matches!(
         *first,
@@ -512,11 +512,11 @@ fn a_shared_draft_gives_its_shell_the_windows_marker_nonce() {
 #[test]
 fn a_proposed_layout_reports_every_existing_pane_it_names() {
     let layout = zmux::messages::SharedDraftLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 200,
         first: Box::new(zmux::messages::SharedDraftLayout::Existing { pane_id: 41 }),
         second: Box::new(zmux::messages::SharedDraftLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: SplitAxis::Horizontal,
             first_ratio: 300,
             first: Box::new(zmux::messages::SharedDraftLayout::Existing { pane_id: 42 }),
             second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 7 }),

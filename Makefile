@@ -74,6 +74,7 @@ ZETTA_CRATE_DIRS := \
 	crates/terminal \
 	crates/terminal_view \
 	crates/zetta_cli_help \
+	crates/zetta_layout \
 	crates/zetta_profiles \
 	crates/zetta_sync \
 	crates/zntfy \
@@ -96,6 +97,7 @@ ZETTA_TEST_CRATE_DIRS := \
 	crates/proc-macro-error2 \
 	crates/terminal \
 	crates/zetta_cli_help \
+	crates/zetta_layout \
 	crates/zetta_profiles \
 	crates/zetta_sync \
 	crates/zntfy \

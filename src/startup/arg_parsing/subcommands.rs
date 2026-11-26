@@ -454,6 +454,13 @@ pub(super) fn parse_shell_integration_subcommand(arguments: &[OsString]) -> Resu
 }
 
 /// `zetta serial …`
+#[cfg_attr(
+    not(feature = "serial-console"),
+    expect(
+        unused_variables,
+        reason = "only a serial-console build parses its arguments"
+    )
+)]
 pub(super) fn parse_serial_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
     #[cfg(feature = "serial-console")]
     {
@@ -470,12 +477,18 @@ pub(super) fn parse_serial_subcommand(arguments: &[OsString]) -> Result<StartupA
     }
     #[cfg(not(feature = "serial-console"))]
     {
-        let _ = arguments;
         anyhow::bail!("Serial console support is disabled in this build")
     }
 }
 
 /// `zetta http …`
+#[cfg_attr(
+    not(feature = "http-server"),
+    expect(
+        unused_variables,
+        reason = "only an http-server build parses its arguments"
+    )
+)]
 pub(super) fn parse_http_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
     #[cfg(feature = "http-server")]
     {
@@ -492,7 +505,6 @@ pub(super) fn parse_http_subcommand(arguments: &[OsString]) -> Result<StartupArg
     }
     #[cfg(not(feature = "http-server"))]
     {
-        let _ = arguments;
         anyhow::bail!("HTTP server support is disabled in this build")
     }
 }
@@ -543,6 +555,13 @@ pub(super) fn parse_tftp_subcommand(arguments: &[OsString]) -> Result<StartupArg
 
 /// `zetta tftp setcap …`, which only a Linux build with the TFTP server has
 /// anything to do for.
+#[cfg_attr(
+    not(tftp_setcap),
+    expect(
+        unused_variables,
+        reason = "only a Linux tftp-server build parses its arguments"
+    )
+)]
 fn parse_tftp_setcap_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
     #[cfg(tftp_setcap)]
     {
@@ -559,7 +578,6 @@ fn parse_tftp_setcap_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
     }
     #[cfg(not(tftp_setcap))]
     {
-        let _ = arguments;
         #[cfg(not(feature = "tftp-server"))]
         anyhow::bail!("TFTP server support is disabled in this build");
         #[cfg(feature = "tftp-server")]
@@ -611,6 +629,13 @@ pub(super) fn parse_notify_subcommand(arguments: &[OsString]) -> Result<StartupA
 }
 
 /// `zetta copy …`
+#[cfg_attr(
+    not(feature = "clipboard"),
+    expect(
+        unused_variables,
+        reason = "only a clipboard build parses its arguments"
+    )
+)]
 pub(super) fn parse_copy_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
     #[cfg(feature = "clipboard")]
     {
@@ -629,12 +654,18 @@ pub(super) fn parse_copy_subcommand(arguments: &[OsString]) -> Result<StartupArg
     }
     #[cfg(not(feature = "clipboard"))]
     {
-        let _ = arguments;
         anyhow::bail!("Clipboard support is disabled in this build")
     }
 }
 
 /// `zetta paste …`
+#[cfg_attr(
+    not(feature = "clipboard"),
+    expect(
+        unused_variables,
+        reason = "only a clipboard build parses its arguments"
+    )
+)]
 pub(super) fn parse_paste_subcommand(arguments: &[OsString]) -> Result<StartupArgs> {
     #[cfg(feature = "clipboard")]
     {
@@ -653,7 +684,6 @@ pub(super) fn parse_paste_subcommand(arguments: &[OsString]) -> Result<StartupAr
     }
     #[cfg(not(feature = "clipboard"))]
     {
-        let _ = arguments;
         anyhow::bail!("Clipboard support is disabled in this build")
     }
 }
@@ -696,12 +726,7 @@ fn parse_pane_overlay_arg(
                     .context("--overlay-size requires sm, base, lg, xl, 2xl, or 3xl")?
                     .to_string_lossy()
                     .into_owned();
-                OverlayFontSize::parse(&value).with_context(|| {
-                    format!(
-                        "unknown overlay size {value:?}; expected one of {}",
-                        OverlayFontSize::CLI_NAMES.join(", ")
-                    )
-                })
+                value.parse::<OverlayFontSize>()
             })?;
         }
         "--overlay-opacity" | "-O" => {

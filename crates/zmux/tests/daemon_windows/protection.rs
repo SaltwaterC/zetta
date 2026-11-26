@@ -10,10 +10,72 @@ fn test_verifier() -> zmux::auth::SessionAuthentication {
         .expect("creating the session verifier")
 }
 
-/// Speaks the protocol directly, as any same-user process that can read the
-/// endpoint token could, naming whichever process it likes as its own.
-fn impostor_request(
+/// Set in the subprocess that plays the impostor; holds an [`ImpostorRun`].
+const IMPOSTOR_ENV: &str = "ZMUX_TEST_IMPOSTOR";
+
+/// What the impostor subprocess is asked to do, and where it reports back.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ImpostorRun {
+    endpoint: PathBuf,
+    claimed_process_id: u32,
+    requests: Vec<zmux::messages::Request>,
+    answers: PathBuf,
+}
+
+/// Sends `requests` from another process claiming to be `claimed_process_id`,
+/// and returns the daemon's answers in order.
+///
+/// It has to be another process: the daemon asks the kernel which process
+/// connected, so a request from this one would really be from the owner.
+fn impostor_requests(
     daemon: &TestDaemon,
+    claimed_process_id: u32,
+    requests: Vec<zmux::messages::Request>,
+) -> Vec<zmux::messages::Response> {
+    let answers = daemon.config.join("impostor-answers.json");
+    let run = ImpostorRun {
+        endpoint: daemon.sessions_dir().join("zmux.json"),
+        claimed_process_id,
+        requests,
+        answers: answers.clone(),
+    };
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "protection::impostor_subprocess", "--nocapture"])
+        .env(IMPOSTOR_ENV, serde_json::to_string(&run).unwrap())
+        .stdin(Stdio::null())
+        .output()
+        .expect("starting the impostor process");
+    assert!(
+        output.status.success(),
+        "the impostor process failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&std::fs::read(&answers).expect("reading the impostor's answers"))
+        .expect("parsing the impostor's answers")
+}
+
+/// The impostor itself, run by [`impostor_requests`] and a no-op otherwise.
+#[test]
+fn impostor_subprocess() {
+    let Ok(run) = std::env::var(IMPOSTOR_ENV) else {
+        return;
+    };
+    let run: ImpostorRun = serde_json::from_str(&run).expect("parsing the impostor's task");
+    let answers: Vec<_> = run
+        .requests
+        .into_iter()
+        .map(|request| impostor_request(&run.endpoint, run.claimed_process_id, request))
+        .collect();
+    std::fs::write(&run.answers, serde_json::to_vec(&answers).unwrap())
+        .expect("writing the impostor's answers");
+}
+
+/// Speaks the protocol directly, as any same-user process that can read the
+/// endpoint token could, naming whichever process it likes as its own and
+/// answering any challenge with that process's nonce.
+fn impostor_request(
+    endpoint: &Path,
     claimed_process_id: u32,
     request: zmux::messages::Request,
 ) -> zmux::messages::Response {
@@ -22,8 +84,7 @@ fn impostor_request(
         transport::{Connection, Endpoint, Stream},
     };
 
-    let endpoint = Endpoint::read(&daemon.sessions_dir().join("zmux.json"))
-        .expect("reading the multiplexer endpoint");
+    let endpoint = Endpoint::read(endpoint).expect("reading the multiplexer endpoint");
     let stream = Stream::connect(&endpoint.socket_path).expect("connecting as an impostor");
     let mut connection = Connection::new(stream);
     connection
@@ -40,27 +101,65 @@ fn impostor_request(
     let (response, _) = connection
         .receive::<Response>()
         .expect("reading the answer to an impostor request");
-    let Response::AttestationRequired { .. } = response else {
+    let Response::AttestationRequired { handle } = response else {
         return response;
     };
-    // The handle was duplicated into the process being impersonated, not into
-    // this one, so the nonce behind it cannot be read. Answering wrongly is the
-    // best an impostor can do.
+    // Only where the kernel does not report the peer. The handle lives in the
+    // process being impersonated, so read it the way any same-user impostor
+    // could: open that process, copy the handle out and answer correctly.
     connection
         .send(&Request::Attested {
-            nonce: "0".repeat(64),
+            nonce: steal_nonce(claimed_process_id, handle),
         })
         .expect("answering the attestation challenge");
     connection
         .receive::<Response>()
-        .expect("reading the answer after a failed attestation")
+        .expect("reading the answer after the attestation")
         .0
 }
 
-/// Windows has no peer credentials for `AF_UNIX`, so the daemon proves whose
-/// connection this is by duplicating a nonce into the process the peer names.
-/// Without that, naming a protected session's owner was all it took to detach,
-/// kill or rescope it — the endpoint token would have been an administrator
+/// Reads the nonce behind a challenge `handle` issued to another process of
+/// this user, which a same-user process of the same integrity can always do.
+fn steal_nonce(victim: u32, handle: i64) -> String {
+    use std::io::Read as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE};
+
+    // SAFETY: the access right is valid for `OpenProcess`.
+    let opened = unsafe { OpenProcess(PROCESS_DUP_HANDLE, false, victim) }
+        .expect("opening the impersonated process");
+    // SAFETY: `OpenProcess` succeeded, so this function owns the handle.
+    let victim = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+    let mut stolen = HANDLE::default();
+    // SAFETY: `victim` is open with duplication access, `handle` is the value
+    // the daemon duplicated into it, and `stolen` is a writable slot.
+    unsafe {
+        DuplicateHandle(
+            HANDLE(victim.as_raw_handle()),
+            HANDLE(handle as *mut _),
+            GetCurrentProcess(),
+            &mut stolen,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }
+    .expect("copying the challenge handle out of the impersonated process");
+    // SAFETY: `DuplicateHandle` gave this process its own handle.
+    let pipe = unsafe { OwnedHandle::from_raw_handle(stolen.0) };
+    let mut nonce = String::new();
+    std::fs::File::from(pipe)
+        .read_to_string(&mut nonce)
+        .expect("reading the stolen nonce");
+    nonce
+}
+
+/// A same-user process that can read the endpoint token, naming a protected
+/// session's owner as itself, controls nothing: the daemon asks the kernel
+/// which process connected rather than taking the envelope's word for it.
+/// Without that, naming the owner was all it took to detach, kill or rescope
+/// the session — the endpoint token would have been an administrator
 /// credential.
 #[test]
 fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
@@ -75,8 +174,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
     let pane_id = pane.pane_id;
     drop(pane);
     // Protect the session while it is still owned by this process. The
-    // requests below claim that owner but deliberately fail the attestation,
-    // so the setup does not depend on the boundary it tests.
+    // requests below come from another process claiming to be this one.
     client
         .detach(
             session_id,
@@ -90,7 +188,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
         .set_session_scope(session_id, true, Some(&test_verifier()))
         .expect("protecting the session");
 
-    for request in [
+    let controls = vec![
         Request::Kill { session_id },
         Request::Forget { session_id },
         Request::Resize {
@@ -110,9 +208,19 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
             verifier: None,
             key_envelope: None,
         }),
-    ] {
-        let name = format!("{request:?}");
-        match impostor_request(&daemon, std::process::id(), request) {
+    ];
+    let names: Vec<_> = controls
+        .iter()
+        .map(|request| format!("{request:?}"))
+        .collect();
+    let mut requests = controls;
+    requests.push(Request::PaneStates {
+        pane_ids: vec![pane_id],
+    });
+    let mut answers = impostor_requests(&daemon, std::process::id(), requests).into_iter();
+
+    for name in names {
+        match answers.next().expect("an answer for every control") {
             Response::Error { message } => assert!(
                 message.contains("protected"),
                 "unexpected authorization error for {name}: {message}"
@@ -120,13 +228,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
             other => panic!("{name} was not refused: {other:?}"),
         }
     }
-    match impostor_request(
-        &daemon,
-        std::process::id(),
-        Request::PaneStates {
-            pane_ids: vec![pane_id],
-        },
-    ) {
+    match answers.next().expect("an answer for the pane states") {
         Response::PaneStates { panes } => assert!(
             panes[0].unknown,
             "protected pane state leaked to a peer claiming to be its owner"
@@ -143,8 +245,7 @@ fn protected_controls_reject_a_claimed_owner_without_peer_authority() {
 }
 
 /// The other half of the same boundary: a client that really is the process it
-/// names still gets through, because it can read the nonce the daemon
-/// duplicated into it.
+/// names still gets through, because the kernel names it too.
 #[test]
 fn a_protected_sessions_own_window_still_controls_it() {
     let daemon = TestDaemon::start();

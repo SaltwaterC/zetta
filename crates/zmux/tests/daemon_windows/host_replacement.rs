@@ -25,6 +25,8 @@ fn pipe_name_is_free(name: &str) -> bool {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
+    // SAFETY: `wide` is a NUL-terminated UTF-16 name that outlives the call;
+    // no security attributes are passed.
     let handle = unsafe {
         CreateNamedPipeW(
             windows::core::PCWSTR(wide.as_ptr()),
@@ -40,6 +42,7 @@ fn pipe_name_is_free(name: &str) -> bool {
     if handle == INVALID_HANDLE_VALUE {
         return false;
     }
+    // SAFETY: `handle` is the valid pipe just created here, closed once.
     let _ = unsafe { CloseHandle(handle) };
     true
 }

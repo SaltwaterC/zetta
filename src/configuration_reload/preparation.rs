@@ -134,6 +134,13 @@ impl PreparedConfiguration {
     /// A window whose daemon refused the new policy, or one of whose projects
     /// failed to load, keeps its current configuration, exactly as it did when
     /// these steps failed part-way through a synchronous reload.
+    #[cfg_attr(
+        not(feature = "zmux"),
+        expect(
+            unused_variables,
+            reason = "only a zmux build reconfigures the multiplexer"
+        )
+    )]
     pub(crate) fn validate_for(
         &self,
         daemon: Option<usize>,
@@ -147,8 +154,6 @@ impl PreparedConfiguration {
                 None => return Err("the multiplexer was not reconfigured".to_owned()),
             }
         }
-        #[cfg(not(feature = "zmux"))]
-        let _ = daemon;
         project_roots
             .iter()
             .map(|root| match self.projects.get(root) {

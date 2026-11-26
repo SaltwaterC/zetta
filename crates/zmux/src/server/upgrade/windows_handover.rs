@@ -215,7 +215,7 @@ pub(in crate::server) fn handover_handles(
         .pty_host
         .handles(pane.console_id, client_process_id)?;
     Ok(Handover {
-        attachments: Vec::new(),
+        attachments: Attachments::default(),
         values,
     })
 }

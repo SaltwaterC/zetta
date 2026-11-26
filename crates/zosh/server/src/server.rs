@@ -139,7 +139,7 @@ fn write_connect_line(line: &str) -> std::io::Result<()> {
 
 #[cfg_attr(
     windows,
-    allow(
+    expect(
         unused_mut,
         reason = "only the Unix server setup mutates this configuration"
     )
@@ -1246,6 +1246,8 @@ fn windows_ssh_default_shell() -> Option<std::ffi::OsString> {
 
     let flags = RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY;
     let mut size = 0;
+    // SAFETY: the key and value names are static NUL-terminated strings; with
+    // no data buffer the call only writes the needed byte count to `size`.
     let status = unsafe {
         RegGetValueW(
             HKEY_LOCAL_MACHINE,
@@ -1261,6 +1263,9 @@ fn windows_ssh_default_shell() -> Option<std::ffi::OsString> {
         return None;
     }
     let mut value = vec![0u16; size as usize / 2];
+    // SAFETY: `value` holds exactly `size` bytes and `size` says so, so the
+    // call writes in bounds (a value that grew since reports ERROR_MORE_DATA
+    // instead); both outlive the call.
     let status = unsafe {
         RegGetValueW(
             HKEY_LOCAL_MACHINE,

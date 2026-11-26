@@ -4,6 +4,7 @@
 //! again under the sessions lock before the pane is recorded.
 
 use super::*;
+use crate::protocol::SplitAxis;
 
 pub(in crate::server) struct SpawnContext<'a> {
     pub(in crate::server) client_process_id: u32,
@@ -29,8 +30,6 @@ pub(in crate::server) fn spawn(
         shared_request,
         connection,
     } = context;
-    #[cfg(not(feature = "session-persistence"))]
-    let _ = (client_process_id, peer_process_id);
 
     if let Some(shared_request) = &shared_request
         && let Some(conflict) =
@@ -170,11 +169,13 @@ pub(in crate::server) fn spawn(
         return attach_shared(
             daemon,
             sessions,
-            session_id,
-            pane_id,
+            AttachTarget {
+                session_id,
+                pane_id,
+                state: response_state.state.clone(),
+                summary: response_summary,
+            },
             attacher,
-            response_state.state.clone(),
-            response_summary,
             connection,
             Some(response_state),
         )
@@ -435,9 +436,8 @@ pub(super) fn hand_over_spawned_pane(
     // arbitrarily slow to read — a burst of concurrent spawns is exactly when
     // that matters. Holding the sessions lock across that write would
     // serialize every other session-mutating request behind this one
-    // client's socket; `handover_handles`'s borrowed descriptor stays valid
-    // regardless, because nothing removes this pane except the rollback
-    // below, which re-locks first.
+    // client's socket; `handover_handles` duplicated the descriptor while the
+    // lock was held, so the reply carries it whatever happens to the pane.
     drop(sessions);
     handles.and_then(|handles| {
         connection.send_with(
@@ -447,13 +447,20 @@ pub(super) fn hand_over_spawned_pane(
                 child_pid,
                 handles: handles.values,
             },
-            &handles.attachments,
+            &handles.attachments.borrowed(),
         )
     })
 }
 
 /// The session a spawned pane joins: the live one the request names, the one
 /// its restore lease materializes, or a new one owned by the spawning window.
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        unused_variables,
+        reason = "only a persisted session records its client"
+    )
+)]
 pub(super) fn session_for_spawn(
     daemon: &Arc<Daemon>,
     sessions: &mut Vec<Session>,
@@ -463,8 +470,6 @@ pub(super) fn session_for_spawn(
     pane_id: u64,
     client_process_id: u32,
 ) -> Result<u64> {
-    #[cfg(not(feature = "session-persistence"))]
-    let _ = client_process_id;
     Ok(match request.session_id {
         Some(id) if joins_live_session => id,
         #[cfg(feature = "session-persistence")]
@@ -660,7 +665,7 @@ pub(super) fn record_shared_pane(
         exit: None,
     });
     summary.layout = BackgroundPaneLayout::Split {
-        axis: "horizontal".to_owned(),
+        axis: SplitAxis::Horizontal,
         first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
         first: Box::new(summary.layout),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id }),

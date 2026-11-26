@@ -48,12 +48,10 @@ pub fn run(
         .context("reading the multiplexer upgrade handover")?;
     let generation = resumed_handover
         .as_ref()
-        .map(|handover| handover.generation)
-        .unwrap_or(new_generation()?);
+        .map_or(new_generation()?, |handover| handover.generation);
     let retention = resumed_handover
         .as_ref()
-        .map(|handover| handover.retention)
-        .unwrap_or(retention);
+        .map_or(retention, |handover| handover.retention);
     let directory = session_catalog_dir();
     create_private_dir(&directory)?;
     let socket = socket_path(&directory);
@@ -290,6 +288,13 @@ pub(super) fn shut_down(daemon: &Daemon, socket: &Path, endpoint: &Path) {
 
 /// The listener: inherited from the image this one replaced where the
 /// platform carries it across `execv`, otherwise bound afresh.
+#[cfg_attr(
+    windows,
+    expect(
+        unused_variables,
+        reason = "Windows never carries a listener across an upgrade"
+    )
+)]
 pub(super) fn bind_listener(
     socket: &Path,
     resumed: bool,
@@ -317,8 +322,6 @@ pub(super) fn bind_listener(
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     anyhow::ensure!(!resumed, "an upgrade did not carry its listening socket");
-    #[cfg(windows)]
-    let _ = resumed;
     // Only the lock's holder gets here. A fresh start found nothing answering
     // on the socket, and a replacement's predecessor has stopped listening, so
     // whatever is left there is a dead listener's.

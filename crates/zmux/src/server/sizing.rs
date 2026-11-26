@@ -92,21 +92,18 @@ pub(super) fn apply_size(_daemon: &Daemon, pane: &mut Pane, columns: u16, lines:
 /// seeding a 98x51 screen into a grid that size came back rewrapped and
 /// interleaved: a full-screen program's screen crushed into 80 columns and 24
 /// rows, which is what a joined session looked like.
+#[cfg_attr(
+    not(unix),
+    expect(unused_variables, reason = "only a Unix pty master answers TIOCGWINSZ")
+)]
 pub(super) fn terminal_size(pane: &Pane) -> Option<(u16, u16)> {
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd as _;
-
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        // SAFETY: the descriptor is this process's pty master, and `size` is a
-        // `winsize` the kernel fills in.
-        let read =
-            unsafe { libc::ioctl(pane.pty.file().as_raw_fd(), libc::TIOCGWINSZ, &raw mut size) };
-        (read == 0 && size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
+        let size = rustix::termios::tcgetwinsize(pane.pty.file()).ok()?;
+        (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
     }
     #[cfg(not(unix))]
     {
-        let _ = pane;
         None
     }
 }

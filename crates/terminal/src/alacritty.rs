@@ -1,5 +1,3 @@
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 use std::{
     borrow::Cow,
     io, mem,
@@ -156,7 +154,8 @@ impl ZedListener {
 #[cfg(unix)]
 impl From<&AlacrittyPty> for ProcessIdGetter {
     fn from(pty: &AlacrittyPty) -> Self {
-        Self::new(pty.file().as_raw_fd(), pty.child_pid())
+        // Without a duplicate, lookups fall back to the child's own pid.
+        Self::new(pty.file().try_clone().ok().map(Into::into), pty.child_pid())
     }
 }
 
@@ -1270,6 +1269,13 @@ pub(super) unsafe fn append_text_to_term(term: &mut Term<ZedListener>, text_line
 }
 
 /// Select an embedded hosted backend before any child is started.
+#[cfg_attr(
+    not(windows),
+    expect(
+        unused_variables,
+        reason = "only the hosted Windows console reads the terminal"
+    )
+)]
 pub(super) fn open_pty_with_terminal(
     options: &tty::Options,
     bounds: TerminalBounds,
@@ -1281,8 +1287,6 @@ pub(super) fn open_pty_with_terminal(
     if options.console_backend == tty::ConsoleBackend::Hosted {
         return crate::hosted_console::open(options, term);
     }
-    #[cfg(not(windows))]
-    let _ = term;
     open_pty(options, bounds, scale_factor, window_id)
 }
 

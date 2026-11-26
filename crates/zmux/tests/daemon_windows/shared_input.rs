@@ -26,12 +26,16 @@ fn held_input_reader_subprocess() {
     let Some(directory) = std::env::var_os(HELD_INPUT_ENV).map(PathBuf::from) else {
         return;
     };
-    // SAFETY: the handle belongs to this child process's console, and the mode
-    // points to initialized, writable storage. This child owns its console mode.
+    // SAFETY: `GetStdHandle` takes no pointers; the handle it returns belongs
+    // to this child process's console and is not closed by anything here.
     let input = unsafe { GetStdHandle(STD_INPUT_HANDLE) }.expect("opening console input");
     let mut mode = CONSOLE_MODE(0);
+    // SAFETY: `input` is this console's input handle, and `mode` is
+    // initialized, writable storage.
     unsafe { GetConsoleMode(input, &mut mode) }.expect("reading console input mode");
     // Echoing 256 KiB makes delivery depend on ConPTY rendering throughput.
+    // SAFETY: `input` as above; the mode is a plain flag set, and this child
+    // owns its console mode.
     unsafe { SetConsoleMode(input, (mode | ENABLE_LINE_INPUT) & !ENABLE_ECHO_INPUT) }
         .expect("disabling console input echo");
     std::fs::write(directory.join("input-ready"), b"ready").unwrap();
@@ -65,6 +69,8 @@ fn process_cpu_time(process: &Child) -> Duration {
 
     let mut times = [FILETIME::default(); 4];
     let [created, exited, kernel, user] = &mut times;
+    // SAFETY: the handle is borrowed from `process`, which keeps it open
+    // across the call, and the four `FILETIME`s are distinct writable slots.
     unsafe {
         GetProcessTimes(
             HANDLE(process.as_raw_handle()),

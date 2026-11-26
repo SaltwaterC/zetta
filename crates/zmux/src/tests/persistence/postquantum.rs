@@ -265,19 +265,19 @@ fn a_malformed_stanza_is_refused_as_an_invalid_header() {
         (
             "padded base64",
             with(&|stanza| {
-                stanza.args[0] = base64::engine::general_purpose::STANDARD.encode(&encapsulation)
+                stanza.args[0] = base64::engine::general_purpose::STANDARD.encode(&encapsulation);
             }),
         ),
         (
             "a truncated encapsulation",
             with(&|stanza| {
-                stanza.args[0] = STANDARD_NO_PAD.encode(&encapsulation[..encapsulation.len() - 1])
+                stanza.args[0] = STANDARD_NO_PAD.encode(&encapsulation[..encapsulation.len() - 1]);
             }),
         ),
         (
             "an oversized encapsulation",
             with(&|stanza| {
-                stanza.args[0] = STANDARD_NO_PAD.encode([encapsulation.as_slice(), &[0]].concat())
+                stanza.args[0] = STANDARD_NO_PAD.encode([encapsulation.as_slice(), &[0]].concat());
             }),
         ),
         (

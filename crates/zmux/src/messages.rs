@@ -276,7 +276,7 @@ pub enum Request {
     /// the daemon cannot interject a challenge into one of those, because the
     /// bytes would arrive where it was expecting the answer.
     Attest,
-    /// Proves, where the platform has no peer credentials, that this connection
+    /// Proves, where the kernel does not report the peer, that this connection
     /// really belongs to the process its envelope named: the nonce read back
     /// from the handle in [`Response::AttestationRequired`].
     ///
@@ -662,7 +662,8 @@ pub enum Response {
     Ok,
     /// Asks the client to prove it is the process its envelope named, before a
     /// request that would act on a protected session someone else may own is
-    /// dispatched. Sent only where the platform has no peer credentials.
+    /// dispatched. Sent only by a Windows release that does not report which
+    /// process connected (`SIO_AF_UNIX_GETPEERPID`).
     ///
     /// `handle` is a pipe holding a nonce, already duplicated into the named
     /// process; the client reads it and answers with [`Request::Attested`].

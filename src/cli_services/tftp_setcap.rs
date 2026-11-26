@@ -15,10 +15,10 @@
 //! and it names only these two files.
 
 use std::{
-    ffi::{CString, OsStr, OsString},
+    ffi::{OsStr, OsString},
     fs,
     io::{self, IsTerminal as _},
-    os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _},
+    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -161,8 +161,7 @@ fn grant(binaries: &[PathBuf]) -> Result<()> {
     )?;
     let mut command_line = vec![setcap.into_os_string()];
     command_line.extend(setcap_arguments(binaries));
-    // SAFETY: geteuid has no preconditions and cannot fail.
-    if unsafe { libc::geteuid() } != 0 {
+    if !rustix::process::geteuid().is_root() {
         anyhow::ensure!(
             io::stdin().is_terminal(),
             "granting {CAPABILITY} needs root, and there is no terminal to ask for a password on; run:\n  sudo {}",
@@ -269,50 +268,28 @@ fn grants_net_bind_service(data: &[u8]) -> bool {
 
 /// The raw `security.capability` value, or `None` when the file has none.
 fn read_capability(path: &Path) -> Result<Option<Vec<u8>>> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("{} contains a NUL byte", path.display()))?;
-    let name = CString::new(CAPABILITY_ATTRIBUTE).expect("the attribute name has no NUL byte");
+    use rustix::io::Errno;
+
     let mut buffer = [0_u8; VFS_CAP_MAX_BYTES];
-    // SAFETY: both strings are NUL-terminated and outlive the call, and the
-    // buffer pointer and length describe `buffer`, which getxattr writes at
-    // most `buffer.len()` bytes into.
-    let length = unsafe {
-        libc::getxattr(
-            c_path.as_ptr(),
-            name.as_ptr(),
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-        )
-    };
-    if let Ok(length) = usize::try_from(length) {
-        return Ok(Some(buffer[..length].to_vec()));
-    }
-    let error = io::Error::last_os_error();
-    match error.raw_os_error() {
-        Some(libc::ENODATA) => Ok(None),
+    match rustix::fs::getxattr(path, CAPABILITY_ATTRIBUTE, &mut buffer[..]) {
+        Ok(length) => Ok(Some(buffer[..length].to_vec())),
+        Err(Errno::NODATA) => Ok(None),
         // Larger than any revision this reads, so not one it can vouch for.
-        Some(libc::ERANGE) => Ok(Some(Vec::new())),
-        Some(libc::ENOTSUP) => anyhow::bail!(
+        Err(Errno::RANGE) => Ok(Some(Vec::new())),
+        Err(Errno::NOTSUP) => anyhow::bail!(
             "{} is on a filesystem without extended attributes, which cannot hold file capabilities",
             path.display()
         ),
-        _ => Err(error).with_context(|| format!("reading the capabilities of {}", path.display())),
+        Err(error) => Err(io::Error::from(error))
+            .with_context(|| format!("reading the capabilities of {}", path.display())),
     }
 }
 
 fn on_nosuid_mount(path: &Path) -> Result<bool> {
-    let c_path = CString::new(path.as_os_str().as_bytes())
-        .with_context(|| format!("{} contains a NUL byte", path.display()))?;
-    // SAFETY: an all-zero statvfs is a valid value of this plain C struct,
-    // which statvfs overwrites on success.
-    let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
-    // SAFETY: the path is NUL-terminated and outlives the call, and `stats`
-    // is a valid, writable statvfs.
-    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stats) } != 0 {
-        return Err(io::Error::last_os_error())
-            .with_context(|| format!("inspecting the filesystem of {}", path.display()));
-    }
-    Ok(stats.f_flag & libc::ST_NOSUID != 0)
+    let stats = rustix::fs::statvfs(path)
+        .map_err(io::Error::from)
+        .with_context(|| format!("inspecting the filesystem of {}", path.display()))?;
+    Ok(stats.f_flag.contains(rustix::fs::StatVfsMountFlags::NOSUID))
 }
 
 #[cfg(test)]

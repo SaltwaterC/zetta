@@ -43,9 +43,7 @@ impl ForwardedAgentLink {
         use std::os::unix::fs::FileTypeExt as _;
 
         if target == path
-            || !fs::metadata(&target)
-                .map(|metadata| metadata.file_type().is_socket())
-                .unwrap_or(false)
+            || !fs::metadata(&target).is_ok_and(|metadata| metadata.file_type().is_socket())
         {
             return Ok(None);
         }

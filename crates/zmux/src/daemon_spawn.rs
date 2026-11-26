@@ -44,12 +44,9 @@ pub(crate) fn spawn_detached(executable: &Path, arguments: &[OsString]) -> Resul
 
     use anyhow::Context as _;
     use windows::{
-        Win32::{
-            Foundation::CloseHandle,
-            System::Threading::{
-                CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CreateProcessW,
-                DETACHED_PROCESS, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
-            },
+        Win32::System::Threading::{
+            CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS,
+            PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW,
         },
         core::{PCWSTR, PWSTR},
     };
@@ -94,10 +91,12 @@ pub(crate) fn spawn_detached(executable: &Path, arguments: &[OsString]) -> Resul
                 &mut process,
             )
         }?;
-        // SAFETY: CreateProcessW succeeded, so both handles are ours to close.
+        // SAFETY: CreateProcessW succeeded, so both handles are ours; owning
+        // them closes them, since nothing here waits on the daemon.
         unsafe {
-            let _ = CloseHandle(process.hThread);
-            let _ = CloseHandle(process.hProcess);
+            use std::os::windows::io::{FromRawHandle as _, OwnedHandle};
+            drop(OwnedHandle::from_raw_handle(process.hThread.0));
+            drop(OwnedHandle::from_raw_handle(process.hProcess.0));
         }
         windows::core::Result::Ok(())
     };

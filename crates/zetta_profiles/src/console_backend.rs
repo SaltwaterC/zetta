@@ -20,11 +20,6 @@ impl ConsoleBackend {
             Self::ConsoleServer => "console-server",
         }
     }
-    pub fn parse(value: &str) -> Option<Self> {
-        [Self::Conpty, Self::ConsoleServer]
-            .into_iter()
-            .find(|backend| backend.as_str() == value)
-    }
     pub fn label(self) -> &'static str {
         match self {
             Self::Conpty => "ConPTY",
@@ -38,5 +33,27 @@ impl ConsoleBackend {
             Self::Conpty => "Default (ConPTY)",
             Self::ConsoleServer => "Default (Console server)",
         }
+    }
+}
+
+impl std::str::FromStr for ConsoleBackend {
+    type Err = anyhow::Error;
+
+    /// Parses the spelling [`ConsoleBackend::as_str`] gives.
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        [Self::Conpty, Self::ConsoleServer]
+            .into_iter()
+            .find(|backend| backend.as_str() == value)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown console backend {value:?}; expected \"conpty\" or \"console-server\""
+                )
+            })
+    }
+}
+
+impl std::fmt::Display for ConsoleBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }

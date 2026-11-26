@@ -10,17 +10,12 @@ fn packet(api: u32, body: &[u8]) -> Packet {
     packet.payload[8..8 + body.len()].copy_from_slice(body);
     packet
 }
-fn fixture() -> (Server, Handle) {
+/// A server and a handle standing in for the driver's: an event, which no
+/// test here sends a request through.
+fn fixture() -> (Server, OwnedHandle) {
     let sink = Sink::new(false, None, 500).unwrap();
-    let event = unsafe {
-        windows_sys::Win32::System::Threading::CreateEventW(
-            std::ptr::null(),
-            1,
-            0,
-            std::ptr::null(),
-        )
-    };
-    (Server::new(sink, false), Handle::new(event).unwrap())
+    let handle = native::Event::new().unwrap().into();
+    (Server::new(sink, false), handle)
 }
 #[test]
 fn input_event_query_rejects_output_handles_as_python_requires() {

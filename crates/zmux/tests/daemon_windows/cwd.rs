@@ -115,7 +115,7 @@ fn a_remote_powershell_split_inherits_the_directory_after_set_location() {
             operation_id: client.next_shared_operation_id(),
             target_pane_id: Some(pane_id),
             replacement: SharedDraftLayout::Split {
-                axis: "vertical".into(),
+                axis: zmux::protocol::SplitAxis::Vertical,
                 first_ratio: 500,
                 first: Box::new(SharedDraftLayout::Existing { pane_id }),
                 second: Box::new(SharedDraftLayout::Draft { draft_id: 1 }),

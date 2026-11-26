@@ -15,6 +15,17 @@ pub(crate) use state::*;
 mod themes;
 pub(crate) use themes::*;
 
+/// One detection in flight: the pane it is for, the directory it was started
+/// from, and the generation `begin_detection` gave it. A result is applied only
+/// while the pane's current detection still has the same directory and
+/// generation, so a newer `cd` supersedes it.
+struct ProjectDetection {
+    tab_id: u64,
+    pane_id: u64,
+    directory: PathBuf,
+    generation: u64,
+}
+
 impl Zetta {
     pub(crate) fn active_project_config(&self) -> Option<&Arc<ProjectConfig>> {
         let tab = self.current_tab()?;
@@ -199,7 +210,13 @@ impl Zetta {
             return;
         };
         self.leave_project_ahead_of_detection(tab_id, pane_id, &directory, window, cx);
-        self.spawn_project_detection(tab_id, pane_id, directory, generation, window, cx);
+        let detection = ProjectDetection {
+            tab_id,
+            pane_id,
+            directory,
+            generation,
+        };
+        self.spawn_project_detection(detection, window, cx);
     }
 
     fn project_detection_pane(&self, tab_id: u64, pane_id: u64) -> Option<&TerminalPane> {
@@ -288,10 +305,7 @@ impl Zetta {
 
     fn spawn_project_detection(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        directory: PathBuf,
-        generation: u64,
+        detection: ProjectDetection,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -303,7 +317,7 @@ impl Zetta {
         let this = cx.entity().downgrade();
         window
             .spawn(cx, async move |cx| {
-                let detection_directory = directory.clone();
+                let detection_directory = detection.directory.clone();
                 let result = executor
                     .spawn(async move {
                         detect_project_for_directory(
@@ -316,9 +330,7 @@ impl Zetta {
                     .await;
                 this.update_in(cx, |this, window, cx| {
                     let result = this.discard_stale_detected_config(&detection_base, result, cx);
-                    this.apply_project_detection(
-                        tab_id, pane_id, directory, generation, result, window, cx,
-                    );
+                    this.apply_project_detection(detection, result, window, cx);
                 })
                 .ok();
             })
@@ -349,20 +361,19 @@ impl Zetta {
             .is_some_and(|tab| tab.id == tab_id && tab.active_pane == pane_id)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the detection's five values plus the GPUI window and context"
-    )]
     fn apply_project_detection(
         &mut self,
-        tab_id: u64,
-        pane_id: u64,
-        directory: PathBuf,
-        generation: u64,
+        detection: ProjectDetection,
         result: ProjectDetectionResult,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let ProjectDetection {
+            tab_id,
+            pane_id,
+            directory,
+            generation,
+        } = detection;
         if self.project_context_policy(tab_id).is_remote() {
             self.projects.forget_pane(pane_id);
             self.tab_groups.arrived(tab_id);
@@ -641,12 +652,10 @@ impl Zetta {
         match working_directory {
             None => self.open_tab_with_profile_in_project(profile, project, window, cx),
             Some(working_directory) => self.open_tab_with_profile_context(
-                profile,
-                Some(project),
-                NewTabOrigin::ProjectEntry,
-                None,
-                Some(working_directory),
-                TerminalLaunch::Spawn,
+                NewTabRequest {
+                    working_directory: Some(working_directory),
+                    ..NewTabRequest::new(profile, Some(project), NewTabOrigin::ProjectEntry)
+                },
                 window,
                 cx,
             ),

@@ -277,6 +277,8 @@ impl GridCell for Cell {
     #[inline]
     fn reset_all(cells: &mut [Self], template: &Self) {
         let blank = template.erased();
+        // The bitwise copy below would share whatever `extra` owned between every cell.
+        assert!(blank.extra.is_none(), "an erased cell owns nothing");
         for cell in cells {
             cell.extra = None;
             // SAFETY: `extra` is the only field that owns anything, and it was just dropped.

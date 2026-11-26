@@ -469,7 +469,7 @@ fn automatic_protection_is_only_configured_with_a_recipient_and_an_identity() {
         configured(
             r#"{"sessions":{"persistence":{"recipients":["age1example"],"auto_protect":true}}}"#
         ),
-        crate::config::default_session_identity_path().is_some()
+        zmux::persistence::default_identity_path().is_some()
     );
 }
 
@@ -706,7 +706,7 @@ fn pane_split_templates_parse_fully_customized_leaves_and_same_file_profiles() {
         leaves[0].overlay,
         Some(PaneSplitOverlay {
             text: Some("SERVER".to_owned()),
-            size: Some(PaneSplitOverlaySize::ExtraLarge),
+            size: Some(OverlayFontSize::ExtraLarge),
             opacity: Some(85),
             color: Some("cyan".to_owned()),
         })

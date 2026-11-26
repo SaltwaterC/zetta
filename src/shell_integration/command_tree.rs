@@ -151,26 +151,35 @@ pub(super) enum Helper {
     /// The source-branch commits a worktree can sync to, from Git.
     #[cfg_attr(
         not(feature = "worktree"),
-        allow(dead_code, reason = "only `wt` uses it")
+        expect(dead_code, reason = "only `wt` uses it")
     )]
     WorktreeCommits,
     /// Pane labels as a comma-separated list, each label offered once.
     PaneLabelList,
     /// The SSH hosts named in `~/.ssh/config`.
     #[cfg_attr(
-        not(any(feature = "zmux", feature = "zosh-client")),
-        allow(dead_code, reason = "only `mux` and `mosh` use it")
+        not(ssh_clients),
+        expect(dead_code, reason = "only `mux` and `mosh` use it")
     )]
     SshTargets,
     /// The local multiplexer's session IDs, from `mux list`.
-    #[cfg_attr(not(feature = "zmux"), allow(dead_code, reason = "only `mux` uses it"))]
+    #[cfg_attr(
+        not(feature = "zmux"),
+        expect(dead_code, reason = "only `mux` uses it")
+    )]
     MuxSessionIds,
     /// The local multiplexer's encrypted disk records, from `mux list`.
-    #[cfg_attr(not(feature = "zmux"), allow(dead_code, reason = "only `mux` uses it"))]
+    #[cfg_attr(
+        not(feature = "zmux"),
+        expect(dead_code, reason = "only `mux` uses it")
+    )]
     MuxRestorableIds,
     /// `mux attach`'s operands: an SSH host until one is given, by operand
     /// or `--ssh-target`, then that host's session IDs over SSH.
-    #[cfg_attr(not(feature = "zmux"), allow(dead_code, reason = "only `mux` uses it"))]
+    #[cfg_attr(
+        not(feature = "zmux"),
+        expect(dead_code, reason = "only `mux` uses it")
+    )]
     MuxAttach,
 }
 
@@ -257,8 +266,8 @@ pub(super) enum Attached {
     No,
     /// The long spelling, as `--port=2222`.
     #[cfg_attr(
-        not(any(feature = "zmux", feature = "zosh-client")),
-        allow(dead_code, reason = "only `mux` and `mosh` parse attached values")
+        not(ssh_clients),
+        expect(dead_code, reason = "only `mux` and `mosh` parse attached values")
     )]
     Long,
     /// Every spelling, as `--port=2222` and `-p=2222`.
@@ -302,8 +311,8 @@ const fn option(
 
 /// `option`, whose value its spellings `attached` also take attached to them.
 #[cfg_attr(
-    not(any(feature = "zmux", feature = "zosh-client")),
-    allow(dead_code, reason = "only `mux` and `mosh` parse attached values")
+    not(ssh_clients),
+    expect(dead_code, reason = "only `mux` and `mosh` parse attached values")
 )]
 const fn attached(attached: Attached, option: OptionSpec) -> OptionSpec {
     OptionSpec { attached, ..option }

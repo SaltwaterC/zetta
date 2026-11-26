@@ -730,18 +730,19 @@ pub fn stop(directory: &std::path::Path, force: bool) -> Result<StopOutcome> {
 fn signal_until_stopped(endpoint: &transport::Endpoint) -> Result<()> {
     use anyhow::Context as _;
 
-    let process_id = endpoint.process_id as libc::pid_t;
-    anyhow::ensure!(
-        process_id > 0,
-        "the multiplexer published an unusable process id"
-    );
-    // SAFETY: a signal to one process id, published by the multiplexer for
-    // itself, whose socket answered a moment ago.
-    unsafe { libc::kill(process_id, libc::SIGTERM) };
+    use rustix::process::{Pid, Signal, kill_process};
+
+    let process_id = i32::try_from(endpoint.process_id)
+        .ok()
+        .and_then(Pid::from_raw)
+        .context("the multiplexer published an unusable process id")?;
+    // A signal to one process id, published by the multiplexer for itself,
+    // whose socket answered a moment ago.
+    let _ = kill_process(process_id, Signal::TERM);
     if wait_until_stopped(endpoint, STOP_GRACE_PERIOD).is_ok() {
         return Ok(());
     }
-    unsafe { libc::kill(process_id, libc::SIGKILL) };
+    let _ = kill_process(process_id, Signal::KILL);
     wait_until_stopped(endpoint, STOP_TIMEOUT).with_context(|| {
         format!(
             "the multiplexer (process {}) could not be stopped",
@@ -767,7 +768,8 @@ fn signal_until_stopped(endpoint: &transport::Endpoint) -> Result<()> {
 #[cfg(windows)]
 pub(crate) fn terminate_process(process_id: u32) -> Result<()> {
     use anyhow::Context as _;
-    use windows::Win32::Foundation::CloseHandle;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
 
     anyhow::ensure!(
@@ -775,16 +777,14 @@ pub(crate) fn terminate_process(process_id: u32) -> Result<()> {
         "the process published an unusable process id"
     );
     // SAFETY: the process ID came from a private endpoint that answered just
-    // before this function was called. The returned handle is closed below.
-    let process = unsafe { OpenProcess(PROCESS_TERMINATE, false, process_id) }
+    // before this function was called; the access right is valid.
+    let opened = unsafe { OpenProcess(PROCESS_TERMINATE, false, process_id) }
         .with_context(|| format!("opening process {process_id} for termination"))?;
-    let result = unsafe { TerminateProcess(process, 1) }
-        .with_context(|| format!("terminating process {process_id}"));
-    // SAFETY: `process` is the handle returned by `OpenProcess` above.
-    unsafe {
-        let _ = CloseHandle(process);
-    }
-    result
+    // SAFETY: `OpenProcess` succeeded, so this function owns the handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+    // SAFETY: `process` is open with `PROCESS_TERMINATE` until it drops.
+    unsafe { TerminateProcess(HANDLE(process.as_raw_handle()), 1) }
+        .with_context(|| format!("terminating process {process_id}"))
 }
 
 /// Waits for the multiplexer's socket to stop answering.

@@ -296,23 +296,17 @@ fn binding_failure_keeps_raw_agent_requests_working() {
 #[cfg(windows)]
 #[test]
 fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
-    use std::os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _};
-    use windows::Win32::Foundation::ERROR_PIPE_CONNECTED;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows::Win32::Foundation::{ERROR_PIPE_CONNECTED, HANDLE};
     use windows::Win32::System::Pipes::ConnectNamedPipe;
 
     let path = create_bootstrap_pipe_path();
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
     let handle = windows_pipe::create(
-        windows::core::PCWSTR(wide.as_ptr()),
+        &windows_pipe::PipeName::new(path.as_os_str()),
         AGENT_MAX_FRAME as u32,
         true,
     )
     .unwrap();
-    let handle_value = handle.0 as usize;
     let binding = session_bind_frame(true);
     let request = frame(&[11]);
     let response = frame(&[12, 0, 0, 0, 0]);
@@ -321,12 +315,12 @@ fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
         let response = response.clone();
         move || {
             // This thread takes sole ownership of the pipe handle.
-            let handle = windows::Win32::Foundation::HANDLE(handle_value as _);
-            let connected = unsafe { ConnectNamedPipe(handle, None) };
+            // SAFETY: `handle` is open until it becomes `agent` below.
+            let connected = unsafe { ConnectNamedPipe(HANDLE(handle.as_raw_handle()), None) };
             if let Err(error) = connected {
                 assert_eq!(error.code().0 as u32 & 0xffff, ERROR_PIPE_CONNECTED.0);
             }
-            let mut agent = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+            let mut agent = std::fs::File::from(handle);
             assert_eq!(read_frame_from_buffer(&mut agent).unwrap(), binding);
             agent.write_all(&frame(&[6])).unwrap();
             assert_eq!(read_frame_from_buffer(&mut agent).unwrap(), frame(&[11]));
@@ -345,70 +339,6 @@ fn windows_bootstrap_pipe_captures_binding_and_forwards_requests() {
     drop(relay);
 }
 
-/// Serves one connection on a fresh pipe at `path` the way an agent would:
-/// reads `request_len` bytes, then reports the impersonation level the client
-/// granted, then answers with `reply`.
-#[cfg(windows)]
-fn impersonation_level_of_next_client(
-    path: &Path,
-    request_len: usize,
-    reply: Vec<u8>,
-) -> thread::JoinHandle<windows::Win32::Security::SECURITY_IMPERSONATION_LEVEL> {
-    use std::os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _};
-    use windows::Win32::{
-        Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE},
-        Security::{
-            GetTokenInformation, RevertToSelf, SECURITY_IMPERSONATION_LEVEL, TOKEN_QUERY,
-            TokenImpersonationLevel,
-        },
-        System::{
-            Pipes::{ConnectNamedPipe, ImpersonateNamedPipeClient},
-            Threading::{GetCurrentThread, OpenThreadToken},
-        },
-    };
-
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let handle = windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), 1024, true)
-        .expect("create test agent pipe")
-        .0 as usize;
-    thread::spawn(move || {
-        let handle = HANDLE(handle as _);
-        if let Err(error) = unsafe { ConnectNamedPipe(handle, None) } {
-            assert_eq!(error.code().0 as u32 & 0xffff, ERROR_PIPE_CONNECTED.0);
-        }
-        let mut stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-        let mut request = vec![0_u8; request_len];
-        stream.read_exact(&mut request).unwrap();
-
-        unsafe { ImpersonateNamedPipeClient(handle) }.expect("impersonating the client");
-        let mut token = HANDLE::default();
-        // As self: an identification-level token cannot be opened as itself.
-        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) };
-        unsafe { RevertToSelf() }.expect("reverting");
-        opened.expect("opening the impersonation token");
-        let mut level = SECURITY_IMPERSONATION_LEVEL::default();
-        let mut length = 0_u32;
-        let queried = unsafe {
-            GetTokenInformation(
-                token,
-                TokenImpersonationLevel,
-                Some((&raw mut level).cast()),
-                std::mem::size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32,
-                &mut length,
-            )
-        };
-        let _ = unsafe { CloseHandle(token) };
-        queried.expect("reading the impersonation level");
-
-        stream.write_all(&reply).unwrap();
-        level
-    })
-}
-
 /// Whatever answers the agent path — another account's pipe, a hostile
 /// forwarded agent — may learn who connected but not act as this process.
 #[cfg(windows)]
@@ -417,7 +347,7 @@ fn windows_agent_connections_grant_identification_only() {
     use windows::Win32::Security::SecurityIdentification;
 
     let path = create_bootstrap_pipe_path();
-    let agent = impersonation_level_of_next_client(&path, 1, Vec::new());
+    let agent = windows_pipe::impersonation_level_of_next_client(&path, 1, Vec::new());
     let mut stream = connect_agent(&path).expect("connecting to the agent");
     stream.write_all(&[0]).unwrap();
     assert_eq!(agent.join().unwrap(), SecurityIdentification);
@@ -428,20 +358,12 @@ fn windows_agent_connections_grant_identification_only() {
 #[cfg(windows)]
 #[test]
 fn windows_agent_pipe_refuses_a_name_that_already_exists() {
-    use std::os::windows::ffi::OsStrExt as _;
-    use windows::Win32::Foundation::CloseHandle;
+    let name = windows_pipe::PipeName::new(create_bootstrap_pipe_path().as_os_str());
+    let squatter = windows_pipe::create(&name, 1024, true).expect("the first instance");
 
-    let wide = create_bootstrap_pipe_path()
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let name = windows::core::PCWSTR(wide.as_ptr());
-    let squatter = windows_pipe::create(name, 1024, true).expect("the first instance");
+    assert!(windows_pipe::create(&name, 1024, true).is_err());
 
-    assert!(windows_pipe::create(name, 1024, true).is_err());
-
-    let _ = unsafe { CloseHandle(squatter) };
+    drop(squatter);
 }
 
 /// What a malicious server sends to start forwarding the client never agreed

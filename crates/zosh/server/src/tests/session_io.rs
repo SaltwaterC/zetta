@@ -219,7 +219,7 @@ mod direct {
             unreachable!()
         };
         let interest = direct.interest(false).expect("writes are pending");
-        assert_ne!(interest.events & libc::POLLOUT, 0);
+        assert!(interest.contains(rustix::event::PollFlags::OUT));
     }
 
     #[test]

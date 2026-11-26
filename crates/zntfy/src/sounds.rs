@@ -36,10 +36,6 @@ pub enum BuiltinSound {
 impl BuiltinSound {
     pub const ALL: [Self; 4] = [Self::Default, Self::Ok, Self::Alarm, Self::Gong];
 
-    pub fn parse(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|sound| sound.name() == name)
-    }
-
     pub fn name(self) -> &'static str {
         match self {
             Self::Default => "zetta-default",
@@ -93,7 +89,7 @@ impl BuiltinSound {
 
     #[cfg(target_os = "macos")]
     fn play_with_afplay(self) -> Result<()> {
-        let audio_path = prepare_macos_builtin_sound(self, &crate::platform_config_dir())?;
+        let audio_path = prepare_macos_builtin_sound(self, &crate::notify::platform_config_dir()?)?;
         spawn_afplay(&audio_path).context("starting macOS notification audio")?;
         Ok(())
     }
@@ -154,6 +150,25 @@ impl BuiltinSound {
         anyhow::ensure!(!result.timed_out(), "audio playback did not finish in time");
         std::thread::sleep(TEARDOWN_GRACE);
         Ok(())
+    }
+}
+
+/// Parses the name [`BuiltinSound::name`] gives, which is also how a request
+/// asks for the tone.
+impl std::str::FromStr for BuiltinSound {
+    type Err = anyhow::Error;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|sound| sound.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("{name:?} is not a built-in sound"))
+    }
+}
+
+impl std::fmt::Display for BuiltinSound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 

@@ -281,9 +281,10 @@ impl Client {
     /// Receives a response, answering an attestation challenge first if the
     /// multiplexer asks for one.
     ///
-    /// Only Windows ever asks: everywhere else the kernel already answers
-    /// "which process is on the other end of this socket" about the socket
-    /// itself. See [`crate::transport::PeerChallenge`].
+    /// Only a Windows release whose kernel does not answer "which process is
+    /// on the other end of this socket" ever asks; everywhere else the kernel
+    /// answers it about the socket itself. See
+    /// [`crate::transport::PeerChallenge`].
     ///
     /// A remote client also tells its transport what the answer proved: any
     /// response but a token rejection shows the endpoint is current, which is

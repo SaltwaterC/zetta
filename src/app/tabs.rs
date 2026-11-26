@@ -52,12 +52,7 @@ impl Zetta {
             return;
         };
         self.open_tab_with_profile_context(
-            profile,
-            project,
-            NewTabOrigin::CurrentSession,
-            None,
-            None,
-            TerminalLaunch::Spawn,
+            NewTabRequest::new(profile, project, NewTabOrigin::CurrentSession),
             window,
             cx,
         );
@@ -71,12 +66,7 @@ impl Zetta {
     ) {
         let project = self.active_project_config().cloned();
         self.open_tab_with_profile_context(
-            profile,
-            project,
-            NewTabOrigin::CurrentSession,
-            None,
-            None,
-            TerminalLaunch::Spawn,
+            NewTabRequest::new(profile, project, NewTabOrigin::CurrentSession),
             window,
             cx,
         );
@@ -90,12 +80,7 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) {
         self.open_tab_with_profile_context(
-            profile,
-            Some(project),
-            NewTabOrigin::ProjectEntry,
-            None,
-            None,
-            TerminalLaunch::Spawn,
+            NewTabRequest::new(profile, Some(project), NewTabOrigin::ProjectEntry),
             window,
             cx,
         );
@@ -131,12 +116,11 @@ impl Zetta {
         )
         .context("no terminal profile is configured")?;
         self.open_tab_with_profile_context(
-            profile,
-            project,
-            NewTabOrigin::CurrentSession,
-            Some(request.command),
-            working_directory,
-            TerminalLaunch::Spawn,
+            NewTabRequest {
+                pending_command: Some(request.command),
+                working_directory,
+                ..NewTabRequest::new(profile, project, NewTabOrigin::CurrentSession)
+            },
             window,
             cx,
         );
@@ -168,12 +152,10 @@ impl Zetta {
             .as_ref()
             .and_then(|startup| startup.title.clone());
         self.open_tab_with_profile_context(
-            profile,
-            project,
-            NewTabOrigin::CurrentSession,
-            None,
-            None,
-            TerminalLaunch::Handoff(request),
+            NewTabRequest {
+                launch: TerminalLaunch::Handoff(request),
+                ..NewTabRequest::new(profile, project, NewTabOrigin::CurrentSession)
+            },
             window,
             cx,
         );
@@ -186,22 +168,20 @@ impl Zetta {
         true
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "six owned values a caller moves in, plus the GPUI window and \
-                  context; an owned bundle would only move the argument list"
-    )]
     pub(crate) fn open_tab_with_profile_context(
         &mut self,
-        mut profile: Profile,
-        project: Option<Arc<ProjectConfig>>,
-        origin: NewTabOrigin,
-        pending_command: Option<Vec<String>>,
-        working_directory_override: Option<PathBuf>,
-        launch: TerminalLaunch,
+        request: NewTabRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let NewTabRequest {
+            mut profile,
+            project,
+            origin,
+            pending_command,
+            working_directory: working_directory_override,
+            launch,
+        } = request;
         apply_launch_theme_override(&mut profile, self.launch_theme_override.as_ref());
         let mut pending_command_error = None;
         let pending_command =
@@ -575,7 +555,7 @@ impl Zetta {
     }
 
     pub(crate) fn terminal_input_enabled(&self) -> bool {
-        pane_input_enabled(self.pane_resize_mode || self.pane_move_mode || self.tab_move_mode)
+        pane_input_enabled(self.layout_edit_mode != LayoutEditMode::None)
     }
 
     pub(crate) fn update_terminal_input_enabled(&self, cx: &mut App) {
@@ -591,8 +571,8 @@ impl Zetta {
     }
 
     pub(crate) fn disable_tab_move_mode_if_unavailable(&mut self, cx: &mut App) {
-        if self.tabs_in_view().len() < 2 && self.tab_move_mode {
-            self.tab_move_mode = false;
+        if self.tabs_in_view().len() < 2 && self.tab_move_mode() {
+            self.layout_edit_mode = LayoutEditMode::None;
             self.update_terminal_input_enabled(cx);
         }
     }
@@ -603,19 +583,15 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tabs_in_view().len() < 2 && !self.tab_move_mode {
+        if self.tabs_in_view().len() < 2 && !self.tab_move_mode() {
             return;
         }
 
-        self.tab_move_mode = !self.tab_move_mode;
+        self.layout_edit_mode = self.layout_edit_mode.toggled(LayoutEditMode::TabMove);
         self.tab_overflow_selection_side = None;
         self.dismiss_tab_overflow_menus(cx);
-        if self.tab_move_mode {
-            self.pane_resize_mode = false;
-            self.pane_move_mode = false;
-            self.pane_resize_keys.clear();
-            self.pane_resize_repeat_generation = self.pane_resize_repeat_generation.wrapping_add(1);
-            self.pane_resize_drag = None;
+        if self.tab_move_mode() {
+            self.reset_pane_resize_input();
         }
         self.update_terminal_input_enabled(cx);
         self.focus_active(window, cx);
@@ -645,7 +621,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.tab_move_mode {
+        if !self.tab_move_mode() {
             return;
         }
         let Some(source_id) = self.current_tab().map(|tab| tab.id) else {

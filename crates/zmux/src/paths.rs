@@ -12,6 +12,13 @@ use std::{
 const SESSION_DIRECTORY_PREFIX: &str = "sessions-debug-v";
 const SESSION_DIRECTORY_NAME: &str = "sessions";
 
+/// The account's home directory, from `HOME` (`USERPROFILE` on Windows).
+///
+/// Not checked to exist; a caller that needs a usable directory filters it.
+pub fn home_dir() -> Option<PathBuf> {
+    env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+}
+
 pub fn platform_config_dir() -> PathBuf {
     #[cfg(windows)]
     return windows_config_dir(

@@ -29,7 +29,7 @@ pub(super) fn shared_draft_process(
     draft: &crate::messages::SharedPaneDraft,
     #[cfg_attr(
         windows,
-        allow(
+        expect(
             unused_variables,
             reason = "on Windows the pane's agent pipe name comes from the listener that serves it"
         )
@@ -205,12 +205,17 @@ pub(super) fn start_shared_draft(
     })
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        unused_variables,
+        reason = "only Windows pty hosts need the daemon to close"
+    )
+)]
 pub(super) fn close_provisional_shared_panes(
     daemon: &Arc<Daemon>,
     panes: Vec<ProvisionalSharedPane>,
 ) {
-    #[cfg(not(windows))]
-    let _ = daemon;
     #[cfg(windows)]
     for pane in &panes {
         let _ = daemon.pty_host.close(pane.console_id);
@@ -239,16 +244,12 @@ pub(super) fn resolve_draft_layout(
             second,
         } => {
             anyhow::ensure!(
-                axis == "horizontal" || axis == "vertical",
-                "invalid split axis {axis}"
-            );
-            anyhow::ensure!(
                 *first_ratio > 0
                     && *first_ratio < crate::protocol::BACKGROUND_PANE_SPLIT_RATIO_SCALE,
                 "invalid split ratio"
             );
             Ok(BackgroundPaneLayout::Split {
-                axis: axis.clone(),
+                axis: *axis,
                 first_ratio: *first_ratio,
                 first: Box::new(resolve_draft_layout(first, mappings)?),
                 second: Box::new(resolve_draft_layout(second, mappings)?),

@@ -2659,6 +2659,10 @@ unsafe fn drop_text_input_context(object: &Object) {
         if !input_context.is_null() {
             (*object).set_ivar(TEXT_INPUT_CONTEXT_IVAR, nil);
             let _: () = msg_send![input_context, deactivate];
+            // AppKit can keep the context alive past this release, and the
+            // view, its client, is about to be freed. Without a gate every
+            // callback the context receives returns before reaching it.
+            drop_input_context_gate(&*input_context);
             let _: () = msg_send![input_context, release];
         }
     }

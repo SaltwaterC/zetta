@@ -40,6 +40,7 @@ test-support = []
 
 [dependencies]
 zetta_cli_help = { path = "../zetta_cli_help" }
+zetta_layout = { path = "../zetta_layout" }
 zetta_sync = { path = "../zetta_sync" }
 age = { version = "0.11.1", default-features = false, features = ["armor", "ssh"], optional = true }
 age-core = { version = "0.11.0", optional = true }
@@ -66,6 +67,11 @@ zeroize = "1"
 zetta_profiles = { path = "../zetta_profiles" }
 zclip = { path = "../zclip", default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+# Already in the graph at this version; the safe spelling of the descriptor,
+# socket, terminal and process calls.
+rustix = { version = "1.1.4", features = ["event", "fs", "net", "process", "termios"] }
+
 [target.'cfg(windows)'.dependencies]
 # The console host can run console-server consoles as well as ConPTY's.
 console-server = { path = "../console-server", default-features = false, features = ["grid"] }
@@ -73,6 +79,7 @@ polling = "3"
 uds_windows = "1.2"
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
@@ -102,3 +109,10 @@ opt-level = 2
 
 [profile.test.package.curve25519-dalek]
 opt-level = 2
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"
+undocumented_unsafe_blocks = "deny"

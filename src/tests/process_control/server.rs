@@ -7,15 +7,15 @@ use futures::StreamExt as _;
 fn reconnect_results_use_distinct_control_statuses() {
     assert_eq!(
         reconnect_session_status(ReconnectSessionResult::AuthenticationFailed),
-        "authentication_failed"
+        ControlStatus::AuthenticationFailed
     );
     assert_eq!(
         reconnect_session_status(ReconnectSessionResult::SessionNotFound),
-        "session_not_found"
+        ControlStatus::SessionNotFound
     );
     assert_eq!(
         reconnect_session_status(ReconnectSessionResult::StillStarting),
-        "session_starting"
+        ControlStatus::SessionStarting
     );
 }
 
@@ -214,7 +214,7 @@ fn a_request_that_does_not_decode_is_answered_rather_than_dropped() {
             .unwrap();
         write_message(&mut stream, &rejected).unwrap();
         let response = read_message::<ControlResponse>(&mut stream).unwrap();
-        assert_eq!(response.status, "rejected");
+        assert_eq!(response.status, ControlStatus::Rejected);
     }
 
     assert!(
@@ -295,7 +295,7 @@ fn a_connection_past_the_limit_is_refused_at_once() {
         .unwrap();
     let response = read_message::<ControlResponse>(&mut refused)
         .expect("the connection past the limit is answered before it sends anything");
-    assert_eq!(response.status, "rejected");
+    assert_eq!(response.status, ControlStatus::Rejected);
     assert_eq!(response.error.unwrap().code, PROCESS_BUSY);
 
     // Closing them gives the places back — once their threads have seen the
@@ -307,14 +307,14 @@ fn a_connection_past_the_limit_is_refused_at_once() {
         let response = try_queued_icon_reset(&endpoint, 7);
         if response
             .as_ref()
-            .is_ok_and(|response| response.status == "ok")
+            .is_ok_and(|response| response.status == ControlStatus::Ok)
             || Instant::now() > deadline
         {
             break response.unwrap();
         }
         thread::sleep(Duration::from_millis(20));
     };
-    assert_eq!(response.status, "ok");
+    assert_eq!(response.status, ControlStatus::Ok);
     assert!(matches!(
         futures::executor::block_on(received.next()),
         Some(ProcessControlCommand::ResetTabIcon { .. })
@@ -350,7 +350,7 @@ fn a_request_trickled_past_its_deadline_is_refused() {
         .unwrap();
     let response = read_message::<ControlResponse>(&mut stream).unwrap();
     let elapsed = started.elapsed();
-    assert_eq!(response.status, "rejected");
+    assert_eq!(response.status, ControlStatus::Rejected);
     assert!(
         elapsed < deadline + Duration::from_millis(600),
         "a trickled request held its connection for {elapsed:?}"
@@ -367,10 +367,10 @@ fn a_full_command_queue_refuses_rather_than_queues() {
         ..ControlLimits::DEFAULT
     });
 
-    assert_eq!(queued_icon_reset(&endpoint, 1).status, "ok");
-    assert_eq!(queued_icon_reset(&endpoint, 2).status, "ok");
+    assert_eq!(queued_icon_reset(&endpoint, 1).status, ControlStatus::Ok);
+    assert_eq!(queued_icon_reset(&endpoint, 2).status, ControlStatus::Ok);
     let refused = queued_icon_reset(&endpoint, 3);
-    assert_eq!(refused.status, "rejected");
+    assert_eq!(refused.status, ControlStatus::Rejected);
     assert_eq!(refused.error.unwrap().code, PROCESS_BUSY);
     assert_eq!(server.queued_commands().len(), 2);
 
@@ -378,6 +378,6 @@ fn a_full_command_queue_refuses_rather_than_queues() {
     let taken = futures::executor::block_on(received.next()).unwrap();
     assert!(taken.came_from_control_socket());
     server.queued_commands().release();
-    assert_eq!(queued_icon_reset(&endpoint, 4).status, "ok");
+    assert_eq!(queued_icon_reset(&endpoint, 4).status, ControlStatus::Ok);
     assert_eq!(server.queued_commands().len(), 2);
 }

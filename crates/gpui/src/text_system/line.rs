@@ -603,7 +603,6 @@ fn paint_line(
 ///
 /// Zetta: split out so [`ShapedLine::paint_in_layer`] can reach it; see that
 /// method for when painting without a layer of one's own is sound.
-#[allow(clippy::too_many_arguments)]
 fn paint_line_glyphs(
     origin: Point<Pixels>,
     layout: &LineLayout,

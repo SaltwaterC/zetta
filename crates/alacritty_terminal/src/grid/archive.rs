@@ -519,8 +519,10 @@ pub(super) struct DecodedChunks<C, T> {
 /// last read, so that is checked before the map.
 struct Entries<C, T> {
     by_chunk: HashMap<usize, DecodedChunk<C, T>, BuildHasherDefault<ChunkHasher>>,
-    /// The last chunk found, and the address of its rows.
-    last: Option<(usize, usize)>,
+    /// The last chunk found, and the address and length of its rows. An address rather than a
+    /// pointer keeps the cache `Send` and `Sync` without an `unsafe impl` for it; the address is
+    /// exposed when it is stored, so the pointer rebuilt from it keeps the rows' provenance.
+    last: Option<(usize, usize, usize)>,
 }
 
 struct DecodedChunk<C, T> {
@@ -579,27 +581,32 @@ impl<C, T> DecodedChunks<C, T> {
     ) -> &Row<T> {
         let key = Arc::as_ptr(chunk) as usize;
         let mut entries = self.entries.lock();
-        let rows = match entries.last {
-            Some((last, rows)) if last == key => rows as *const Row<T>,
+        let (address, len) = match entries.last {
+            Some((last, address, len)) if last == key => (address, len),
             _ => {
-                let rows = entries
+                let rows = &entries
                     .by_chunk
                     .entry(key)
                     .or_insert_with(|| DecodedChunk {
                         _chunk: chunk.clone(),
                         rows: decode().into_boxed_slice(),
                     })
-                    .rows
-                    .as_ptr();
-                entries.last = Some((key, rows as usize));
-                rows
+                    .rows;
+                let (address, len) = (rows.as_ptr().expose_provenance(), rows.len());
+                entries.last = Some((key, address, len));
+                (address, len)
             },
         };
         drop(entries);
-        // SAFETY: `rows` points into a boxed slice owned by an entry, which is only removed
-        // through `&mut self` and does not move when the map does, so it outlives `&self`. The
-        // chunk's row count bounds `index`, which the caller took from that chunk.
-        unsafe { &*rows.add(index) }
+        let rows = std::ptr::slice_from_raw_parts(
+            std::ptr::with_exposed_provenance::<Row<T>>(address),
+            len,
+        );
+        // SAFETY: `rows` is a boxed slice owned by an entry, which is only removed through
+        // `&mut self` and does not move when the map does, so it outlives `&self`. Only the
+        // lifetime is extended; the index below is still checked against the slice.
+        let rows = unsafe { &*rows };
+        &rows[index]
     }
 
     /// Release every decoded chunk.

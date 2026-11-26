@@ -20,6 +20,9 @@ tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Already in the graph at this version; the safe spelling of the controlling
+# terminal's raw mode and its wait for a reply.
+rustix = { version = "1.1.4", features = ["event", "termios"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
@@ -31,3 +34,10 @@ path = "src/bin/zcopy.rs"
 [[bin]]
 name = "zpaste"
 path = "src/bin/zpaste.rs"
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"
+undocumented_unsafe_blocks = "deny"

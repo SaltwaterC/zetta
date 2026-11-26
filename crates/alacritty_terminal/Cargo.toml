@@ -33,7 +33,10 @@ serde = { version = "1", features = ["derive", "rc"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 rustix-openpty = "0.2.0"
-rustix = { version = "1.0.0", default-features = false, features = ["std"] }
+# 1.1.6 is the first release whose `tcgetpgrp` refuses a process group of 0
+# on every platform; before it, macOS returned 0 for a pty with no foreground
+# group and rustix built a `NonZeroI32` from it.
+rustix = { version = "1.1.6", default-features = false, features = ["fs", "process", "std", "termios"] }
 signal-hook = "0.4.3"
 
 [target.'cfg(windows)'.dependencies]

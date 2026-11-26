@@ -24,16 +24,8 @@ fn typed(state: &State) -> Vec<u16> {
         .map(|record| u16::from_le_bytes([record[14], record[15]]))
         .collect()
 }
-fn event() -> Handle {
-    Handle::new(unsafe {
-        windows_sys::Win32::System::Threading::CreateEventW(
-            std::ptr::null(),
-            1,
-            0,
-            std::ptr::null(),
-        )
-    })
-    .unwrap()
+fn event() -> Event {
+    Event::new().unwrap()
 }
 fn input() -> Input {
     input_within(crate::budget::Budget::session())
@@ -46,7 +38,7 @@ fn input_within(budget: Arc<crate::budget::Budget>) -> Input {
         }
     }
     Input::new(
-        Arc::new(event()),
+        Arc::new(event().into()),
         event(),
         Arc::new(Mutex::new(Box::new(Output))),
         None,
@@ -209,7 +201,7 @@ fn input_backpressure_never_takes_the_blocked_output_lock() {
     let output: SharedOutput = Arc::new(Mutex::new(Box::new(Output)));
     let (ready, seen) = std::sync::mpsc::channel();
     let input = Input::new(
-        Arc::new(event()),
+        Arc::new(event().into()),
         event(),
         output.clone(),
         Some(Arc::new(move |value| ready.send(value).unwrap())),

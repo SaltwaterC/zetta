@@ -8,6 +8,13 @@ use super::*;
 /// through `Configure` after the fresh daemon publishes its endpoint. The
 /// standalone disk-resume path supplies a bootstrap mode because it has no
 /// Zetta configuration to apply.
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        unused_variables,
+        reason = "daemon options only carry persistence recipients"
+    )
+)]
 pub(super) fn start_daemon(
     directory: &std::path::Path,
     startup_retention: Option<Retention>,
@@ -25,8 +32,6 @@ pub(super) fn start_daemon(
         crate::catalog::write_private_file(&options_path, &options)?;
         arguments.push(format!("--daemon-options={}", options_path.display()));
     }
-    #[cfg(not(feature = "session-persistence"))]
-    let _ = directory;
     Command::new(&executable)
         .args(&arguments)
         .stdin(Stdio::null())

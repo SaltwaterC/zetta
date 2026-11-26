@@ -249,33 +249,24 @@ mod tests;
 #[cfg(unix)]
 struct ControllingTty {
     file: File,
-    original: libc::termios,
+    original: rustix::termios::Termios,
 }
 
 #[cfg(unix)]
 impl ControllingTty {
     fn open() -> Result<Option<Self>> {
+        use rustix::termios::{OptionalActions, tcgetattr, tcsetattr};
         use std::fs::OpenOptions;
-        use std::os::fd::AsRawFd as _;
         let file = match OpenOptions::new().read(true).write(true).open("/dev/tty") {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) if error.raw_os_error() == Some(libc::ENXIO) => return Ok(None),
             Err(error) => return Err(error).context("opening controlling terminal"),
         };
-        // SAFETY: termios is initialized by tcgetattr before it is read.
-        let mut original = unsafe { std::mem::zeroed() };
-        // SAFETY: the file descriptor and termios pointer are valid for this call.
-        if unsafe { libc::tcgetattr(file.as_raw_fd(), &raw mut original) } == -1 {
-            return Err(io::Error::last_os_error()).context("reading terminal mode");
-        }
-        let mut raw = original;
-        // SAFETY: raw is initialized and owned by this function.
-        unsafe { libc::cfmakeraw(&raw mut raw) };
-        // SAFETY: the descriptor stays open while the mode is changed.
-        if unsafe { libc::tcsetattr(file.as_raw_fd(), libc::TCSANOW, &raw) } == -1 {
-            return Err(io::Error::last_os_error()).context("setting terminal mode");
-        }
+        let original = tcgetattr(&file).context("reading terminal mode")?;
+        let mut raw = original.clone();
+        raw.make_raw();
+        tcsetattr(&file, OptionalActions::Now, &raw).context("setting terminal mode")?;
         Ok(Some(Self { file, original }))
     }
 
@@ -284,20 +275,18 @@ impl ControllingTty {
     }
 
     fn read_timeout(&mut self, bytes: &mut [u8], timeout: Duration) -> Result<usize> {
-        use std::os::fd::AsRawFd as _;
-        let mut poll = libc::pollfd {
-            fd: self.file.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let milliseconds = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        // SAFETY: poll points to one valid initialized pollfd.
-        let ready = unsafe { libc::poll(&raw mut poll, 1, milliseconds) };
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+
+        // Clamped to what `poll`'s millisecond argument holds, where the
+        // platform has no `ppoll`.
+        let timeout = Timespec::try_from(timeout.min(Duration::from_millis(i32::MAX as u64))).ok();
+        let ready = poll(
+            &mut [PollFd::new(&self.file, PollFlags::IN)],
+            timeout.as_ref(),
+        )
+        .context("waiting for clipboard response")?;
         if ready == 0 {
             return Ok(0);
-        }
-        if ready == -1 {
-            return Err(io::Error::last_os_error()).context("waiting for clipboard response");
         }
         self.file.read(bytes).context("reading clipboard response")
     }
@@ -306,15 +295,11 @@ impl ControllingTty {
 #[cfg(unix)]
 impl Drop for ControllingTty {
     fn drop(&mut self) {
-        use std::os::fd::AsRawFd as _;
-        // SAFETY: this descriptor and saved termios remain valid until drop ends.
-        unsafe {
-            libc::tcsetattr(
-                self.file.as_raw_fd(),
-                libc::TCSANOW,
-                &raw const self.original,
-            )
-        };
+        let _ = rustix::termios::tcsetattr(
+            &self.file,
+            rustix::termios::OptionalActions::Now,
+            &self.original,
+        );
     }
 }
 

@@ -151,6 +151,8 @@ fn attached_client_receives_conpty_output_without_host_competing_for_it() {
     let mut bytes = Vec::new();
     while Instant::now() < deadline {
         let mut available = 0;
+        // SAFETY: the handle is borrowed from `output`, open for the call; no
+        // buffer is passed and `available` is a writable `u32`.
         let peek_succeeded = unsafe {
             windows::Win32::System::Pipes::PeekNamedPipe(
                 windows::Win32::Foundation::HANDLE(output.as_raw_handle()),

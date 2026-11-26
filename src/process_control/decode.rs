@@ -592,7 +592,7 @@ fn decode_appearance_command(request: &mut ControlRequest) -> Option<ControlRequ
         }
         "set_overlay" => {
             let font_size = match request.pane_overlay_font_size.take() {
-                Some(name) => Some(OverlayFontSize::parse(&name)?),
+                Some(name) => Some(name.parse().ok()?),
                 None => None,
             };
             if let Some(value) = request.pane_overlay_color.as_deref() {

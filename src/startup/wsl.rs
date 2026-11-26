@@ -154,6 +154,13 @@ fn windows_wsl_terminal_environment_values(
     ))
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(
+        unused_variables,
+        reason = "WSL runs only under Windows; elsewhere there is nothing to add"
+    )
+)]
 pub(crate) fn wsl_terminal_environment<S>(
     environment: &mut HashMap<String, String, S>,
     cwd_tracking_file: Option<&Path>,
@@ -171,10 +178,6 @@ pub(crate) fn wsl_terminal_environment<S>(
                 environment.insert("ZETTA_CWD_TRACKING_FILE".to_owned(), cwd_tracking_file);
             }
         }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = (environment, cwd_tracking_file);
     }
 }
 

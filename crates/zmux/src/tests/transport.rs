@@ -173,9 +173,8 @@ fn descriptors_arrive_close_on_exec() {
 
     let mut buffer = [0; 8];
     let (_, descriptors) = receive_with_descriptors(&receiver, &mut buffer).unwrap();
-    let flags = unsafe { libc::fcntl(descriptors[0].as_raw_fd(), libc::F_GETFD) };
-    assert!(flags >= 0);
-    assert_ne!(flags & libc::FD_CLOEXEC, 0);
+    let flags = rustix::io::fcntl_getfd(&descriptors[0]).unwrap();
+    assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
 }
 
 #[cfg(unix)]
@@ -194,6 +193,7 @@ fn sending_more_descriptors_than_the_buffer_holds_is_refused() {
 #[test]
 fn the_peer_of_a_socket_pair_is_this_user() {
     let (sender, _receiver) = Stream::pair().unwrap();
+    // SAFETY: `getuid` takes no arguments and cannot fail.
     assert_eq!(peer_uid(&sender).unwrap(), unsafe { libc::getuid() });
 }
 
@@ -218,6 +218,22 @@ fn an_endpoint_written_before_versioning_is_unreadable_rather_than_version_zero(
     .unwrap();
 
     assert!(Endpoint::read(&path).is_err());
+}
+
+/// The kernel names the process that connected, so a peer is identified by
+/// what it is rather than by what it claims. Before `SIO_AF_UNIX_GETPEERPID`
+/// Windows reported nothing here and every identity went through a challenge.
+#[cfg(windows)]
+#[test]
+fn the_kernel_names_the_process_that_connected() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("peer.sock");
+    let listener = Listener::bind(&path).unwrap();
+    let _client = Stream::connect(&path).unwrap();
+    let (accepted, _) = listener.accept().unwrap();
+
+    let peer = PeerProcess::of(&accepted).expect("identifying this process as the peer");
+    assert_eq!(peer.id(), Some(std::process::id()));
 }
 
 /// The Windows stand-in for peer credentials, exercised against this very

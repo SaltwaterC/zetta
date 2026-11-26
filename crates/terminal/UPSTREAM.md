@@ -60,7 +60,11 @@ Retain these Zetta-specific behaviors when synchronizing:
   PTY teardown, including application shutdown. Upstream reverted its own
   version of this in `492acd6c81`; do not import that revert. The regression it
   was reverting for came from reading a *stale* pty master descriptor, which
-  `ProcessIdGetter::close` and the `child_process_ended` guard address directly;
+  `ProcessIdGetter::close` and the `child_process_ended` guard address directly.
+  The getter holds a duplicated `OwnedFd` under a mutex rather than a
+  descriptor number another pane's `openpty` could reuse, and reads the
+  foreground group and signals the groups through `rustix`
+  (`tcgetpgrp`, `kill_process_group`) rather than raw `libc`;
 - release the pty event loop when the child ends
   (`Terminal::release_pty_resources`), so an exited pane that stays open does
   not hold the pty master, the poller and the loop's buffers. Note that
@@ -142,10 +146,17 @@ Retain these Zetta-specific behaviors when synchronizing:
   0.67 s to 0.29 s and its median wall time from 1.91 s to 1.89 s, level with a
   build that never draws. Pinned by
   `one_wakeup_is_in_flight_until_the_ui_handles_it`.
+- spawn through `TerminalBuilder::spawn(TerminalSpawnOptions, cx)`
+  (`spawn_options.rs`) rather than upstream's positional `TerminalBuilder::new`.
+  Zetta's console palette, initial bounds, PTY provider and restore mode took
+  that list to nineteen arguments over four constructors; the options struct
+  defaults all but the shell, window and path style, and
+  `PtyRequirement::ProviderRequired` replaces the restore constructor's bool.
+  When synchronizing, carry new upstream `new` parameters as fields there.
 - start a terminal at a real size before its first layout. The placeholder
   bounds hold 80x24 rather than upstream's 100x6, which a program that asked
-  early took for its terminal, and `new_with_console_palette(_for_restore)`
-  take `initial_bounds` for a pane whose grid is known in advance (Zetta's
+  early took for its terminal, and `TerminalSpawnOptions::initial_bounds`
+  carries the size for a pane whose grid is known in advance (Zetta's
   `--geometry`): the `Term`, a local pty, and a provider's
   `PtySpawnRequest::initial_size` all start there. Pinned by
   `the_placeholder_grid_is_the_conventional_terminal_size`.
@@ -210,3 +221,15 @@ their commands and exited.
 history in both active and inactive screens, prepares the emulator before
 notifying the backend, and retries layout without changing shell geometry if a
 reflow worker cannot be started.
+
+## Zetta patch: OpenConsole beside the tests
+
+`build.rs` is Zetta's: on Windows it stages `conpty.dll` and
+`OpenConsole.exe` into the profile's `deps` directory through
+`build_support/conpty_runtime.rs`, the same code the root build script uses to
+stage them beside `zetta.exe`. `alacritty_terminal` loads `conpty.dll` only
+from the application directory or System32, so without it every Windows test
+here runs against the inbox ConPTY, and
+`conpty_startup_reply_does_not_wait_for_the_ui` waits for a DA1 startup query
+that only OpenConsole sends. The package is cached once under
+`<repository>/target/zetta-conpty`.

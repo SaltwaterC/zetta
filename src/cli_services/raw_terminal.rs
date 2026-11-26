@@ -7,28 +7,21 @@ use anyhow::Result;
 
 #[cfg(unix)]
 pub(crate) struct RawTerminal {
-    original: libc::termios,
+    original: rustix::termios::Termios,
 }
 
 #[cfg(unix)]
 impl RawTerminal {
     pub(crate) fn enable() -> Result<Option<Self>> {
-        use std::mem::MaybeUninit;
+        use rustix::termios::{OptionalActions, tcgetattr, tcsetattr};
 
-        let mut original = MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: stdin remains open for the lifetime of the process and the pointer is writable.
-        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, original.as_mut_ptr()) } != 0 {
+        let stdin = std::io::stdin();
+        let Ok(original) = tcgetattr(&stdin) else {
             return Ok(None);
-        }
-        // SAFETY: tcgetattr initialized original after returning zero above.
-        let original = unsafe { original.assume_init() };
-        let mut raw = original;
-        // SAFETY: raw is a valid termios structure owned by this function.
-        unsafe { libc::cfmakeraw(&mut raw) };
-        // SAFETY: stdin is a valid file descriptor and raw is a valid termios structure.
-        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) } != 0 {
-            return Err(std::io::Error::last_os_error()).context("enabling raw terminal input");
-        }
+        };
+        let mut raw = original.clone();
+        raw.make_raw();
+        tcsetattr(&stdin, OptionalActions::Now, &raw).context("enabling raw terminal input")?;
         Ok(Some(Self { original }))
     }
 }
@@ -36,8 +29,9 @@ impl RawTerminal {
 #[cfg(unix)]
 impl Drop for RawTerminal {
     fn drop(&mut self) {
-        // SAFETY: stdin is a valid file descriptor and original was read from it in enable.
-        unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original) };
+        use rustix::termios::{OptionalActions, tcsetattr};
+
+        let _ = tcsetattr(std::io::stdin(), OptionalActions::Now, &self.original);
     }
 }
 

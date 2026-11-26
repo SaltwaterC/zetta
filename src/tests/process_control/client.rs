@@ -25,11 +25,11 @@ fn send_reconnect_session_request(
     };
     let result = write_message(&mut stream, &request).and_then(|()| {
         let response = read_message::<ControlResponse>(&mut stream)?;
-        Ok(match response.status.as_str() {
-            "ok" => ReconnectSessionResult::Reconnected,
-            "authentication_failed" => ReconnectSessionResult::AuthenticationFailed,
-            "session_not_found" => ReconnectSessionResult::SessionNotFound,
-            "session_starting" => ReconnectSessionResult::StillStarting,
+        Ok(match response.status {
+            ControlStatus::Ok => ReconnectSessionResult::Reconnected,
+            ControlStatus::AuthenticationFailed => ReconnectSessionResult::AuthenticationFailed,
+            ControlStatus::SessionNotFound => ReconnectSessionResult::SessionNotFound,
+            ControlStatus::SessionStarting => ReconnectSessionResult::StillStarting,
             _ => ReconnectSessionResult::Rejected,
         })
     });

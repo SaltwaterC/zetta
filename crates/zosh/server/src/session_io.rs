@@ -80,7 +80,10 @@ impl PtyIo {
     pub fn open(master: &dyn MasterPty, waker: &Waker) -> Result<Self> {
         #[cfg(unix)]
         if let Some(fd) = master.as_raw_fd() {
-            return Ok(Self::Direct(DirectPty::new(fd)?));
+            // SAFETY: `master` owns the descriptor and outlives this call,
+            // which only duplicates it.
+            let master_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+            return Ok(Self::Direct(DirectPty::new(master_fd)?));
         }
         Self::threads(master, waker)
     }
@@ -158,10 +161,16 @@ enum UdpEvent {
 }
 
 impl UdpIo {
+    #[cfg_attr(
+        unix,
+        expect(
+            unused_variables,
+            reason = "the Unix loop polls the socket itself instead of being woken"
+        )
+    )]
     pub fn new(socket: UdpSocket, waker: &Waker) -> io::Result<Self> {
         #[cfg(unix)]
         {
-            let _ = waker;
             socket.set_nonblocking(true)?;
             Ok(Self { socket })
         }
@@ -202,12 +211,14 @@ impl UdpIo {
     }
 }
 
+/// The longest wait `poll` takes as milliseconds in an `int`.
+#[cfg(unix)]
+const MAX_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(i32::MAX as u64);
+
 /// How the loop waits for its socket, its PTY and its wake-ups.
 pub struct LoopWait {
     #[cfg(unix)]
     pipe: crate::wake::WakePipe,
-    #[cfg(unix)]
-    descriptors: Vec<libc::pollfd>,
     #[cfg(windows)]
     waker: Waker,
 }
@@ -218,7 +229,6 @@ impl LoopWait {
         #[cfg(unix)]
         return Ok(Self {
             pipe: crate::wake::WakePipe::new()?,
-            descriptors: Vec::with_capacity(3),
         });
         #[cfg(windows)]
         return Ok(Self {
@@ -239,7 +249,7 @@ impl LoopWait {
     /// program back, so output it will not read does not end the wait.
     #[cfg_attr(
         windows,
-        allow(
+        expect(
             unused_variables,
             reason = "the Windows loop parks; its inputs wake it from their threads"
         )
@@ -253,41 +263,34 @@ impl LoopWait {
     ) -> io::Result<()> {
         #[cfg(unix)]
         {
-            use std::os::fd::AsRawFd as _;
+            use rustix::event::{PollFd, PollFlags, Timespec, poll};
 
-            let readable = |fd| libc::pollfd {
-                fd,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            self.descriptors.clear();
-            self.descriptors.push(readable(self.pipe.descriptor()));
-            self.descriptors.push(readable(udp.socket.as_raw_fd()));
+            // A stack array rather than a vector: the borrowed descriptors
+            // live only as long as this wait.
+            let wake = self.pipe.descriptor();
+            let mut descriptors = [
+                PollFd::new(&wake, PollFlags::IN),
+                PollFd::new(&udp.socket, PollFlags::IN),
+                PollFd::new(&wake, PollFlags::empty()),
+            ];
+            let mut watched = 2;
             if let Some(PtyIo::Direct(pty)) = pty
                 && let Some(interest) = pty.interest(read_pty)
             {
-                self.descriptors.push(interest);
+                descriptors[2] = PollFd::new(&pty.fd, interest);
+                watched = 3;
             }
-            let timeout = deadline.earliest().map_or(-1, |at| {
+            // Clamped to what `poll`'s millisecond argument holds, where the
+            // platform has no `ppoll`; rustix rounds up, so it never wakes early.
+            let timeout = deadline.earliest().and_then(|at| {
                 let remaining = at.saturating_duration_since(std::time::Instant::now());
-                i32::try_from(remaining.as_micros().div_ceil(1_000)).unwrap_or(i32::MAX)
+                Timespec::try_from(remaining.min(MAX_POLL_TIMEOUT)).ok()
             });
-            // SAFETY: every descriptor is borrowed from a live pipe, socket or
-            // PTY master, and the vector stays allocated until poll returns.
-            let result = unsafe {
-                libc::poll(
-                    self.descriptors.as_mut_ptr(),
-                    self.descriptors.len() as libc::nfds_t,
-                    timeout,
-                )
-            };
-            if result < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error);
-                }
+            match poll(&mut descriptors[..watched], timeout.as_ref()) {
+                Ok(_) | Err(rustix::io::Errno::INTR) => {}
+                Err(error) => return Err(error.into()),
             }
-            if self.descriptors[0].revents != 0 {
+            if !descriptors[0].revents().is_empty() {
                 self.pipe.drain();
             }
             Ok(())

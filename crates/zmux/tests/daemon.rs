@@ -469,6 +469,7 @@ fn read_until(descriptor: &std::fs::File, expected: &str) -> String {
 fn process_is_alive(pid: u32) -> bool {
     // Signal 0 checks for existence. The child belongs to the daemon, not to
     // this process, so it cannot become a zombie we would misread as alive.
+    // SAFETY: signal 0 delivers nothing, and `kill` takes no pointers.
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }
 

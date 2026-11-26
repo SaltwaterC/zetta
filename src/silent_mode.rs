@@ -43,7 +43,10 @@ pub(crate) enum SystemSilentState {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(dead_code, reason = "only macOS reports a Focus status authorization")
+)]
 pub(crate) enum FocusStatusAccess {
     #[default]
     Unknown,
@@ -379,21 +382,20 @@ pub(crate) fn start_observer(cx: &mut App) {
 fn detect_system_silent_state() -> SystemSilentState {
     #[cfg(target_os = "windows")]
     {
-        return detect_windows_system_silent_state();
+        detect_windows_system_silent_state()
     }
     #[cfg(target_os = "linux")]
     {
-        return detect_linux_system_silent_state_with_source().0;
+        detect_linux_system_silent_state_with_source().0
     }
     #[cfg(target_os = "macos")]
     {
-        return detect_macos_focus_observation().1;
+        detect_macos_focus_observation().1
     }
-    #[allow(
-        unreachable_code,
-        reason = "unreachable on Windows, Linux and macOS; the result everywhere else"
-    )]
-    SystemSilentState::Unknown
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        SystemSilentState::Unknown
+    }
 }
 
 #[cfg(any(test, target_os = "windows"))]

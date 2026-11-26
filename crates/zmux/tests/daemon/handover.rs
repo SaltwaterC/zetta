@@ -363,12 +363,11 @@ fn a_reattached_session_stops_being_listed() {
         "a detached session is waiting to be picked up"
     );
 
-    let taken = match client
+    let AttachOutcome::Attached { pane: taken, .. } = client
         .attach(pane.session_id, Some(pane.pane_id), None)
         .unwrap()
-    {
-        AttachOutcome::Attached { pane, .. } => pane,
-        _ => panic!("its own window must attach it"),
+    else {
+        panic!("its own window must attach it");
     };
     assert!(
         client.list().unwrap().is_empty(),
@@ -395,7 +394,7 @@ fn a_reattached_session_stops_being_listed() {
         .unwrap()
     {
         AttachOutcome::Attached { pane, .. } => {
-            std::mem::forget(std::fs::File::from(pane.descriptor))
+            std::mem::forget(std::fs::File::from(pane.descriptor));
         }
         _ => panic!("its own window must attach it"),
     }
@@ -455,12 +454,11 @@ fn a_full_screen_program_comes_back_as_its_screen() {
     // Read by the multiplexer while nobody is showing it, which is when what it
     // keeps is all there is.
     std::thread::sleep(Duration::from_secs(6));
-    let taken = match client
+    let AttachOutcome::Attached { pane: taken, .. } = client
         .attach(pane.session_id, Some(pane.pane_id), None)
         .unwrap()
-    {
-        AttachOutcome::Attached { pane, .. } => pane,
-        _ => panic!("its own window must attach it"),
+    else {
+        panic!("its own window must attach it");
     };
     let replay = String::from_utf8_lossy(&taken.replay).into_owned();
     assert!(
@@ -512,6 +510,8 @@ fn a_handed_over_screen_keeps_the_width_it_was_drawn_at() {
         ws_ypixel: 0,
     };
     assert_eq!(
+        // SAFETY: `descriptor` is the pane's pty, open for the call, and
+        // `TIOCSWINSZ` reads a `winsize` from the pointer, which `resized` is.
         unsafe {
             libc::ioctl(
                 std::os::fd::AsRawFd::as_raw_fd(&descriptor),
@@ -541,12 +541,11 @@ fn a_handed_over_screen_keeps_the_width_it_was_drawn_at() {
         )
         .unwrap();
 
-    let taken = match client
+    let AttachOutcome::Attached { pane: taken, .. } = client
         .attach(pane.session_id, Some(pane.pane_id), None)
         .unwrap()
-    {
-        AttachOutcome::Attached { pane, .. } => pane,
-        _ => panic!("its own window must attach it"),
+    else {
+        panic!("its own window must attach it");
     };
     let replay = String::from_utf8_lossy(&taken.replay).into_owned();
     assert!(
@@ -616,7 +615,7 @@ fn a_daemon_loaded_shell_integration_leaves_nothing_for_viewers_to_replay() {
             operation_id: client.next_shared_operation_id(),
             target_pane_id: Some(pane.pane_id),
             replacement: zmux::messages::SharedDraftLayout::Split {
-                axis: "vertical".to_owned(),
+                axis: zmux::protocol::SplitAxis::Vertical,
                 first_ratio: 200,
                 first: Box::new(zmux::messages::SharedDraftLayout::Existing {
                     pane_id: pane.pane_id,
@@ -795,9 +794,9 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
                      the viewer's stream ended: {}; \
                      the daemon reports {:?}, and this viewer read {:?}",
                     ended.load(Ordering::SeqCst),
-                    client
-                        .list()
-                        .map(|sessions| sessions
+                    client.list().map_or_else(
+                        |error| vec![format!("list failed: {error:#}")],
+                        |sessions| sessions
                             .into_iter()
                             .map(|session| format!(
                                 "session {} held={} panes={:?}",
@@ -809,8 +808,8 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
                                     .map(|pane| (pane.id, pane.state))
                                     .collect::<Vec<_>>()
                             ))
-                            .collect::<Vec<_>>())
-                        .unwrap_or_else(|error| vec![format!("list failed: {error:#}")]),
+                            .collect::<Vec<_>>()
+                    ),
                     seen.lock().unwrap().clone()
                 );
                 std::thread::sleep(Duration::from_millis(50));
@@ -820,9 +819,9 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
             Instant::now() < deadline,
             "the pane never became attachable again after an abandoned handover; \
              the daemon reports {:?}",
-            client
-                .list()
-                .map(|sessions| sessions
+            client.list().map_or_else(
+                |error| vec![format!("list failed: {error:#}")],
+                |sessions| sessions
                     .into_iter()
                     .map(|session| format!(
                         "session {} held={} panes={}",
@@ -830,8 +829,8 @@ fn a_handover_that_is_abandoned_leaves_the_pane_readable() {
                         session.held,
                         session.panes.len()
                     ))
-                    .collect::<Vec<_>>())
-                .unwrap_or_else(|error| vec![format!("list failed: {error:#}")])
+                    .collect::<Vec<_>>()
+            )
         );
         std::thread::sleep(Duration::from_millis(100));
     }

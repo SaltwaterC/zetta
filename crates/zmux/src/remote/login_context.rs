@@ -76,7 +76,7 @@ fn apply_connection(request: &mut Request, connection: &str) {
     match request {
         Request::SpawnShared(request) => add(&mut request.env),
         Request::CreateShared(request) => {
-            request.panes.iter_mut().for_each(|pane| add(&mut pane.env))
+            request.panes.iter_mut().for_each(|pane| add(&mut pane.env));
         }
         Request::SpawnSharedBatch(request) => {
             request.panes.iter_mut().for_each(|pane| add(&mut pane.env));

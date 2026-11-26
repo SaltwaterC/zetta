@@ -476,6 +476,10 @@ pub(crate) fn run_endpoint(arguments: impl IntoIterator<Item = OsString>) -> Res
     let key = std::env::var("MOSH_KEY").context("MOSH_KEY is not set")?;
     // Keep the session key out of this process's environment once it has
     // been decoded. This is the same contract as stock mosh-client.
+    // SAFETY: no other thread exists yet to read the environment concurrently:
+    // the only caller is `standalone_main`, straight from `main`, and nothing
+    // before this point in `run_endpoint` spawns one. On Windows the call is
+    // always safe.
     unsafe { std::env::remove_var("MOSH_KEY") };
     let key = Base64Key::from_printable(&key).context("invalid MOSH_KEY")?;
     run_session(&args, &key)
@@ -1074,6 +1078,10 @@ impl Drop for SignalState {
     }
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(unused_variables, reason = "only Unix forwards SIGINT")
+)]
 fn signal_state(forward_interrupt: bool) -> SignalState {
     #[cfg(unix)]
     {
@@ -1114,7 +1122,6 @@ fn signal_state(forward_interrupt: bool) -> SignalState {
     }
     #[cfg(not(unix))]
     {
-        let _ = forward_interrupt;
         SignalState {
             terminate: None,
             interrupt: None,
@@ -1146,6 +1153,13 @@ fn signal_pipe(
     Ok(reader)
 }
 
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "job-control suspend is Unix-only, so nothing else touches the session"
+    )
+)]
 fn suspend_and_resume(
     session: &mut ClientSession,
     terminal_guard: &mut terminal::TerminalGuard,
@@ -1157,6 +1171,8 @@ fn suspend_and_resume(
         terminal_guard.restore();
         eprintln!("zosh: suspended; resuming terminal session");
         anyhow::ensure!(
+            // SAFETY: raise takes a signal number and touches no memory; the
+            // default SIGTSTP action stops this process until SIGCONT.
             unsafe { libc::raise(libc::SIGTSTP) } == 0,
             "suspending zosh"
         );
@@ -1179,7 +1195,6 @@ fn suspend_and_resume(
     }
     #[cfg(not(unix))]
     {
-        let _ = (session, terminal_guard, size, initialize_terminal);
         eprintln!("zosh: suspend is not available on this frontend");
     }
     Ok(())

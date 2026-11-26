@@ -615,10 +615,12 @@ impl Zetta {
         let mut tab = self.tabs.remove(tab_index);
         self.build_attached_panes(
             &mut tab,
-            session_id,
+            AttachedSessionContext {
+                session_id,
+                restored: &restored,
+                runtime: &runtime,
+            },
             attached,
-            &restored,
-            &runtime,
             pane_streams,
             window,
             cx,

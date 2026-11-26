@@ -584,16 +584,16 @@ fn a_window_a_relay_is_showing_a_pane_to_may_store_an_image() {
     );
 
     let relay = daemon.client();
-    let relayed = match relay
+    let zmux::client::AttachOutcome::SharedAttached { pane: relayed, .. } = relay
         .attach_shared_relaying_for(session_id, pane_id, None, viewer)
         .unwrap_or_else(|error| {
             panic!(
                 "attaching the pane as a relay: {error:#}\ndaemon log:\n{}",
                 daemon.log()
             )
-        }) {
-        zmux::client::AttachOutcome::SharedAttached { pane, .. } => pane,
-        _ => panic!("a relay attaches as a shared stream, and got something else"),
+        })
+    else {
+        panic!("a relay attaches as a shared stream, and got something else");
     };
 
     let path = window

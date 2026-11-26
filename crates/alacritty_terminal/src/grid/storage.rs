@@ -674,13 +674,18 @@ impl<T: Clone> Storage<T> {
             return;
         }
 
-        // Distinct logical indices cannot alias. Archived uniform chunks are expanded by
-        // `row_at_mut` before either pointer is returned.
-        unsafe {
-            let a = self.row_at_mut(a) as *mut Row<T>;
-            let b = self.row_at_mut(b) as *mut Row<T>;
-            std::ptr::swap(a, b);
+        let live = self.live.len();
+        if a < live && b < live {
+            self.live.swap(a, b);
+            return;
         }
+
+        // History rows live in several containers, so one of them is moved out through an empty
+        // row, which does not allocate. An archived chunk `row_at_mut` expands stays expanded,
+        // so the second visit to `a` finds the placeholder where it was left.
+        let row_a = std::mem::take(self.row_at_mut(a));
+        let row_b = std::mem::replace(self.row_at_mut(b), row_a);
+        *self.row_at_mut(a) = row_b;
     }
 
     /// Fast path for moving complete viewport rows into history.
@@ -998,6 +1003,30 @@ mod tests {
             storage.row_storage_id(archived_line),
             storage.row_storage_id(older_archived_line)
         );
+    }
+
+    #[test]
+    fn swapping_moves_rows_between_the_viewport_and_shared_archived_history() {
+        let mut storage = Storage::<char>::with_capacity(2, 1);
+        for _ in 0..(LIVE_HISTORY_ROWS + 2 * ARCHIVE_CHUNK_ROWS) {
+            storage[Line(0)][Column(0)] = 'x';
+            storage.scroll_up(1, 1, 1);
+        }
+        let archived_line = Line(-((LIVE_HISTORY_ROWS + 1) as i32));
+        let neighbour = Line(archived_line.0 - 1);
+        storage[Line(0)][Column(0)] = 'a';
+        storage[Line(1)][Column(0)] = 'b';
+        let snapshot = storage.clone();
+
+        storage.swap(Line(0), Line(1));
+        storage.swap(Line(0), archived_line);
+
+        assert_eq!(storage[Line(0)][Column(0)], 'x');
+        assert_eq!(storage[Line(1)][Column(0)], 'a');
+        assert_eq!(storage[archived_line][Column(0)], 'b');
+        assert_eq!(storage[neighbour][Column(0)], 'x');
+        assert_eq!(snapshot[archived_line][Column(0)], 'x', "the snapshot keeps its chunk");
+        assert_eq!(snapshot[Line(0)][Column(0)], 'a');
     }
 
     #[test]

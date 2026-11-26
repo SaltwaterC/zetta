@@ -1,7 +1,5 @@
 use gpui::{Context, Task};
 use parking_lot::{MappedRwLockReadGuard, Mutex, RwLock, RwLockReadGuard};
-#[cfg(unix)]
-use std::sync::atomic::{AtomicI32, Ordering};
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -13,30 +11,25 @@ use sysinfo::{Pid, Process, ProcessRefreshKind, ProcessesToUpdate, System, Updat
 use crate::{Event, Terminal};
 
 pub struct ProcessIdGetter {
-    /// The pty master descriptor, borrowed rather than owned: the pty event
-    /// loop closes it when it stops. [`ProcessIdGetter::close`] marks it unusable
-    /// at that point, because the number is free to be reassigned to an
-    /// unrelated file — including another pane's pty master — and asking a
-    /// recycled descriptor for its foreground process group would answer with
-    /// somebody else's job.
+    /// A duplicate of the pty master descriptor, for foreground-process
+    /// lookups. A duplicate rather than the loop's own number: the loop closes
+    /// its descriptor when it stops, on its own thread, and the number is then
+    /// free to be reassigned to an unrelated file — including another pane's
+    /// pty master — which would answer with somebody else's job. The lock is
+    /// held across each lookup, so [`ProcessIdGetter::close`] cannot release
+    /// the descriptor under one.
     #[cfg(unix)]
-    handle: AtomicI32,
+    handle: Mutex<Option<std::os::fd::OwnedFd>>,
     #[cfg(windows)]
     pid: Option<u32>,
     fallback_pid: u32,
 }
 
-/// The value [`ProcessIdGetter::handle`] holds once the pty has been closed.
-/// `tcgetpgrp` rejects it, but it is never passed to one: the guard in
-/// [`ProcessIdGetter::pid`] comes first.
-#[cfg(unix)]
-const CLOSED_PTY_HANDLE: i32 = -1;
-
 impl ProcessIdGetter {
     #[cfg(unix)]
-    pub(crate) fn new(handle: i32, fallback_pid: u32) -> ProcessIdGetter {
+    pub(crate) fn new(handle: Option<std::os::fd::OwnedFd>, fallback_pid: u32) -> ProcessIdGetter {
         ProcessIdGetter {
-            handle: AtomicI32::new(handle),
+            handle: Mutex::new(handle),
             fallback_pid,
         }
     }
@@ -54,14 +47,13 @@ impl ProcessIdGetter {
 #[cfg(unix)]
 impl ProcessIdGetter {
     fn pid(&self) -> Option<Pid> {
-        let handle = self.handle.load(Ordering::Relaxed);
-        if handle != CLOSED_PTY_HANDLE {
-            // Negative pid means error.
-            // Zero pid means no foreground process group is set on the PTY yet.
-            // Avoid killing the current process by returning a zero pid.
-            let pid = unsafe { libc::tcgetpgrp(handle) };
-            if pid > 0 {
-                return Some(Pid::from_u32(pid as u32));
+        if let Some(handle) = self.handle.lock().as_ref() {
+            // rustix reports a PTY with no foreground process group yet as an
+            // error rather than as pid zero, so the current process is never
+            // the one killed. The lock keeps `close` from releasing `handle`
+            // until the call has returned.
+            if let Ok(pid) = rustix::termios::tcgetpgrp(handle) {
+                return Some(Pid::from_u32(pid.as_raw_nonzero().get().cast_unsigned()));
             }
         }
 
@@ -72,10 +64,11 @@ impl ProcessIdGetter {
         None
     }
 
-    /// Stops using the pty master descriptor. Called when the event loop that
-    /// owns it is released; afterwards only [`Self::fallback_pid`] is reported.
+    /// Closes the duplicate of the pty master. Called when the event loop that
+    /// owns the master is released, so the duplicate does not keep the pty
+    /// open past it; afterwards only [`Self::fallback_pid`] is reported.
     fn close(&self) {
-        self.handle.store(CLOSED_PTY_HANDLE, Ordering::Relaxed);
+        drop(self.handle.lock().take());
     }
 }
 
@@ -113,28 +106,28 @@ pub(crate) struct TerminalProcessIds {
 
 #[cfg(unix)]
 impl TerminalProcessIds {
-    fn process_group_ids(self) -> impl Iterator<Item = i32> {
+    fn process_group_ids(self) -> impl Iterator<Item = rustix::process::Pid> {
         std::iter::once(self.child)
             .chain(
                 self.foreground
                     .filter(|foreground| *foreground != self.child),
             )
-            .map(|pid| pid.as_u32() as i32)
-            .filter(|pid| *pid > 0)
+            .filter_map(|pid| rustix::process::Pid::from_raw(pid.as_u32() as i32))
+            .filter(|pid| pid.as_raw_nonzero().get() > 0)
     }
 
     pub(crate) fn terminate(&self) -> bool {
-        self.signal(libc::SIGTERM)
+        self.signal(rustix::process::Signal::TERM)
     }
 
     pub(crate) fn kill(&self) -> bool {
-        self.signal(libc::SIGKILL)
+        self.signal(rustix::process::Signal::KILL)
     }
 
-    fn signal(&self, signal: i32) -> bool {
+    fn signal(&self, signal: rustix::process::Signal) -> bool {
         let mut signalled = false;
         for process_group_id in self.process_group_ids() {
-            signalled |= unsafe { libc::killpg(process_group_id, signal) } == 0;
+            signalled |= rustix::process::kill_process_group(process_group_id, signal).is_ok();
         }
         signalled
     }
@@ -317,16 +310,16 @@ impl PtyProcessInfo {
         }
     }
 
-    /// Releases the pty master descriptor this borrows for foreground-process
-    /// lookups. Must be called by whoever releases the pty event loop, before
-    /// the descriptor can be reassigned. See [`ProcessIdGetter`].
+    /// Closes the duplicate of the pty master this holds for foreground-process
+    /// lookups. Called by whoever releases the pty event loop, so the pty is
+    /// not kept open past it. See [`ProcessIdGetter`].
     pub(crate) fn close_pty_handle(&self) {
         self.pid_getter.close();
     }
 
     #[cfg(all(test, unix))]
     pub(crate) fn pty_handle_is_open(&self) -> bool {
-        self.pid_getter.handle.load(Ordering::Relaxed) != CLOSED_PTY_HANDLE
+        self.pid_getter.handle.lock().is_some()
     }
 
     #[cfg(unix)]
@@ -356,7 +349,7 @@ impl PtyProcessInfo {
     /// Returns whether the process currently owning the terminal is the shell
     /// process that was created for the PTY. Unknown process state is treated
     /// as non-shell so callers can choose the safe fallback.
-    #[allow(dead_code)]
+    #[cfg(all(test, unix))]
     pub(crate) fn foreground_process_is_shell(&self) -> bool {
         self.foreground_process_is_shell_context() == Some(true)
     }
@@ -478,7 +471,9 @@ impl PtyProcessInfo {
         let Some(pid) = self.pid_getter.pid() else {
             return false;
         };
-        unsafe { libc::killpg(pid.as_u32() as i32, libc::SIGKILL) == 0 }
+        rustix::process::Pid::from_raw(pid.as_u32() as i32).is_some_and(|pid| {
+            rustix::process::kill_process_group(pid, rustix::process::Signal::KILL).is_ok()
+        })
     }
 
     #[cfg(not(unix))]
@@ -645,11 +640,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn foreground_process_identity_matches_the_pty_shell_pid() {
-        let shell = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        let shell = PtyProcessInfo::new(ProcessIdGetter::new(None, std::process::id()));
         assert!(shell.foreground_process_is_shell());
         assert_eq!(shell.foreground_process_is_shell_context_now(), Some(true));
 
-        let unknown = PtyProcessInfo::new(ProcessIdGetter::new(-1, 0));
+        let unknown = PtyProcessInfo::new(ProcessIdGetter::new(None, 0));
         assert!(!unknown.foreground_process_is_shell());
     }
 
@@ -729,7 +724,7 @@ mod tests {
         reason = "the test needs real short-lived child processes and may block"
     )]
     fn process_map_stays_bounded() {
-        let mut info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        let mut info = PtyProcessInfo::new(ProcessIdGetter::new(None, std::process::id()));
         assert!(
             info.get_child().is_some(),
             "the spawned child must be inspectable for kill_child_process \
@@ -747,7 +742,7 @@ mod tests {
                 .arg("30")
                 .spawn()
                 .expect("failed to spawn child process");
-            info.pid_getter = ProcessIdGetter::new(-1, child.id());
+            info.pid_getter = ProcessIdGetter::new(None, child.id());
             assert!(info.load_for_test().is_some());
             child.kill().expect("failed to kill child process");
             child.wait().expect("failed to wait for child process");
@@ -762,12 +757,8 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the test needs real short-lived child processes and may block"
-    )]
     fn a_dead_foreground_process_is_unknown_not_a_running_command() {
-        let info = PtyProcessInfo::new(ProcessIdGetter::new(-1, std::process::id()));
+        let info = PtyProcessInfo::new(ProcessIdGetter::new(None, std::process::id()));
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()

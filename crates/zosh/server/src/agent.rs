@@ -64,6 +64,10 @@ pub fn prime_forwarded_agent(verbose: bool) {
     }
 }
 
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(unused_variables, reason = "no other platform has an agent transport")
+)]
 fn prime_agent_path(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -92,7 +96,6 @@ fn prime_agent_path(path: &Path) -> io::Result<()> {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = path;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "SSH-agent forwarding is unsupported on this platform",
@@ -590,19 +593,14 @@ fn valid_frame(frame: &[u8]) -> bool {
 
 #[cfg(windows)]
 fn create_named_pipe_listener(events: WakingSender<LocalEvent>) -> io::Result<WindowsPipeListener> {
-    use std::os::windows::io::FromRawHandle;
-    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED};
-    use windows::Win32::System::Pipes::ConnectNamedPipe;
+    use std::ops::ControlFlow;
 
     let name = format!(
         r"\\.\pipe\zosh-agent-{}-{}",
         std::process::id(),
         next_pipe_suffix()
     );
-    let wide = name
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
+    let pipe_name = windows_pipe::PipeName::new(std::ffi::OsStr::new(&name));
     let path = PathBuf::from(name);
     let stop = Arc::new(AtomicBool::new(false));
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -611,8 +609,7 @@ fn create_named_pipe_listener(events: WakingSender<LocalEvent>) -> io::Result<Wi
         .spawn({
             let stop = Arc::clone(&stop);
             move || {
-                let name = windows::core::PCWSTR(wide.as_ptr());
-                let mut pending = match windows_pipe::create(name, MAX_FRAME as u32, true) {
+                let first = match windows_pipe::create(&pipe_name, MAX_FRAME as u32, true) {
                     Ok(handle) => {
                         let _ = ready_tx.send(Ok(()));
                         handle
@@ -622,43 +619,21 @@ fn create_named_pipe_listener(events: WakingSender<LocalEvent>) -> io::Result<Wi
                         return;
                     }
                 };
-                loop {
-                    if stop.load(Ordering::Acquire) {
-                        let _ = unsafe { CloseHandle(pending) };
-                        break;
-                    }
-                    let connected = unsafe { ConnectNamedPipe(pending, None) };
-                    if stop.load(Ordering::Acquire) {
-                        let _ = unsafe { CloseHandle(pending) };
-                        break;
-                    }
-                    // Created while `pending` still exists, so the name is
-                    // never without an instance for another account to claim.
-                    let Ok(next) = windows_pipe::create(name, MAX_FRAME as u32, false) else {
-                        let _ = unsafe { CloseHandle(pending) };
-                        break;
-                    };
-                    let accepted = match connected {
-                        Ok(()) => true,
-                        Err(error) => error.code().0 as u32 & 0xffff == ERROR_PIPE_CONNECTED.0,
-                    };
-                    if !accepted {
-                        let _ = unsafe { CloseHandle(pending) };
-                        pending = next;
-                        continue;
-                    }
-                    let stream = unsafe { std::fs::File::from_raw_handle(pending.0 as _) };
-                    pending = next;
-                    match events.try_send(LocalEvent::Connected {
+                windows_pipe::serve(&pipe_name, MAX_FRAME as u32, first, &stop, |stream| {
+                    let connected = LocalEvent::Connected {
                         stream: Box::new(stream),
-                    }) {
-                        Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {}
+                    };
+                    // A full queue drops the connection; only a gone session
+                    // stops the listener.
+                    match events.try_send(connected) {
                         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                            let _ = unsafe { CloseHandle(pending) };
-                            break;
+                            ControlFlow::Break(())
+                        }
+                        Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                            ControlFlow::Continue(())
                         }
                     }
-                }
+                });
             }
         })
         .map_err(io::Error::other)?;

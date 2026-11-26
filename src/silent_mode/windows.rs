@@ -58,6 +58,8 @@ fn nt_query_wnf_state_data() -> Option<NtQueryWnfStateData> {
         // returns None when this private API is absent, which is cached as a
         // conservative Unknown result by the caller.
         let module = unsafe { GetModuleHandleW(w!("ntdll.dll")) }.ok()?;
+        // SAFETY: `module` is ntdll's handle, which stays loaded, and the
+        // export name is a static NUL-terminated string.
         let address = unsafe { GetProcAddress(module, s!("NtQueryWnfStateData")) }?;
         // SAFETY: The named ntdll export has the NtQueryWnfStateData ABI
         // declared above. The pointer remains valid because ntdll cannot be

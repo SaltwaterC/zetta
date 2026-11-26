@@ -300,18 +300,18 @@ fn fallback_root() -> PathBuf {
         if let Some(home) = env::var_os("HOME").filter(|path| !path.is_empty()) {
             return PathBuf::from(home).join(".cache").join("zetta");
         }
-        return env::temp_dir().join("zetta");
+        env::temp_dir().join("zetta")
     }
     #[cfg(windows)]
     {
         // MSYS2 can set TMP to its Unix-style temporary directory. The GUI
         // and the `zetta edit` helper must instead agree on one native path.
-        return windows_fallback_root(
+        windows_fallback_root(
             env::var_os("LOCALAPPDATA")
                 .filter(|path| !path.is_empty())
                 .map(PathBuf::from),
             env::temp_dir(),
-        );
+        )
     }
     #[cfg(not(any(target_os = "linux", windows)))]
     env::temp_dir().join("zetta")

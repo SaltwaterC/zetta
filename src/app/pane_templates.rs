@@ -70,33 +70,23 @@ fn resolve_pane_split_leaves(
             if let Some(dark_theme) = pane.dark_theme {
                 profile.dark_theme = Some(dark_theme);
             }
-            let (overlay_text, overlay_font_size, overlay_opacity, overlay_color) = match pane
-                .overlay
-            {
-                Some(overlay) => (
-                    overlay.text,
-                    overlay.size.map(|size| match size {
-                        PaneSplitOverlaySize::Small => OverlayFontSize::Small,
-                        PaneSplitOverlaySize::Base => OverlayFontSize::Base,
-                        PaneSplitOverlaySize::Large => OverlayFontSize::Large,
-                        PaneSplitOverlaySize::ExtraLarge => OverlayFontSize::ExtraLarge,
-                        PaneSplitOverlaySize::ExtraExtraLarge => OverlayFontSize::ExtraExtraLarge,
-                        PaneSplitOverlaySize::ExtraExtraExtraLarge => {
-                            OverlayFontSize::ExtraExtraExtraLarge
-                        }
-                    }),
-                    overlay.opacity.map(|opacity| f32::from(opacity) / 100.),
-                    overlay
-                        .color
-                        .map(|color| {
-                            overlay_color_from_value(&color).with_context(|| {
-                                format!("using pane template overlay color {color:?}")
+            let (overlay_text, overlay_font_size, overlay_opacity, overlay_color) =
+                match pane.overlay {
+                    Some(overlay) => (
+                        overlay.text,
+                        overlay.size,
+                        overlay.opacity.map(|opacity| f32::from(opacity) / 100.),
+                        overlay
+                            .color
+                            .map(|color| {
+                                overlay_color_from_value(&color).with_context(|| {
+                                    format!("using pane template overlay color {color:?}")
+                                })
                             })
-                        })
-                        .transpose()?,
-                ),
-                None => (None, None, None, None),
-            };
+                            .transpose()?,
+                    ),
+                    None => (None, None, None, None),
+                };
             // Quoting uses the leaf's resolved shell, which is also the shell
             // `stacked_task_shell` runs the entry through.
             let stack = pane
@@ -330,19 +320,16 @@ impl Zetta {
             self.background_observed_panes.remove(&stack_id);
         }
 
-        let Some(stacked_launches) = self.install_pane_template_panes(
-            PaneTemplateInstall {
-                replacement,
-                generated_labels,
-                leaves: &leaves,
-                new_panes: &new_panes,
-                active_pane_id,
-                replacing_active,
-                active_wsl_cwd_file: active_wsl_cwd_file.clone(),
-                working_directories: &working_directories,
-            },
-            cx,
-        ) else {
+        let Some(stacked_launches) = self.install_pane_template_panes(PaneTemplateInstall {
+            replacement,
+            generated_labels,
+            leaves: &leaves,
+            new_panes: &new_panes,
+            active_pane_id,
+            replacing_active,
+            active_wsl_cwd_file: active_wsl_cwd_file.clone(),
+            working_directories: &working_directories,
+        }) else {
             return false;
         };
         self.spawn_pane_template_terminals(
@@ -411,7 +398,6 @@ impl Zetta {
     fn install_pane_template_panes(
         &mut self,
         install: PaneTemplateInstall<'_>,
-        cx: &mut Context<Self>,
     ) -> Option<Vec<(usize, u64, u64, String)>> {
         let PaneTemplateInstall {
             replacement,
@@ -423,7 +409,6 @@ impl Zetta {
             active_wsl_cwd_file,
             working_directories,
         } = install;
-        let _ = cx;
         let active_leaf = &leaves[0];
         let new_pane_count = new_panes.len();
         let replaced_stack_ids = replacing_active

@@ -2,33 +2,35 @@ use super::*;
 
 #[test]
 fn retention_modes_parse_and_disk_is_canonical() {
-    assert_eq!(Retention::parse("none").unwrap(), Retention::None);
+    assert_eq!("none".parse::<Retention>().unwrap(), Retention::None);
     #[cfg(feature = "scrollback-buffer")]
     assert_eq!(
-        Retention::parse("memory").unwrap(),
+        "memory".parse::<Retention>().unwrap(),
         Retention::Memory {
             bytes: DEFAULT_RING_BYTES
         }
     );
     #[cfg(not(feature = "scrollback-buffer"))]
     assert!(
-        Retention::parse("memory")
+        "memory"
+            .parse::<Retention>()
             .unwrap_err()
             .to_string()
             .contains("scrollback-buffer")
     );
-    assert!(Retention::parse("everything").is_err());
+    assert!("everything".parse::<Retention>().is_err());
 
     #[cfg(feature = "session-persistence")]
-    assert_eq!(Retention::parse("disk").unwrap(), Retention::Disk);
+    assert_eq!("disk".parse::<Retention>().unwrap(), Retention::Disk);
     #[cfg(not(feature = "session-persistence"))]
     assert!(
-        Retention::parse("disk")
+        "disk"
+            .parse::<Retention>()
             .unwrap_err()
             .to_string()
             .contains("session-persistence")
     );
-    let error = Retention::parse("persist").unwrap_err().to_string();
+    let error = "persist".parse::<Retention>().unwrap_err().to_string();
     assert!(error.contains("use \"disk\""), "{error}");
 }
 

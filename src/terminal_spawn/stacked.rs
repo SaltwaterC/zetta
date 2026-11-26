@@ -131,27 +131,28 @@ impl Zetta {
             environment.clone(),
             working_directory.clone(),
         ));
-        let builder = TerminalBuilder::new_with_console_palette(
-            working_directory,
-            Some(task_state),
-            shell,
-            environment,
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            settings.path_hyperlink_regexes(final_spawn),
-            settings.path_hyperlink_timeout_ms,
-            false,
-            cx.entity_id().as_u64(),
-            Some(completion_tx),
+        let builder = TerminalBuilder::spawn(
+            terminal::TerminalSpawnOptions {
+                working_directory,
+                task: Some(task_state),
+                env: environment,
+                cursor_shape: settings.cursor_shape,
+                alternate_scroll: settings.alternate_scroll,
+                max_scroll_history_lines: settings.max_scroll_history_lines,
+                path_hyperlink_regexes: settings.path_hyperlink_regexes(final_spawn),
+                path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
+                completion_tx: Some(completion_tx),
+                pty_provider: mux_provider
+                    .clone()
+                    .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
+                initial_console_palette,
+                ..terminal::TerminalSpawnOptions::new(
+                    shell,
+                    cx.entity_id().as_u64(),
+                    PathStyle::local(),
+                )
+            },
             cx,
-            Vec::new(),
-            PathStyle::local(),
-            mux_provider
-                .clone()
-                .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
-            initial_console_palette,
-            None,
         );
 
         let this = cx.entity().downgrade();

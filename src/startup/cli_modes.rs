@@ -115,11 +115,18 @@ pub(super) fn run_wait_command(command: PaneWaitCommand) -> Result<()> {
 fn wait_command_process(
     shell: &Shell,
     command: &[String],
-    #[cfg_attr(not(unix), allow(unused_variables))] is_terminal_foreground: bool,
+    #[cfg_attr(
+        not(unix),
+        expect(
+            unused_variables,
+            reason = "only Unix detaches the command from the terminal"
+        )
+    )]
+    is_terminal_foreground: bool,
 ) -> std::process::Command {
     #[cfg_attr(
         windows,
-        allow(
+        expect(
             unused_mut,
             reason = "only the Unix pre_exec setup mutates this command"
         )
@@ -146,14 +153,12 @@ pub(crate) fn detached_from_terminal(
     command: &mut std::process::Command,
 ) -> &mut std::process::Command {
     use std::os::unix::process::CommandExt as _;
-    // SAFETY: `setsid` is async-signal-safe and only affects this
-    // about-to-be-replaced child's own session; nothing else is read,
-    // written, or allocated.
+    // SAFETY: `setsid` is a single system call, so async-signal-safe, and
+    // only affects this about-to-be-replaced child's own session; nothing
+    // else is read, written, or allocated.
     unsafe {
         command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
+            rustix::process::setsid()?;
             Ok(())
         })
     }
@@ -169,12 +174,8 @@ pub(crate) fn detached_from_terminal(
 /// current occupant either way.
 #[cfg(unix)]
 fn this_process_is_the_terminal_foreground() -> bool {
-    // SAFETY: both calls only read process/terminal identity by fd number;
-    // nothing is taken, dropped, or mutated.
-    unsafe {
-        let terminal_pgrp = libc::tcgetpgrp(libc::STDIN_FILENO);
-        terminal_pgrp != -1 && terminal_pgrp == libc::getpgrp()
-    }
+    rustix::termios::tcgetpgrp(std::io::stdin())
+        .is_ok_and(|terminal_pgrp| terminal_pgrp == rustix::process::getpgrp())
 }
 
 #[cfg(not(unix))]
@@ -188,12 +189,29 @@ fn this_process_is_the_terminal_foreground() -> bool {
 ///
 /// Best-effort: failure (no controlling terminal at all, or one already
 /// reclaimed by something else) is not actionable, so the result is ignored.
+///
+/// From a background group `tcsetpgrp` raises `SIGTTOU`, whose default action
+/// stops this process — which is exactly the state it is in when the shell it
+/// handed the terminal to died without giving it back. The signal is blocked
+/// around the call, as job-control shells do, so the call succeeds instead.
 #[cfg(unix)]
 fn reclaim_terminal_foreground() {
-    // SAFETY: touches only this process's own controlling terminal (by fd
-    // number) and its own process group.
-    unsafe {
-        libc::tcsetpgrp(libc::STDIN_FILENO, libc::getpgrp());
+    // rustix wraps no signal-mask call, so the mask stays on `libc`.
+    // SAFETY: `sigset_t` is plain data, initialised by `sigemptyset` before
+    // `sigaddset` or `pthread_sigmask` reads it, and `previous` is written by
+    // the first `pthread_sigmask` before the second reads it. Each call
+    // touches only this thread's signal mask.
+    let previous = unsafe {
+        let mut blocked = std::mem::zeroed::<libc::sigset_t>();
+        let mut previous = std::mem::zeroed::<libc::sigset_t>();
+        libc::sigemptyset(&mut blocked);
+        libc::sigaddset(&mut blocked, libc::SIGTTOU);
+        (libc::pthread_sigmask(libc::SIG_BLOCK, &blocked, &mut previous) == 0).then_some(previous)
+    };
+    let _ = rustix::termios::tcsetpgrp(std::io::stdin(), rustix::process::getpgrp());
+    if let Some(previous) = previous {
+        // SAFETY: `previous` is the mask the first call returned.
+        unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &previous, std::ptr::null_mut()) };
     }
 }
 
@@ -468,6 +486,13 @@ pub(super) fn set_pane_overlay(request: PaneOverlayRequest) -> Result<()> {
 /// `zetta mux ...`, forwarded to the multiplexer client so the subcommand and
 /// the `zmux` binary cannot accept different arguments.
 #[cfg(feature = "zmux")]
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        unused_variables,
+        reason = "identity paths are only read for persisted sessions"
+    )
+)]
 pub(super) fn run_mux_command(arguments: &[OsString], config_path: Option<PathBuf>) -> Result<()> {
     #[cfg(target_os = "macos")]
     if arguments.iter().any(|argument| argument == "--daemon") {
@@ -484,8 +509,6 @@ pub(super) fn run_mux_command(arguments: &[OsString], config_path: Option<PathBu
             },
         );
     }
-    #[cfg(not(feature = "session-persistence"))]
-    let _ = config_path;
     zmux::run(arguments)
 }
 

@@ -189,16 +189,15 @@ fn a_client_summary_cannot_rename_a_session() {
     assert_eq!(listed[0].id, pane.session_id);
 
     // And addressable under that id.
-    let attached = match client
+    let AttachOutcome::Attached { pane: attached, .. } = client
         .attach(
             pane.session_id,
             Some(pane.pane_id),
             Some(TEST_SECRET.to_owned()),
         )
         .unwrap()
-    {
-        AttachOutcome::Attached { pane, .. } => pane,
-        _ => panic!("the session must still attach under its own id"),
+    else {
+        panic!("the session must still attach under its own id");
     };
     drop(attached);
     client
@@ -727,7 +726,7 @@ fn a_pane_never_starts_in_the_daemons_own_directory() {
             operation_id: client.next_shared_operation_id(),
             target_pane_id: Some(pane.pane_id),
             replacement: zmux::messages::SharedDraftLayout::Split {
-                axis: "vertical".to_owned(),
+                axis: zmux::protocol::SplitAxis::Vertical,
                 first_ratio: 500,
                 first: Box::new(zmux::messages::SharedDraftLayout::Existing {
                     pane_id: pane.pane_id,
@@ -818,7 +817,7 @@ fn a_draft_inherits_the_working_directory_of_the_pane_it_names() {
             operation_id: client.next_shared_operation_id(),
             target_pane_id: Some(pane.pane_id),
             replacement: zmux::messages::SharedDraftLayout::Split {
-                axis: "vertical".to_owned(),
+                axis: zmux::protocol::SplitAxis::Vertical,
                 first_ratio: 500,
                 first: Box::new(zmux::messages::SharedDraftLayout::Existing {
                     pane_id: pane.pane_id,

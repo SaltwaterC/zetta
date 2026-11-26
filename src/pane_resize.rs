@@ -306,14 +306,8 @@ impl Zetta {
         {
             return;
         }
-        self.pane_resize_mode = !self.pane_resize_mode;
-        self.pane_resize_keys.clear();
-        self.cancel_pane_resize_repeat();
-        self.pane_resize_drag = None;
-        if self.pane_resize_mode {
-            self.pane_move_mode = false;
-            self.tab_move_mode = false;
-        }
+        self.layout_edit_mode = self.layout_edit_mode.toggled(LayoutEditMode::PaneResize);
+        self.reset_pane_resize_input();
         self.update_terminal_input_enabled(cx);
         cx.notify();
     }
@@ -330,13 +324,9 @@ impl Zetta {
         {
             return;
         }
-        self.pane_move_mode = !self.pane_move_mode;
-        if self.pane_move_mode {
-            self.pane_resize_mode = false;
-            self.tab_move_mode = false;
-            self.pane_resize_keys.clear();
-            self.cancel_pane_resize_repeat();
-            self.pane_resize_drag = None;
+        self.layout_edit_mode = self.layout_edit_mode.toggled(LayoutEditMode::PaneMove);
+        if self.pane_move_mode() {
+            self.reset_pane_resize_input();
         }
         self.update_terminal_input_enabled(cx);
         cx.notify();
@@ -384,7 +374,7 @@ impl Zetta {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_move_mode {
+        if !self.pane_move_mode() {
             return;
         }
         let Some(tab) = self.current_tab_mut() else {
@@ -407,7 +397,7 @@ impl Zetta {
         target: PaneMoveDrag,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_move_mode
+        if !self.pane_move_mode()
             || dragged.tab_id != target.tab_id
             || dragged.pane_id == target.pane_id
         {
@@ -469,7 +459,7 @@ impl Zetta {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) {
-        if self.pane_resize_mode
+        if self.pane_resize_mode()
             && let Some(direction) = PaneResizeDirection::from_key(&event.keystroke.key)
         {
             self.pane_resize_keys.release(direction);
@@ -485,7 +475,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_resize_mode {
+        if !self.pane_resize_mode() {
             return;
         }
         let held_key_count = self.pane_resize_keys.len();
@@ -529,7 +519,7 @@ impl Zetta {
                 loop {
                     let repeating = this
                         .update_in(cx, |this, window, cx| {
-                            let repeating = this.pane_resize_mode
+                            let repeating = this.pane_resize_mode()
                                 && this.pane_resize_repeat_generation == generation
                                 && !this.pane_resize_keys.is_empty();
                             if repeating {
@@ -551,6 +541,14 @@ impl Zetta {
         self.pane_resize_repeat_generation = self.pane_resize_repeat_generation.wrapping_add(1);
     }
 
+    /// Drops held resize keys, any key repeat and any gutter drag, so a
+    /// resize gesture cannot outlive the mode it started in.
+    pub(crate) fn reset_pane_resize_input(&mut self) {
+        self.pane_resize_keys.clear();
+        self.cancel_pane_resize_repeat();
+        self.pane_resize_drag = None;
+    }
+
     pub(crate) fn resize_pane_gutter_drag(
         &mut self,
         gutter: PaneResizeGutter,
@@ -558,7 +556,7 @@ impl Zetta {
         pointer_position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_resize_mode {
+        if !self.pane_resize_mode() {
             return;
         }
         if self
@@ -653,7 +651,7 @@ impl Zetta {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.pane_resize_mode {
+        if !self.pane_resize_mode() {
             return;
         }
         let (tab_id, pane_id, bounds, columns_delta, rows_delta) = {

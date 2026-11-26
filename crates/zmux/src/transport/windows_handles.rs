@@ -1,16 +1,102 @@
-//! The Windows half of the transport. There is no `SCM_RIGHTS`, so a
-//! terminal's handles are duplicated into the receiving process, after its
-//! user has been checked and it has answered a challenge proving it is the
-//! process it claims to be.
+//! The Windows half of the transport: asking the kernel which process is on
+//! the far end of a socket, and, because there is no `SCM_RIGHTS`, duplicating
+//! a terminal's handles into the receiving process after its user has been
+//! checked.
 
 use super::*;
 
-pub fn peer_process_id(_stream: &Stream) -> Result<Option<u32>> {
-    Ok(None)
+/// The process on the far end of an accepted connection, once it has been
+/// confirmed to run as this user.
+///
+/// The kernel records which process connected an `AF_UNIX` socket and answers
+/// `SIO_AF_UNIX_GETPEERPID` with it, so this is as good as `SO_PEERCRED` on
+/// Linux: nothing the peer sends affects it. The process is opened to compare
+/// its token's user with this one's, and the handle is kept for as long as this
+/// value lives, so the id cannot pass to another process while the request it
+/// identifies is being served.
+///
+/// A Windows release that does not answer the query leaves the id `None`; the
+/// daemon then asks for a [`PeerChallenge`] where it needs an identity.
+pub struct PeerProcess {
+    id: Option<u32>,
+    _process: Option<std::os::windows::io::OwnedHandle>,
 }
 
-pub fn peer_is_this_user(_stream: &Stream) -> Result<bool> {
-    Ok(true)
+impl PeerProcess {
+    /// Refuses a peer running as another user.
+    pub fn of(stream: &Stream) -> Result<Self> {
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+        let Some(id) = reported_peer_process_id(stream)? else {
+            return Ok(Self {
+                id: None,
+                _process: None,
+            });
+        };
+        // SAFETY: the access right is valid for `OpenProcess`.
+        let opened = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, id) }
+            .with_context(|| format!("opening the connecting process {id}"))?;
+        // SAFETY: `OpenProcess` succeeded, so this function owns the handle.
+        let process = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+        anyhow::ensure!(
+            process_belongs_to_this_user(HANDLE(process.as_raw_handle()))?,
+            "refusing a connection from another user"
+        );
+        Ok(Self {
+            id: Some(id),
+            _process: Some(process),
+        })
+    }
+
+    /// The peer's process id, where the kernel reported one.
+    pub fn id(&self) -> Option<u32> {
+        self.id
+    }
+}
+
+/// The process that connected `stream`, as the kernel recorded it, or `None`
+/// where this Windows release does not answer the query.
+fn reported_peer_process_id(stream: &Stream) -> Result<Option<u32>> {
+    use std::os::windows::io::AsRawSocket as _;
+    use windows::Win32::Networking::WinSock::{
+        SIO_AF_UNIX_GETPEERPID, SOCKET, WSAEINVAL, WSAEOPNOTSUPP, WSAGetLastError, WSAIoctl,
+    };
+
+    let mut process_id = 0_u32;
+    let mut written = 0_u32;
+    // SAFETY: `stream` keeps the socket open for the call. The output buffer is
+    // `process_id`, whose size is passed alongside it, and with neither an
+    // overlapped structure nor a completion routine the call completes before
+    // it returns, so nothing writes to either local afterwards.
+    let status = unsafe {
+        WSAIoctl(
+            SOCKET(stream.as_raw_socket() as usize),
+            SIO_AF_UNIX_GETPEERPID,
+            None,
+            0,
+            Some((&raw mut process_id).cast()),
+            size_of::<u32>() as u32,
+            &mut written,
+            None,
+            None,
+        )
+    };
+    if status != 0 {
+        // SAFETY: takes no arguments and reads this thread's last socket error.
+        let error = unsafe { WSAGetLastError() };
+        if error == WSAEOPNOTSUPP || error == WSAEINVAL {
+            return Ok(None);
+        }
+        return Err(std::io::Error::from_raw_os_error(error.0))
+            .context("asking which process connected");
+    }
+    // Windows writes the id but leaves `written` at 0 (seen on build 26300),
+    // so the id itself is the only sign of an answer; it was zeroed above, and
+    // no process has id 0.
+    anyhow::ensure!(process_id != 0, "the kernel reported no connecting process");
+    Ok(Some(process_id))
 }
 
 /// Sends a terminal's handles to the client that asked for it.
@@ -29,17 +115,16 @@ pub fn duplicate_to(
     process_id: u32,
     handles: &[std::os::windows::io::BorrowedHandle<'_>],
 ) -> Result<Vec<i64>> {
-    use std::os::windows::io::AsRawHandle as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
     use windows::Win32::Foundation::{
-        CloseHandle, DUPLICATE_HANDLE_OPTIONS, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE,
+        DUPLICATE_HANDLE_OPTIONS, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE,
     };
     use windows::Win32::System::Threading::{
         GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    // SAFETY: both access rights are valid for `OpenProcess`, and the returned
-    // handle is closed below on every path.
-    let target = unsafe {
+    // SAFETY: both access rights are valid for `OpenProcess`.
+    let opened = unsafe {
         OpenProcess(
             PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION,
             false,
@@ -47,8 +132,11 @@ pub fn duplicate_to(
         )
     }
     .with_context(|| format!("opening process {process_id} to hand over a terminal"))?;
+    // SAFETY: `OpenProcess` succeeded, so this function owns the handle.
+    let owned = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+    let target = HANDLE(owned.as_raw_handle());
 
-    let duplicated = (|| -> Result<Vec<i64>> {
+    {
         anyhow::ensure!(
             process_belongs_to_this_user(target)?,
             "refusing to hand a terminal to process {process_id}, which belongs to another user"
@@ -73,13 +161,7 @@ pub fn duplicate_to(
             duplicated.push(target_handle.0 as i64);
         }
         Ok(duplicated)
-    })();
-
-    // SAFETY: `target` came from `OpenProcess` and is closed exactly once.
-    unsafe {
-        let _ = CloseHandle(target);
     }
-    duplicated
 }
 
 /// Whether `process` runs as the same user as this one.
@@ -94,61 +176,34 @@ pub(super) fn process_belongs_to_this_user(
 
 /// The user SID of a process's token, as raw bytes for comparison.
 pub(super) fn user_sid(process: windows::Win32::Foundation::HANDLE) -> Result<Vec<u8>> {
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
-    use windows::Win32::System::Threading::OpenProcessToken;
-
-    let mut token = windows::Win32::Foundation::HANDLE::default();
-    // SAFETY: `process` is open with at least query access, and `token` is a
-    // valid writable slot closed below.
-    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
-        .context("opening a process token")?;
-
-    let sid = (|| -> Result<Vec<u8>> {
-        let mut needed = 0;
-        // SAFETY: asking for the required size with a null buffer is the
-        // documented first step and is expected to fail.
-        let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut needed) };
-        anyhow::ensure!(needed > 0, "a process token reported no user information");
-        let mut buffer = vec![0u8; needed as usize];
-        // SAFETY: the buffer is exactly the size the call just asked for.
-        unsafe {
-            GetTokenInformation(
-                token,
-                TokenUser,
-                Some(buffer.as_mut_ptr().cast()),
-                needed,
-                &mut needed,
-            )
-        }
+    let user = crate::private_fs::windows_impl::token_user(process)
         .context("reading a process token's user")?;
-
-        // SAFETY: the buffer holds a `TOKEN_USER` whose `Sid` points inside it.
-        let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
-        // SAFETY: the SID is valid for as long as the buffer is.
-        let length = unsafe { windows::Win32::Security::GetLengthSid(user.User.Sid) } as usize;
-        anyhow::ensure!(length > 0, "a process token reported an empty user");
-        // SAFETY: `length` is the SID's own reported size.
-        Ok(unsafe { std::slice::from_raw_parts(user.User.Sid.0 as *const u8, length) }.to_vec())
-    })();
-
-    // SAFETY: `token` came from `OpenProcessToken` and is closed exactly once.
-    unsafe {
-        let _ = CloseHandle(token);
-    }
-    sid
+    let sid = user.sid();
+    // SAFETY: the SID points into `user`, alive for the call.
+    let length = unsafe { windows::Win32::Security::GetLengthSid(sid) } as usize;
+    anyhow::ensure!(length > 0, "a process token reported an empty user");
+    // SAFETY: `length` is the SID's own reported size, within `user`.
+    Ok(unsafe { std::slice::from_raw_parts(sid.0.cast::<u8>(), length) }.to_vec())
 }
 
-/// Proof that the peer of a connection really is the process it named.
+/// Proof that the peer of a connection really is the process it named, for
+/// a Windows release that does not report the peer itself (see
+/// [`PeerProcess`]).
 ///
-/// Windows has no peer credentials for `AF_UNIX`, and nothing the peer *sends*
-/// can establish its identity: any same-user process may open another and
-/// duplicate that one's handles, so a handle arriving from the peer shows only
-/// that the peer could open something. What only the named process can do is
+/// Without that report there are no peer credentials for `AF_UNIX`, and
+/// nothing the peer *sends* can establish its identity: any same-user process
+/// may open another and duplicate that one's handles, so a handle arriving
+/// from the peer shows only that the peer could open something. What only the named process can do is
 /// read a handle that exists in its own table. So the daemon writes a nonce
 /// into a pipe, duplicates the read end into the process the peer claims to be,
 /// and asks for the nonce back. An impostor is handed a handle that is valid
-/// only inside its victim, and cannot read it.
+/// only inside its victim.
+///
+/// That stops an impostor that cannot open its victim, not one that can: a
+/// same-user process of the same integrity can open the victim with
+/// `PROCESS_DUP_HANDLE`, duplicate the handle out and read the nonce. Where the
+/// kernel reports the peer, that impostor is named by the kernel instead and
+/// gets nowhere; here, it is only kept from being taken at its word.
 ///
 /// The handle is closed again inside the target when this drops, answered or
 /// not, so naming somebody else's process repeatedly cannot fill that
@@ -164,31 +219,17 @@ impl PeerChallenge {
     pub const NONCE_BYTES: usize = 32;
 
     pub fn issue(process_id: u32) -> Result<Self> {
-        use std::os::windows::io::{AsHandle as _, FromRawHandle as _, OwnedHandle};
-        use windows::Win32::{Foundation::HANDLE, System::Pipes::CreatePipe};
+        use std::os::windows::io::AsHandle as _;
 
-        let mut read = HANDLE::default();
-        let mut write = HANDLE::default();
-        // SAFETY: both destinations are valid writable slots, and a default
-        // buffer size is what an anonymous pipe carrying one nonce needs.
-        unsafe { CreatePipe(&mut read, &mut write, None, 0) }
-            .context("creating a peer attestation pipe")?;
-        // SAFETY: `CreatePipe` succeeded, so each handle is owned here exactly
-        // once and closed when its wrapper drops.
-        let read = unsafe { OwnedHandle::from_raw_handle(read.0.cast()) };
-        // SAFETY: as above, for the other end.
-        let write = unsafe { OwnedHandle::from_raw_handle(write.0.cast()) };
+        let (read, mut writer) = std::io::pipe().context("creating a peer attestation pipe")?;
 
         let nonce = random_hex(Self::NONCE_BYTES)?;
-        {
-            // Dropped before the handle is handed over, so the reader sees the
-            // end of the nonce instead of waiting for a writer that never
-            // writes again.
-            let mut writer = std::fs::File::from(write);
-            writer
-                .write_all(nonce.as_bytes())
-                .context("writing a peer attestation nonce")?;
-        }
+        writer
+            .write_all(nonce.as_bytes())
+            .context("writing a peer attestation nonce")?;
+        // Dropped before the handle is handed over, so the reader sees the end
+        // of the nonce instead of waiting for a writer that never writes again.
+        drop(writer);
 
         // Duplicating is also where the peer's user is checked: this refuses a
         // target belonging to another user.
@@ -227,21 +268,23 @@ impl Drop for PeerChallenge {
 /// Closes a handle that lives in another process, which `DuplicateHandle` does
 /// when it is asked to duplicate *from* that process into nowhere.
 pub(super) fn close_in_process(process_id: u32, handle: i64) -> Result<()> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
     use windows::Win32::Foundation::{
-        CloseHandle, DUPLICATE_CLOSE_SOURCE, DUPLICATE_HANDLE_OPTIONS, DuplicateHandle, HANDLE,
+        DUPLICATE_CLOSE_SOURCE, DUPLICATE_HANDLE_OPTIONS, DuplicateHandle, HANDLE,
     };
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_DUP_HANDLE};
 
-    // SAFETY: the access right is valid for `OpenProcess`, and the returned
-    // handle is closed below on every path.
-    let target = unsafe { OpenProcess(PROCESS_DUP_HANDLE, false, process_id) }
+    // SAFETY: the access right is valid for `OpenProcess`.
+    let opened = unsafe { OpenProcess(PROCESS_DUP_HANDLE, false, process_id) }
         .with_context(|| format!("opening process {process_id} to close a handle in it"))?;
+    // SAFETY: `OpenProcess` succeeded, so this function owns the handle.
+    let target = unsafe { OwnedHandle::from_raw_handle(opened.0) };
     // SAFETY: `target` is open with duplication access; a null destination
     // process with `DUPLICATE_CLOSE_SOURCE` is how a handle is closed in
     // another process without duplicating it anywhere.
-    let closed = unsafe {
+    unsafe {
         DuplicateHandle(
-            target,
+            HANDLE(target.as_raw_handle()),
             HANDLE(handle as *mut _),
             HANDLE::default(),
             std::ptr::null_mut(),
@@ -249,12 +292,8 @@ pub(super) fn close_in_process(process_id: u32, handle: i64) -> Result<()> {
             false,
             DUPLICATE_HANDLE_OPTIONS(DUPLICATE_CLOSE_SOURCE.0),
         )
-    };
-    // SAFETY: `target` came from `OpenProcess` and is closed exactly once.
-    unsafe {
-        let _ = CloseHandle(target);
     }
-    closed.context("closing a handle in the client")
+    .context("closing a handle in the client")
 }
 
 /// Answers a [`PeerChallenge`] by reading the nonce the multiplexer duplicated

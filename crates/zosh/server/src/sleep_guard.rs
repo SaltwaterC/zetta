@@ -149,14 +149,20 @@ mod platform {
             let name = match cf_string(c"zosh-server: Mosh client attached") {
                 Ok(name) => name,
                 Err(error) => {
+                    // SAFETY: `kind` is a non-null CFString `cf_string`
+                    // created, owned here and released once on this path.
                     unsafe { CFRelease(kind) };
                     return Err(error);
                 }
             };
             let mut id: IOPMAssertionID = 0;
+            // SAFETY: `kind` and `name` are live non-null CFStrings, and `id`
+            // is a writable IOPMAssertionID.
             let result = unsafe {
                 IOPMAssertionCreateWithName(kind, K_IOPM_ASSERTION_LEVEL_ON, name, &mut id)
             };
+            // SAFETY: both strings were created by `cf_string`, are owned
+            // here, and IOKit retains whatever it keeps; each is released once.
             unsafe {
                 CFRelease(name);
                 CFRelease(kind);
@@ -170,11 +176,15 @@ mod platform {
 
     impl Drop for Assertion {
         fn drop(&mut self) {
+            // SAFETY: `self.0` is the assertion `acquire` created, owned
+            // solely by this Assertion and released once, here.
             unsafe { IOPMAssertionRelease(self.0) };
         }
     }
 
     fn cf_string(value: &std::ffi::CStr) -> Result<CFStringRef, String> {
+        // SAFETY: `value` is a NUL-terminated CStr that outlives the call; a
+        // null result is checked below.
         let string = unsafe {
             CFStringCreateWithCString(std::ptr::null(), value.as_ptr(), K_CF_STRING_ENCODING_UTF8)
         };
@@ -187,7 +197,9 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Power::{
         PowerClearRequest, PowerCreateRequest, PowerRequestSystemRequired, PowerSetRequest,
     };
@@ -199,7 +211,7 @@ mod platform {
     /// `POWER_REQUEST_CONTEXT_VERSION`, which the bindings do not export.
     const POWER_REQUEST_CONTEXT_VERSION: u32 = 0;
 
-    pub struct Assertion(HANDLE);
+    pub struct Assertion(OwnedHandle);
 
     impl Assertion {
         pub fn acquire() -> Result<Option<Self>, String> {
@@ -216,14 +228,16 @@ mod platform {
                     SimpleReasonString: PWSTR(reason.as_mut_ptr()),
                 },
             };
+            // SAFETY: `context` and the `reason` string it points to are live
+            // and NUL-terminated for the call, which copies the reason.
             let request = unsafe { PowerCreateRequest(&context) }
                 .map_err(|error| format!("PowerCreateRequest failed: {error}"))?;
-            if let Err(error) = unsafe { PowerSetRequest(request, PowerRequestSystemRequired) } {
-                unsafe {
-                    let _ = CloseHandle(request);
-                }
-                return Err(format!("PowerSetRequest failed: {error}"));
-            }
+            // SAFETY: PowerCreateRequest succeeded, so this owns the handle;
+            // dropping it on the error path below closes it.
+            let request = unsafe { OwnedHandle::from_raw_handle(request.0) };
+            // SAFETY: `request` is open.
+            unsafe { PowerSetRequest(HANDLE(request.as_raw_handle()), PowerRequestSystemRequired) }
+                .map_err(|error| format!("PowerSetRequest failed: {error}"))?;
             Ok(Some(Self(request)))
         }
     }
@@ -232,10 +246,11 @@ mod platform {
         fn drop(&mut self) {
             // Closing the handle also clears the request; clearing first
             // states the intent rather than relying on it.
-            unsafe {
-                let _ = PowerClearRequest(self.0, PowerRequestSystemRequired);
-                let _ = CloseHandle(self.0);
-            }
+            // The handle itself is closed when the field drops.
+            // SAFETY: the request handle is open, and was set in `acquire`.
+            let _ = unsafe {
+                PowerClearRequest(HANDLE(self.0.as_raw_handle()), PowerRequestSystemRequired)
+            };
         }
     }
 }

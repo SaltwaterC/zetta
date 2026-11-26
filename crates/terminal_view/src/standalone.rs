@@ -1250,14 +1250,13 @@ impl TerminalView {
         if !self.input_enabled {
             return;
         }
-        if let Ok(keystroke) = Keystroke::parse(&key.0) {
-            if self.process_keystroke(&keystroke, cx) {
-                if let Some(event) = enabled_input_event(self.emit_input_events, || {
-                    TerminalViewEvent::Input(TerminalInput::Keystroke(keystroke))
-                }) {
-                    self.emit_input_event(event, cx);
-                }
-            }
+        if let Ok(keystroke) = Keystroke::parse(&key.0)
+            && self.process_keystroke(&keystroke, cx)
+            && let Some(event) = enabled_input_event(self.emit_input_events, || {
+                TerminalViewEvent::Input(TerminalInput::Keystroke(keystroke))
+            })
+        {
+            self.emit_input_event(event, cx);
         }
     }
 }

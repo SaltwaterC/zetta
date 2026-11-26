@@ -12,7 +12,8 @@
 //! polled for.
 //!
 //! On Windows `WSAPoll` waits only on sockets, which is why the wake-up is a
-//! connected pair of loopback UDP sockets there rather than a pipe: input
+//! connected pair of loopback UDP sockets there rather than a Unix socket
+//! pair: input
 //! that does not arrive on a socket (console events, piped stdin, a pane's
 //! commands) is read by a thread that raises it.
 
@@ -33,7 +34,7 @@ pub(crate) struct Ready(u32);
 impl Ready {
     #[cfg_attr(
         all(windows, not(test)),
-        allow(
+        expect(
             dead_code,
             reason = "on Windows the loops watch only their wake-up, which they drain unconditionally"
         )
@@ -110,9 +111,9 @@ impl PassCounter {
 /// the loop next drains it count as one.
 pub(crate) struct Wake {
     #[cfg(unix)]
-    read: std::os::fd::OwnedFd,
+    read: std::os::unix::net::UnixStream,
     #[cfg(unix)]
-    write: std::os::fd::OwnedFd,
+    write: std::os::unix::net::UnixStream,
     #[cfg(windows)]
     receiver: std::net::UdpSocket,
     #[cfg(windows)]
@@ -137,73 +138,30 @@ impl Wake {
 
 #[cfg(unix)]
 impl Wake {
+    /// A connected socket pair. `UnixStream::pair` creates both ends
+    /// close-on-exec in the same call, so a shell another thread spawns
+    /// meanwhile cannot inherit either.
     pub(crate) fn new() -> io::Result<Self> {
-        use std::os::fd::{FromRawFd as _, OwnedFd};
-
-        let mut descriptors = [0 as libc::c_int; 2];
-        // SAFETY: `pipe` fills the two-element array it is given.
-        if unsafe { libc::pipe(descriptors.as_mut_ptr()) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `pipe` returned these descriptors and nothing else owns
-        // them, so the pipe is closed exactly once, when this value is
-        // dropped.
-        let pipe = unsafe {
-            Self {
-                read: OwnedFd::from_raw_fd(descriptors[0]),
-                write: OwnedFd::from_raw_fd(descriptors[1]),
-            }
-        };
+        let (read, write) = std::os::unix::net::UnixStream::pair()?;
         // A wake-up must never block the caller, and the loop must be able to
-        // empty the pipe without blocking either.
-        for descriptor in [pipe.handle(), pipe.write_descriptor()] {
-            set_descriptor_flags(descriptor)?;
-        }
-        Ok(pipe)
-    }
-
-    fn write_descriptor(&self) -> libc::c_int {
-        use std::os::fd::AsRawFd as _;
-        self.write.as_raw_fd()
+        // empty the socket without blocking either.
+        read.set_nonblocking(true)?;
+        write.set_nonblocking(true)?;
+        Ok(Self { read, write })
     }
 
     pub(crate) fn notify(&self) {
-        let byte = [1_u8];
-        // SAFETY: the descriptor is owned by this value and the buffer is one
-        // byte long. A full pipe already means a pending wake-up, so a short
-        // or failed write needs no handling.
-        unsafe {
-            libc::write(self.write_descriptor(), byte.as_ptr().cast(), 1);
-        }
+        use std::io::Write as _;
+        // A full socket buffer already means a pending wake-up, so a failed
+        // write needs no handling.
+        let _ = (&self.write).write(&[1]);
     }
 
     pub(crate) fn drain(&self) {
+        use std::io::Read as _;
         let mut bytes = [0_u8; 64];
-        loop {
-            // SAFETY: the descriptor is owned by this value and the buffer is
-            // as long as the count passed with it.
-            let read = unsafe { libc::read(self.handle(), bytes.as_mut_ptr().cast(), bytes.len()) };
-            if read <= 0 {
-                return;
-            }
-        }
+        while (&self.read).read(&mut bytes).is_ok_and(|read| read > 0) {}
     }
-}
-
-#[cfg(unix)]
-pub(crate) fn set_descriptor_flags(descriptor: libc::c_int) -> io::Result<()> {
-    // SAFETY: `descriptor` is owned by the caller and both calls only read or
-    // replace its flags.
-    unsafe {
-        if libc::fcntl(descriptor, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let flags = libc::fcntl(descriptor, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }
 
 #[cfg(windows)]

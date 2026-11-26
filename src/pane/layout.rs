@@ -8,30 +8,12 @@
 
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SplitAxis {
-    Horizontal,
-    Vertical,
-}
+pub(crate) use zetta_layout::{PaneDirection, PaneRotationDirection, SplitAxis};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SplitPosition {
     Before,
     After,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PaneDirection {
-    Left,
-    Right,
-    Up,
-    Down,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PaneRotationDirection {
-    Clockwise,
-    CounterClockwise,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,11 +60,7 @@ pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayou
             first,
             second,
         } => BackgroundPaneLayout::Split {
-            axis: match axis {
-                SplitAxis::Horizontal => "horizontal",
-                SplitAxis::Vertical => "vertical",
-            }
-            .to_owned(),
+            axis: *axis,
             first_ratio: *first_ratio,
             first: Box::new(background_pane_layout(first)),
             second: Box::new(background_pane_layout(second)),
@@ -90,159 +68,51 @@ pub(crate) fn background_pane_layout(layout: &PaneLayout) -> BackgroundPaneLayou
     }
 }
 
+impl zetta_layout::LayoutTree for PaneLayout {
+    fn node(&self) -> zetta_layout::Node<'_, Self> {
+        match self {
+            Self::Pane(id) => zetta_layout::Node::Pane(*id),
+            Self::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            } => zetta_layout::Node::Split {
+                axis: *axis,
+                first_ratio: *first_ratio,
+                first,
+                second,
+            },
+        }
+    }
+
+    fn node_mut(&mut self) -> zetta_layout::NodeMut<'_, Self> {
+        match self {
+            Self::Pane(id) => zetta_layout::NodeMut::Pane(id),
+            Self::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            } => zetta_layout::NodeMut::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            },
+        }
+    }
+}
+
 impl PaneLayout {
+    /// Rotates the part of the layout `active_pane` belongs to a quarter turn;
+    /// see [`zetta_layout::rotate_pane`] for which part that is.
     pub(crate) fn rotate_pane(
         &mut self,
         active_pane: u64,
         direction: PaneRotationDirection,
     ) -> bool {
-        let Some(active_area) = self.pane_area(active_pane, 1.) else {
-            return false;
-        };
-        let Some(path) = self.rotation_target(active_pane, active_area, 1.) else {
-            return false;
-        };
-        self.rotate_at_path(&path, direction);
-        true
-    }
-
-    fn pane_area(&self, pane_id: u64, area: f64) -> Option<f64> {
-        match self {
-            Self::Pane(id) => (*id == pane_id).then_some(area),
-            Self::Split {
-                first_ratio,
-                first,
-                second,
-                ..
-            } => {
-                let first_area = area * f64::from(*first_ratio) / f64::from(PANE_SPLIT_RATIO_SCALE);
-                first
-                    .pane_area(pane_id, first_area)
-                    .or_else(|| second.pane_area(pane_id, area - first_area))
-            }
-        }
-    }
-
-    fn rotation_target(&self, active_pane: u64, active_area: f64, area: f64) -> Option<Vec<bool>> {
-        if self.has_four_equal_panes(area) || self.is_two_pane_split() {
-            return Some(Vec::new());
-        }
-
-        let Self::Split {
-            first_ratio,
-            first,
-            second,
-            ..
-        } = self
-        else {
-            return None;
-        };
-
-        let first_area = area * f64::from(*first_ratio) / f64::from(PANE_SPLIT_RATIO_SCALE);
-        let (child, child_area, sibling_area, child_is_first) = if first.contains_pane(active_pane)
-        {
-            (first, first_area, area - first_area, true)
-        } else if second.contains_pane(active_pane) {
-            (second, area - first_area, first_area, false)
-        } else {
-            return None;
-        };
-
-        if let Some(mut path) = child.rotation_target(active_pane, active_area, child_area) {
-            path.insert(0, child_is_first);
-            return Some(path);
-        }
-
-        // A pane can rotate with the complete subtree on the other side only
-        // when it is at least as large as that subtree. This is what makes a
-        // focused large pane dominate a three-pane layout while allowing a
-        // focused small pane to rotate its local equal split instead.
-        (active_area + PANE_ROTATION_AREA_EPSILON >= sibling_area).then_some(Vec::new())
-    }
-
-    fn is_two_pane_split(&self) -> bool {
-        matches!(
-            self,
-            Self::Split {
-                first,
-                second,
-                ..
-            } if matches!(first.as_ref(), Self::Pane(_)) && matches!(second.as_ref(), Self::Pane(_))
-        )
-    }
-
-    fn has_four_equal_panes(&self, area: f64) -> bool {
-        let mut areas = Vec::with_capacity(4);
-        self.collect_leaf_areas(area, &mut areas);
-        areas.len() == 4
-            && areas
-                .iter()
-                .all(|candidate| (*candidate - areas[0]).abs() <= PANE_ROTATION_AREA_EPSILON)
-    }
-
-    fn collect_leaf_areas(&self, area: f64, areas: &mut Vec<f64>) {
-        match self {
-            Self::Pane(_) => areas.push(area),
-            Self::Split {
-                first_ratio,
-                first,
-                second,
-                ..
-            } => {
-                let first_area = area * f64::from(*first_ratio) / f64::from(PANE_SPLIT_RATIO_SCALE);
-                first.collect_leaf_areas(first_area, areas);
-                second.collect_leaf_areas(area - first_area, areas);
-            }
-        }
-    }
-
-    fn rotate_at_path(&mut self, path: &[bool], direction: PaneRotationDirection) {
-        if let Some((first, second)) = path.split_first() {
-            if let Self::Split {
-                first: first_child,
-                second: second_child,
-                ..
-            } = self
-            {
-                if *first {
-                    first_child.rotate_at_path(second, direction);
-                } else {
-                    second_child.rotate_at_path(second, direction);
-                }
-            }
-            return;
-        }
-
-        self.rotate_geometry(direction);
-    }
-
-    fn rotate_geometry(&mut self, direction: PaneRotationDirection) {
-        let Self::Split {
-            axis,
-            first_ratio,
-            first,
-            second,
-        } = self
-        else {
-            return;
-        };
-
-        first.rotate_geometry(direction);
-        second.rotate_geometry(direction);
-
-        let reverse_children = matches!(
-            (direction, *axis),
-            (PaneRotationDirection::Clockwise, SplitAxis::Horizontal)
-                | (PaneRotationDirection::CounterClockwise, SplitAxis::Vertical)
-        );
-        *axis = match axis {
-            SplitAxis::Horizontal => SplitAxis::Vertical,
-            SplitAxis::Vertical => SplitAxis::Horizontal,
-        };
-        if reverse_children {
-            std::mem::swap(first, second);
-            *first_ratio = PANE_SPLIT_RATIO_SCALE - *first_ratio;
-        }
+        zetta_layout::rotate_pane(self, active_pane, direction)
     }
 
     pub(super) fn remap_pane_ids(&mut self, pane_ids: &HashMap<u64, u64>) {
@@ -349,10 +219,7 @@ impl PaneLayout {
                 first,
                 second,
             } => Self::Split {
-                axis: match axis {
-                    PaneSplitAxis::Horizontal => SplitAxis::Horizontal,
-                    PaneSplitAxis::Vertical => SplitAxis::Vertical,
-                },
+                axis: (*axis).into(),
                 first_ratio: DEFAULT_PANE_SPLIT_RATIO,
                 first: Box::new(Self::from_template(first, pane_ids)),
                 second: Box::new(Self::from_template(second, pane_ids)),
@@ -664,12 +531,7 @@ impl PaneLayout {
     }
 
     pub(crate) fn contains_pane(&self, pane_id: u64) -> bool {
-        match self {
-            Self::Pane(id) => *id == pane_id,
-            Self::Split { first, second, .. } => {
-                first.contains_pane(pane_id) || second.contains_pane(pane_id)
-            }
-        }
+        zetta_layout::contains_pane(self, pane_id)
     }
 
     /// Every pane this layout places, in left-to-right, top-to-bottom order.
@@ -678,18 +540,8 @@ impl PaneLayout {
     /// away a `Vec` for every split on the way up.
     pub(crate) fn pane_ids(&self) -> Vec<u64> {
         let mut ids = Vec::new();
-        self.collect_pane_ids(&mut ids);
+        zetta_layout::collect_pane_ids(self, &mut ids);
         ids
-    }
-
-    fn collect_pane_ids(&self, ids: &mut Vec<u64>) {
-        match self {
-            Self::Pane(id) => ids.push(*id),
-            Self::Split { first, second, .. } => {
-                first.collect_pane_ids(ids);
-                second.collect_pane_ids(ids);
-            }
-        }
     }
 
     /// Moves `active_pane` one step in `direction`, swapping it (and, when
@@ -697,52 +549,7 @@ impl PaneLayout {
     /// nearest ancestor split on the matching axis. Returns `false` if there
     /// is no such ancestor (the pane is already at that edge of the layout).
     pub(crate) fn move_pane(&mut self, active_pane: u64, direction: PaneDirection) -> bool {
-        let (axis, toward_first) = match direction {
-            PaneDirection::Left => (SplitAxis::Vertical, true),
-            PaneDirection::Right => (SplitAxis::Vertical, false),
-            PaneDirection::Up => (SplitAxis::Horizontal, true),
-            PaneDirection::Down => (SplitAxis::Horizontal, false),
-        };
-        self.move_pane_inner(active_pane, axis, toward_first)
-            .unwrap_or(false)
-    }
-
-    fn move_pane_inner(
-        &mut self,
-        pane_id: u64,
-        axis: SplitAxis,
-        toward_first: bool,
-    ) -> Option<bool> {
-        let Self::Split {
-            axis: split_axis,
-            first_ratio,
-            first,
-            second,
-        } = self
-        else {
-            return None;
-        };
-        if first.contains_pane(pane_id) {
-            if let Some(handled) = first.move_pane_inner(pane_id, axis, toward_first) {
-                return Some(handled);
-            }
-            (*split_axis == axis && !toward_first).then(|| {
-                std::mem::swap(first, second);
-                *first_ratio = PANE_SPLIT_RATIO_SCALE - *first_ratio;
-                true
-            })
-        } else if second.contains_pane(pane_id) {
-            if let Some(handled) = second.move_pane_inner(pane_id, axis, toward_first) {
-                return Some(handled);
-            }
-            (*split_axis == axis && toward_first).then(|| {
-                std::mem::swap(first, second);
-                *first_ratio = PANE_SPLIT_RATIO_SCALE - *first_ratio;
-                true
-            })
-        } else {
-            None
-        }
+        zetta_layout::move_pane(self, active_pane, direction)
     }
 
     /// Swaps the positions of two panes anywhere in the layout, regardless of
@@ -753,28 +560,8 @@ impl PaneLayout {
         if first == second || !self.contains_pane(first) || !self.contains_pane(second) {
             return false;
         }
-        self.swap_panes_inner(first, second);
+        zetta_layout::swap_pane_ids(self, first, second);
         true
-    }
-
-    fn swap_panes_inner(&mut self, first: u64, second: u64) {
-        match self {
-            Self::Pane(id) => {
-                if *id == first {
-                    *id = second;
-                } else if *id == second {
-                    *id = first;
-                }
-            }
-            Self::Split {
-                first: first_child,
-                second: second_child,
-                ..
-            } => {
-                first_child.swap_panes_inner(first, second);
-                second_child.swap_panes_inner(first, second);
-            }
-        }
     }
 
     /// Finds the pane to focus when moving `direction` from `active`.

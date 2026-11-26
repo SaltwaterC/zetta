@@ -15,6 +15,16 @@ pub(super) use relay::*;
 mod exclusive;
 pub(super) use exclusive::*;
 
+/// Which pane is being attached, and what the reply describes it with: the
+/// session's state and catalogue summary, read under the same lock the attach
+/// is decided under.
+pub(super) struct AttachTarget {
+    pub(super) session_id: u64,
+    pub(super) pane_id: u64,
+    pub(super) state: serde_json::Value,
+    pub(super) summary: Box<BackgroundSessionSummary>,
+}
+
 /// Who is attaching, carried through the phases of one attach.
 #[derive(Clone)]
 pub(super) struct Attacher {
@@ -95,6 +105,12 @@ pub(super) fn attach(
             }
         },
     };
+    let target = AttachTarget {
+        session_id,
+        pane_id,
+        state,
+        summary,
+    };
     let Some(pane) = session.panes.iter_mut().find(|pane| pane.id == pane_id) else {
         return respond_unlocked(
             sessions,
@@ -122,9 +138,7 @@ pub(super) fn attach(
         pane.attachment_client_id = None;
     }
     if (stream_only || force_shared) && matches!(pane.attachment, Attachment::Shared(_)) {
-        return attach_shared(
-            daemon, sessions, session_id, pane_id, attacher, state, summary, connection, None,
-        );
+        return attach_shared(daemon, sessions, target, attacher, connection, None);
     }
     if force_shared {
         return respond_unlocked(
@@ -140,19 +154,14 @@ pub(super) fn attach(
         return attach_exclusive(
             daemon,
             sessions,
-            session_id,
-            pane_id,
+            target,
             client_process_id,
             &attacher.client_id,
-            state,
-            summary,
             connection,
         );
     }
     if matches!(pane.attachment, Attachment::Shared(_)) {
-        return attach_shared(
-            daemon, sessions, session_id, pane_id, attacher, state, summary, connection, None,
-        );
+        return attach_shared(daemon, sessions, target, attacher, connection, None);
     }
 
     // Another client holds the pane, or is already handing it over. From here
@@ -200,7 +209,6 @@ pub(super) fn attach(
     // holder can re-attach concurrently with this waiter and its connection
     // may close before the waiter gets the condvar wake-up.
     pane.handover_waiters = pane.handover_waiters.saturating_add(1);
-    let _ = pane;
 
     await_handover(daemon, sessions, session_id, pane_id, &attacher, connection)
 }
@@ -319,22 +327,20 @@ fn out_of_scope_refusal(session_id: u64, owner: Option<ProcessIdentity>) -> Resp
 /// Takes the sessions guard by value: the publish that announces the attach
 /// must not run while the lock is still held — the caller's guard would dead
 /// lock against itself.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the attach request's decoded fields, plus the daemon, the sessions \
-              guard this must take by value, and the connection to answer on"
-)]
 pub(super) fn attach_exclusive(
     daemon: &Arc<Daemon>,
     mut sessions: MutexGuard<'_, Vec<Session>>,
-    session_id: u64,
-    pane_id: u64,
+    target: AttachTarget,
     client_process_id: u32,
     client_id: &ClientId,
-    state: serde_json::Value,
-    summary: Box<BackgroundSessionSummary>,
     connection: &mut Connection,
 ) -> Result<()> {
+    let AttachTarget {
+        session_id,
+        pane_id,
+        state,
+        summary,
+    } = target;
     let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
         return respond_unlocked(
             sessions,
@@ -382,7 +388,7 @@ pub(super) fn attach_exclusive(
             summary,
             handles: handles.values,
         },
-        &handles.attachments,
+        &handles.attachments.borrowed(),
     ) {
         release_failed_handover(daemon, daemon.sessions(), session_id, pane_id, client_id);
         return Err(error);
@@ -403,22 +409,20 @@ pub(super) fn attach_exclusive(
 /// dropped, because this function then serves the client's connection for its
 /// whole lifetime, and that serve loop re-locks the sessions mutex on every
 /// input and resize.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the attach request's decoded fields, plus the daemon, the sessions \
-              guard this must take by value, and the connection to answer on"
-)]
 pub(super) fn attach_shared(
     daemon: &Arc<Daemon>,
     mut sessions: MutexGuard<'_, Vec<Session>>,
-    session_id: u64,
-    pane_id: u64,
+    target: AttachTarget,
     attacher: Attacher,
-    state: serde_json::Value,
-    summary: Box<BackgroundSessionSummary>,
     connection: &mut Connection,
     spawned_state: Option<crate::messages::SharedSessionState>,
 ) -> Result<()> {
+    let AttachTarget {
+        session_id,
+        pane_id,
+        state,
+        summary,
+    } = target;
     let Attacher {
         client_process_id,
         peer_process_id,

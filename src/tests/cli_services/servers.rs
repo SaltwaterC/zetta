@@ -49,9 +49,17 @@ fn http_server_parser_accepts_dotfile_and_host_flags() {
     };
     let command = |args: &[&str]| match parse(args).unwrap() {
         CliServiceCommand::Http(command) => command,
-        #[allow(
-            unreachable_patterns,
-            reason = "the only variant when http-server is the sole CLI service feature"
+        #[cfg_attr(
+            not(any(
+                feature = "serial-console",
+                feature = "tftp-server",
+                feature = "notifications",
+                feature = "clipboard"
+            )),
+            expect(
+                unreachable_patterns,
+                reason = "the only variant when http-server is the sole CLI service feature"
+            )
         )]
         _ => panic!("expected an HTTP server command"),
     };

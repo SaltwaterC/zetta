@@ -149,9 +149,9 @@ mod native {
 
     use windows::{
         Win32::{
-            Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree},
+            Foundation::{HANDLE, HLOCAL, LocalFree},
             Security::{
-                ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+                ACE_HEADER, ACL,
                 Authorization::{ConvertSidToStringSidW, GetNamedSecurityInfoW, SE_FILE_OBJECT},
                 DACL_SECURITY_INFORMATION, GetAce, GetTokenInformation, INHERIT_ONLY_ACE,
                 OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, TOKEN_QUERY, TOKEN_USER,
@@ -214,10 +214,10 @@ mod native {
         let mut owner = PSID::default();
         let mut dacl: *mut ACL = std::ptr::null_mut();
         let mut security = PSECURITY_DESCRIPTOR::default();
-        // SAFETY: every output pointer is a live local; the descriptor that
-        // `owner` and `dacl` point into is freed only after they are read.
-        unsafe {
-            let status = GetNamedSecurityInfoW(
+        // SAFETY: `name` is a NUL-terminated HSTRING and every output
+        // pointer is a live local.
+        let status = unsafe {
+            GetNamedSecurityInfoW(
                 &name,
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
@@ -226,108 +226,161 @@ mod native {
                 Some(&mut dacl),
                 None,
                 &mut security,
-            );
-            if status.is_err() {
-                return Err(io::Error::from_raw_os_error(status.0 as i32));
-            }
-            let descriptor = describe(owner, dacl);
-            LocalFree(Some(HLOCAL(security.0)));
-            descriptor
+            )
+        };
+        if status.is_err() {
+            return Err(io::Error::from_raw_os_error(status.0 as i32));
         }
+        // SAFETY: the call succeeded, so `owner` and `dacl` are null or point
+        // into `security`, which is freed only below, after they are read.
+        let descriptor = unsafe { describe(owner, dacl) };
+        // SAFETY: GetNamedSecurityInfoW allocated `security` for the caller to
+        // LocalFree, and nothing reads it, `owner` or `dacl` after this.
+        unsafe { LocalFree(Some(HLOCAL(security.0))) };
+        descriptor
     }
+
+    /// Where an `ACCESS_ALLOWED_ACE`'s mask and SID start: after the 4-byte
+    /// header, and after the mask.
+    const MASK_OFFSET: usize = size_of::<ACE_HEADER>();
+    const SID_OFFSET: usize = MASK_OFFSET + size_of::<u32>();
 
     /// # Safety
     ///
     /// `owner` and `dacl` must be null or point into a live security
     /// descriptor.
     unsafe fn describe(owner: PSID, dacl: *const ACL) -> io::Result<Descriptor> {
-        unsafe {
-            let owner = if owner.is_invalid() {
-                None
-            } else {
-                Some(sid_string(owner)?)
-            };
-            if dacl.is_null() {
-                return Ok(Descriptor {
-                    owner,
-                    grants: None,
-                });
+        let owner = if owner.is_invalid() {
+            None
+        } else {
+            // SAFETY: `owner` is non-null here, and the caller guarantees it
+            // points to a SID inside a live descriptor.
+            Some(unsafe { sid_string(owner) }?)
+        };
+        if dacl.is_null() {
+            return Ok(Descriptor {
+                owner,
+                grants: None,
+            });
+        }
+        let mut grants = Vec::new();
+        // SAFETY: `dacl` is non-null here, and the caller guarantees it points
+        // to an ACL inside a live descriptor.
+        let ace_count = unsafe { (*dacl).AceCount };
+        for index in 0..u32::from(ace_count) {
+            let mut ace = std::ptr::null_mut();
+            // SAFETY: `dacl` is a live ACL holding more than `index` entries,
+            // and `ace` is a writable out-pointer.
+            unsafe { GetAce(dacl, index, &mut ace) }.map_err(io::Error::other)?;
+            // SAFETY: GetAce succeeded, so `ace` points to that entry inside
+            // the live ACL; every entry starts with a 4-byte-aligned
+            // ACE_HEADER.
+            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+            let kind = u32::from(header.AceType);
+            if [
+                ACCESS_DENIED_ACE_TYPE,
+                ACCESS_DENIED_OBJECT_ACE_TYPE,
+                ACCESS_DENIED_CALLBACK_ACE_TYPE,
+                ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE,
+            ]
+            .contains(&kind)
+            {
+                continue;
             }
-            let mut grants = Vec::new();
-            for index in 0..u32::from((*dacl).AceCount) {
-                let mut ace = std::ptr::null_mut();
-                GetAce(dacl, index, &mut ace).map_err(io::Error::other)?;
-                let header = &*ace.cast::<ACE_HEADER>();
-                let kind = u32::from(header.AceType);
-                if [
-                    ACCESS_DENIED_ACE_TYPE,
-                    ACCESS_DENIED_OBJECT_ACE_TYPE,
-                    ACCESS_DENIED_CALLBACK_ACE_TYPE,
-                    ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE,
-                ]
-                .contains(&kind)
-                {
-                    continue;
-                }
-                // Every DACL entry keeps its mask right after the header; only
-                // these two keep the SID right after the mask.
-                let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-                let trustee = if kind == ACCESS_ALLOWED_ACE_TYPE
-                    || kind == ACCESS_ALLOWED_CALLBACK_ACE_TYPE
-                {
-                    Some(sid_string(PSID(
-                        (&raw const allowed.SidStart).cast_mut().cast(),
-                    ))?)
+            // Every DACL entry keeps its mask right after the header; only
+            // these two keep the SID right after the mask. The sizes are
+            // checked against the entry's own `AceSize`, and the fields read
+            // unaligned, rather than trusting the entry to be well formed.
+            let size = usize::from(header.AceSize);
+            let malformed = || io::Error::new(io::ErrorKind::InvalidData, "malformed ACL entry");
+            if size < MASK_OFFSET + size_of::<u32>() {
+                return Err(malformed());
+            }
+            let ace = ace.cast::<u8>().cast_const();
+            // SAFETY: the entry is `size` bytes long inside the live ACL, and
+            // the mask's four bytes end within it.
+            let mask = unsafe { ace.add(MASK_OFFSET).cast::<u32>().read_unaligned() };
+            let trustee =
+                if kind == ACCESS_ALLOWED_ACE_TYPE || kind == ACCESS_ALLOWED_CALLBACK_ACE_TYPE {
+                    // A SID is a revision byte, a sub-authority count, a 6-byte
+                    // authority and four bytes per sub-authority.
+                    if size < SID_OFFSET + 8 {
+                        return Err(malformed());
+                    }
+                    // SAFETY: the count byte, at offset 1 of the SID, lies within
+                    // the `size` bytes just checked.
+                    let sub_authorities = usize::from(unsafe { *ace.add(SID_OFFSET + 1) });
+                    if size < SID_OFFSET + 8 + 4 * sub_authorities {
+                        return Err(malformed());
+                    }
+                    // SAFETY: these two entry types store their SID inline from
+                    // `SID_OFFSET`, and the whole SID was just checked to lie
+                    // within the entry.
+                    Some(unsafe { sid_string(PSID(ace.add(SID_OFFSET).cast_mut().cast())) }?)
                 } else {
                     None
                 };
-                grants.push(Grant {
-                    trustee,
-                    mask: allowed.Mask,
-                    inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE.0 != 0,
-                });
-            }
-            Ok(Descriptor {
-                owner,
-                grants: Some(grants),
-            })
+            grants.push(Grant {
+                trustee,
+                mask,
+                inherit_only: u32::from(header.AceFlags) & INHERIT_ONLY_ACE.0 != 0,
+            });
         }
+        Ok(Descriptor {
+            owner,
+            grants: Some(grants),
+        })
     }
 
     /// # Safety
     ///
     /// `sid` must point to a valid SID.
     unsafe fn sid_string(sid: PSID) -> io::Result<String> {
-        unsafe {
-            let mut text = PWSTR::null();
-            ConvertSidToStringSidW(sid, &mut text).map_err(io::Error::other)?;
-            let string = text.to_string().map_err(io::Error::other);
-            LocalFree(Some(HLOCAL(text.0.cast())));
-            string
-        }
+        let mut text = PWSTR::null();
+        // SAFETY: the caller guarantees `sid` is a valid SID, and `text` is a
+        // writable out-pointer.
+        unsafe { ConvertSidToStringSidW(sid, &mut text) }.map_err(io::Error::other)?;
+        // SAFETY: on success `text` is a NUL-terminated wide string the call
+        // allocated.
+        let string = unsafe { text.to_string() }.map_err(io::Error::other);
+        // SAFETY: ConvertSidToStringSidW allocated `text` for the caller to
+        // LocalFree, and it is not read after this.
+        unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+        string
     }
 
     fn current_user_sid() -> io::Result<String> {
-        // SAFETY: the token handle is closed before returning, and the buffer
-        // is sized by the first query and aligned for `TOKEN_USER`.
-        unsafe {
-            let mut token = HANDLE::default();
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
-                .map_err(io::Error::other)?;
-            let mut length = 0_u32;
-            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut length);
-            let mut buffer = vec![0_u64; (length as usize).div_ceil(8)];
-            let queried = GetTokenInformation(
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+
+        let mut opened = HANDLE::default();
+        // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no
+        // closing, and `opened` is a writable out-pointer.
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut opened) }
+            .map_err(io::Error::other)?;
+        // SAFETY: the call succeeded, so `opened` is a token handle nothing
+        // else owns; it is closed when this is dropped.
+        let owned = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+        let token = HANDLE(owned.as_raw_handle());
+        let mut length = 0_u32;
+        // SAFETY: `token` is open; with no buffer this only writes the size
+        // the information needs into `length`.
+        let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut length) };
+        let mut buffer = vec![0_u64; (length as usize).div_ceil(8)];
+        // SAFETY: `buffer` is u64-aligned (enough for TOKEN_USER) and at least
+        // `length` bytes, the size passed; `length` is writable.
+        let queried = unsafe {
+            GetTokenInformation(
                 token,
                 TokenUser,
                 Some(buffer.as_mut_ptr().cast()),
                 length,
                 &mut length,
-            );
-            let _ = CloseHandle(token);
-            queried.map_err(io::Error::other)?;
-            sid_string((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid)
-        }
+            )
+        };
+        queried.map_err(io::Error::other)?;
+        // SAFETY: the query succeeded, so `buffer` starts with a TOKEN_USER
+        // whose SID points into `buffer`, which outlives the call.
+        unsafe { sid_string((*buffer.as_ptr().cast::<TOKEN_USER>()).User.Sid) }
     }
 }
 

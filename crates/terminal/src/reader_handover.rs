@@ -160,8 +160,8 @@ impl Terminal {
         if pty_tx.take().map(|pty_tx| pty_tx.shutdown()).is_some() {
             self.held_input.begin();
         }
-        // Joining drops the loop's `EventLoop`, and with it the pty master this
-        // borrows for foreground-process lookups.
+        // Joining drops the loop's `EventLoop`, and with it the pty master;
+        // the duplicate kept for foreground-process lookups must not outlive it.
         info.close_pty_handle();
         RetiredReader {
             pty_loop: io.take(),

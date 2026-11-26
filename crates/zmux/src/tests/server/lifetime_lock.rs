@@ -37,6 +37,7 @@ fn the_lock_is_private_and_never_inherited() {
         .unwrap();
     // A shell that inherited the descriptor would hold the lock for as long as
     // it lived, after the daemon that took it had gone.
+    // SAFETY: `F_GETFD` only reads flags of the descriptor `lock` still owns.
     let flags = unsafe { libc::fcntl(lock.raw_fd(), libc::F_GETFD) };
     assert_ne!(flags & libc::FD_CLOEXEC, 0);
     let mode = std::fs::metadata(LifetimeLock::path(directory.path()))
@@ -92,9 +93,31 @@ fn a_claim_while_another_holds_the_lock_is_refused() {
 }
 
 #[cfg(unix)]
+const REPLACEMENT_CHILD: &str = "ZMUX_LIFETIME_LOCK_TEST_REPLACEMENT_CHILD";
+
+/// The descriptor has to be inheritable for the hand-over to be real, and any
+/// process another test starts while it is would share the lock for as long as
+/// it lives, so the final acquisition would fail. The test runs itself again,
+/// alone, in a child process, and does the work there.
+#[cfg(unix)]
 #[test]
 fn a_replacement_takes_over_the_descriptor_that_holds_the_lock() {
     use std::os::fd::IntoRawFd as _;
+
+    if std::env::var_os(REPLACEMENT_CHILD).is_none() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "server::lifetime_lock::tests::a_replacement_takes_over_the_descriptor_that_holds_the_lock",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(REPLACEMENT_CHILD, "1")
+            .status()
+            .unwrap();
+        assert!(status.success(), "the replacement child failed: {status}");
+        return;
+    }
 
     let directory = private_directory();
     let lock = LifetimeLock::try_acquire(directory.path())
@@ -111,6 +134,7 @@ fn a_replacement_takes_over_the_descriptor_that_holds_the_lock() {
             .unwrap()
             .is_none()
     );
+    // SAFETY: `F_GETFD` only reads flags of the descriptor `adopted` owns.
     let flags = unsafe { libc::fcntl(adopted.raw_fd(), libc::F_GETFD) };
     assert_ne!(flags & libc::FD_CLOEXEC, 0);
 

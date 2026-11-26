@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     fs::File,
     io::{ErrorKind, Read, Write},
-    os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -146,15 +146,19 @@ fn start_receive<T: ReceiveData>(
     pipe.read
         .set_non_blocking(true)
         .context("making the clipboard pipe non-blocking")?;
-    offer.receive_data(mime_type.to_string(), unsafe {
-        BorrowedFd::borrow_raw(pipe.write.as_raw_fd())
-    });
+    offer.receive_data(mime_type.to_string(), pipe.write.as_fd());
     drop(pipe.write);
     connection
         .flush()
         .context("flushing the clipboard receive request")?;
-    // SAFETY: `into_raw_fd` hands over sole ownership of the descriptor.
-    Ok(unsafe { File::from_raw_fd(pipe.read.into_raw_fd()) })
+    // A duplicate shares the read end's non-blocking flag, and `pipe.read`
+    // closes its own copy when it drops.
+    Ok(File::from(
+        pipe.read
+            .as_fd()
+            .try_clone_to_owned()
+            .context("taking the clipboard pipe's read end")?,
+    ))
 }
 
 fn plan<T: ReceiveData + Proxy + Clone>(
@@ -387,7 +391,9 @@ pub(crate) fn read_pipe<D: 'static>(
                 let state = state.clone();
                 let loop_handle = loop_handle.clone();
                 move |_, pipe, _| {
-                    let pipe = unsafe { pipe.get_mut() };
+                    // Read through `&File`: `get_mut` is `unsafe` only because
+                    // it could replace the descriptor the loop is polling.
+                    let mut pipe: &File = pipe;
                     let mut state = state.borrow_mut();
                     let mut chunk = [0u8; 64 * 1024];
                     loop {
@@ -641,7 +647,7 @@ mod tests {
     fn pipe() -> (File, filedescriptor::FileDescriptor) {
         let mut pipe = Pipe::new().unwrap();
         pipe.read.set_non_blocking(true).unwrap();
-        let read = unsafe { File::from_raw_fd(pipe.read.into_raw_fd()) };
+        let read = File::from(pipe.read.as_fd().try_clone_to_owned().unwrap());
         (read, pipe.write)
     }
 

@@ -132,7 +132,7 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
         metadata: pane_summary(0),
     };
     let replacement = |draft_id, ratio| zmux::messages::SharedDraftLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: zmux::protocol::SplitAxis::Vertical,
         first_ratio: ratio,
         first: Box::new(zmux::messages::SharedDraftLayout::Existing {
             pane_id: pane.pane_id,
@@ -145,7 +145,7 @@ fn shared_batch_spawns_commit_exact_geometry_and_rebase_same_target_additions() 
         operation_id: client.next_shared_operation_id(),
         target_pane_id: Some(pane.pane_id),
         replacement: zmux::messages::SharedDraftLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: zmux::protocol::SplitAxis::Horizontal,
             first_ratio: 220,
             first: Box::new(replacement(90, 210)),
             second: Box::new(zmux::messages::SharedDraftLayout::Draft { draft_id: 999 }),
@@ -466,11 +466,11 @@ fn headless_create_commits_a_recursive_layout_and_is_idempotent() {
         operation_id,
         title: "headless".to_owned(),
         replacement: SharedDraftLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: zmux::protocol::SplitAxis::Horizontal,
             first_ratio: 600,
             first: Box::new(SharedDraftLayout::Draft { draft_id: 1 }),
             second: Box::new(SharedDraftLayout::Split {
-                axis: "vertical".to_owned(),
+                axis: zmux::protocol::SplitAxis::Vertical,
                 first_ratio: 400,
                 first: Box::new(SharedDraftLayout::Draft { draft_id: 2 }),
                 second: Box::new(SharedDraftLayout::Draft { draft_id: 3 }),
@@ -498,14 +498,14 @@ fn headless_create_commits_a_recursive_layout_and_is_idempotent() {
             first_ratio: 600,
             second,
             ..
-        } if axis == "horizontal"
+        } if *axis == zmux::protocol::SplitAxis::Horizontal
             && matches!(
                 second.as_ref(),
                 BackgroundPaneLayout::Split {
                     axis,
                     first_ratio: 400,
                     ..
-                } if axis == "vertical"
+                } if *axis == zmux::protocol::SplitAxis::Vertical
             )
     ));
     assert_eq!(created.state.operation_receipts.len(), 1);
@@ -668,7 +668,7 @@ fn splitting_a_pane_created_by_an_earlier_split_is_accepted() {
             operation_id: client.next_shared_operation_id(),
             target_pane_id: Some(pane.pane_id),
             replacement: zmux::messages::SharedDraftLayout::Split {
-                axis: "vertical".to_owned(),
+                axis: zmux::protocol::SplitAxis::Vertical,
                 first_ratio: 200,
                 first: Box::new(zmux::messages::SharedDraftLayout::Existing {
                     pane_id: pane.pane_id,
@@ -692,7 +692,7 @@ fn splitting_a_pane_created_by_an_earlier_split_is_accepted() {
         operation_id: client.next_shared_operation_id(),
         target_pane_id: Some(second_pane),
         replacement: zmux::messages::SharedDraftLayout::Split {
-            axis: "vertical".to_owned(),
+            axis: zmux::protocol::SplitAxis::Vertical,
             first_ratio: 200,
             first: Box::new(zmux::messages::SharedDraftLayout::Existing {
                 pane_id: second_pane,
@@ -806,7 +806,7 @@ fn pruning_an_exited_shared_pane_keeps_the_next_split_valid() {
         operation_id: client.next_shared_operation_id(),
         target_pane_id: Some(pane.pane_id),
         replacement: zmux::messages::SharedDraftLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: zmux::protocol::SplitAxis::Horizontal,
             first_ratio: 200,
             first: Box::new(zmux::messages::SharedDraftLayout::Existing {
                 pane_id: pane.pane_id,

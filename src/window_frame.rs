@@ -19,6 +19,13 @@ pub(crate) fn window_close_button_on_left(layout: WindowButtonLayout) -> bool {
         || (!layout.right.contains(&Some(WindowButton::Close)) && cfg!(target_os = "macos"))
 }
 
+#[cfg_attr(
+    not(linux_like),
+    expect(
+        unused_variables,
+        reason = "only Linux and FreeBSD ask the window for its button layout"
+    )
+)]
 pub(crate) fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
     #[cfg(target_os = "linux")]
     if let Some(layout) = read_gnome_button_layout() {
@@ -33,7 +40,6 @@ pub(crate) fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
 
     #[cfg(target_os = "macos")]
     {
-        let _ = cx;
         WindowButtonLayout {
             left: [None; MAX_BUTTONS_PER_SIDE],
             right: [None; MAX_BUTTONS_PER_SIDE],
@@ -42,7 +48,6 @@ pub(crate) fn system_window_button_layout(cx: &App) -> WindowButtonLayout {
 
     #[cfg(not(any(linux_like, target_os = "macos")))]
     {
-        let _ = cx;
         WindowButtonLayout {
             left: [None; MAX_BUTTONS_PER_SIDE],
             right: [
@@ -269,14 +274,16 @@ pub(crate) fn bounds_touch_at_least_two_edges(
     horizontal_edges + vertical_edges >= 2
 }
 
+#[expect(
+    unused_variables,
+    reason = "each platform reads a different subset: Linux the decorations, macOS and Windows the window"
+)]
 fn compact_tab_corner_state(
     window: &Window,
     cx: &App,
     client_decorations: bool,
     tiling: Tiling,
 ) -> WindowCornerState {
-    let _ = (window, client_decorations, tiling, cx);
-
     #[cfg(linux_like)]
     {
         linux_corner_state(client_decorations, tiling)

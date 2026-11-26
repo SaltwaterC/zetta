@@ -119,7 +119,7 @@ pub struct PaneTemplateEnvironmentForm {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneTemplateOverlayForm {
     pub text: TextField,
-    pub size: Option<PaneSplitOverlaySize>,
+    pub size: Option<OverlayFontSize>,
     pub opacity: TextField,
     pub color: TextField,
 }
@@ -556,7 +556,7 @@ impl PaneTemplateNodeForm {
                         overlay_object.insert("text".into(), json!(overlay.text.text));
                     }
                     if let Some(size) = overlay.size {
-                        overlay_object.insert("size".into(), json!(size.as_str()));
+                        overlay_object.insert("size".into(), json!(size.cli_name()));
                     }
                     if !overlay.opacity.text.trim().is_empty() {
                         overlay_object.insert(

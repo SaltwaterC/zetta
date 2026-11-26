@@ -1344,3 +1344,50 @@ fn rotating_disk_segments_leaves_other_panes_live_and_keeps_output_in_order() {
     client.kill(echo.session_id).unwrap();
     client.kill(session_id).unwrap();
 }
+
+/// Closing one pane of an ordinary tab must not write that tab to disk.
+///
+/// Nothing asked to keep it, and no window has published its tab state yet, so
+/// the record would carry a null state. A daemon that then died with the tab
+/// still open left it behind, and the next window was offered a "disk session"
+/// it could not rebuild: "invalid type: null, expected struct TabState".
+#[cfg(feature = "session-persistence")]
+#[test]
+fn closing_a_pane_of_a_tab_nobody_detached_writes_no_disk_record() {
+    let identity = age::x25519::Identity::generate();
+    let daemon = TestDaemon::start_with_recipient(&identity.to_public().to_string());
+    let client = daemon.client();
+    let first = client
+        .spawn(spawn_request(None, "printf first-ready; sleep 60"))
+        .unwrap();
+    let second = client
+        .spawn(spawn_request(
+            Some(first.session_id),
+            "printf second-ready; sleep 60",
+        ))
+        .unwrap();
+    let first_descriptor = std::fs::File::from(first.descriptor);
+    let second_descriptor = std::fs::File::from(second.descriptor);
+    read_until(&first_descriptor, "first-ready");
+    read_until(&second_descriptor, "second-ready");
+
+    client
+        .discard_pane(first.session_id, second.pane_id)
+        .unwrap();
+
+    let persistence = daemon.sessions_dir().join("persistence");
+    assert!(
+        !persistence
+            .join(format!("session-{}.age", first.session_id))
+            .exists(),
+        "a private tab was written to disk when one of its panes closed"
+    );
+    let manifest: serde_json::Value = std::fs::read(persistence.join("manifest.json")).map_or_else(
+        |_| serde_json::json!({ "records": [] }),
+        |bytes| serde_json::from_slice(&bytes).unwrap(),
+    );
+    assert_eq!(manifest["records"], serde_json::json!([]), "{manifest}");
+
+    client.kill(first.session_id).unwrap();
+    drop(second_descriptor);
+}

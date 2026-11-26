@@ -1408,9 +1408,9 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -2391,6 +2391,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "memchr",
+ "rustix",
  "tempfile",
  "windows 0.61.3",
  "zetta_cli_help",
@@ -2464,6 +2465,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zetta_layout"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "zetta_profiles"
 version = "0.1.0"
 dependencies = [
@@ -2497,6 +2505,7 @@ dependencies = [
  "libc",
  "log",
  "polling",
+ "rustix",
  "serde",
  "serde_json",
  "signal-hook",
@@ -2508,6 +2517,7 @@ dependencies = [
  "zclip",
  "zeroize",
  "zetta_cli_help",
+ "zetta_layout",
  "zetta_profiles",
  "zetta_sync",
 ]

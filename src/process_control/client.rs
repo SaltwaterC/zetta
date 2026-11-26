@@ -334,7 +334,7 @@ impl RunWaitConnection {
         )?;
         let response = read_message::<ControlResponse>(&mut self.stream)?;
         anyhow::ensure!(
-            response.status == "ok",
+            response.status == ControlStatus::Ok,
             "the Zetta process did not acknowledge the run result"
         );
         Ok(())
@@ -368,8 +368,8 @@ pub(crate) fn request_process_run_wait(
         },
     )?;
     let response = read_message::<ControlResponse>(&mut stream)?;
-    match response.status.as_str() {
-        "ready" => Ok(RunWaitConnection {
+    match response.status {
+        ControlStatus::Ready => Ok(RunWaitConnection {
             stream,
             id: response
                 .run_id
@@ -377,14 +377,14 @@ pub(crate) fn request_process_run_wait(
             token: endpoint.token,
             command,
         }),
-        "failed" | "rejected" => {
+        ControlStatus::Failed | ControlStatus::Rejected => {
             let message = response.error.map_or_else(
                 || "run dependencies were not satisfied".to_owned(),
                 |error| error.message,
             );
             anyhow::bail!("{message}");
         }
-        status => anyhow::bail!("unexpected response to run_wait: {status}"),
+        status => anyhow::bail!("unexpected response to run_wait: {status:?}"),
     }
 }
 
@@ -517,7 +517,7 @@ fn send_get_silent_mode_request(
         },
     )?;
     anyhow::ensure!(
-        response.status == "ok",
+        response.status == ControlStatus::Ok,
         "target process rejected silent mode query"
     );
     Ok(response.silent_mode)
@@ -636,7 +636,7 @@ fn send_list_pane_labels_request(
             ..Default::default()
         },
     )?;
-    if response.status == "ok" {
+    if response.status == ControlStatus::Ok {
         return Ok(Some(response.pane_labels));
     }
     if let Some(error) = response.error {
@@ -730,7 +730,7 @@ fn send_set_theme_request(
 
 fn send_list_themes_request(endpoint: &ControlEndpoint) -> Result<Option<Vec<String>>> {
     let response = send_control_request(endpoint, "list_themes", ControlRequest::default())?;
-    Ok((response.status == "ok").then_some(response.themes))
+    Ok((response.status == ControlStatus::Ok).then_some(response.themes))
 }
 
 /// What a pane-theme query answered.
@@ -764,11 +764,11 @@ fn send_get_pane_theme_request(
             ..Default::default()
         },
     )?;
-    if response.status == "unchanged" {
+    if response.status == ControlStatus::Unchanged {
         return Ok(PaneThemeAnswer::Unchanged);
     }
     Ok(PaneThemeAnswer::Resolved {
-        name: (response.status == "ok")
+        name: (response.status == ControlStatus::Ok)
             .then_some(response.pane_theme)
             .flatten(),
         revision: response.pane_theme_revision,
@@ -835,7 +835,7 @@ fn send_control_request(
 /// Whether the target accepted the command, or the error it refused it with.
 /// A refusal with no error attached reads as "not accepted", as before.
 fn accepted_or_error(response: ControlResponse) -> Result<bool> {
-    if response.status == "ok" {
+    if response.status == ControlStatus::Ok {
         return Ok(true);
     }
     if let Some(error) = response.error {
@@ -851,7 +851,7 @@ fn send_control_command(
     command: &str,
     request: ControlRequest,
 ) -> Result<bool> {
-    Ok(send_control_request(endpoint, command, request)?.status == "ok")
+    Ok(send_control_request(endpoint, command, request)?.status == ControlStatus::Ok)
 }
 
 #[cfg(test)]

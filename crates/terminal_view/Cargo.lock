@@ -246,8 +246,7 @@ dependencies = [
 [[package]]
 name = "async-process"
 version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc50921ec0055cdd8a16de48773bfeec5c972598674347252c0399676be7da75"
+source = "git+https://github.com/zed-industries/async-process.git?rev=0b6d6713570af61806e1e5cb40e0f757cb93fd9d#0b6d6713570af61806e1e5cb40e0f757cb93fd9d"
 dependencies = [
  "async-channel",
  "async-io",
@@ -3609,9 +3608,9 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "1.1.5"
+version = "1.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "891efababe418670775f199f0d233d84843c227a0949a883ce15b37c78d6629d"
+checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
 dependencies = [
  "bitflags 2.13.2",
  "errno",
@@ -4362,6 +4361,7 @@ dependencies = [
  "percent-encoding",
  "regex",
  "release_channel",
+ "rustix",
  "schemars",
  "serde",
  "settings_content",
@@ -5463,6 +5463,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "memchr",
+ "rustix",
  "tempfile",
  "windows 0.61.3",
  "zetta_cli_help",

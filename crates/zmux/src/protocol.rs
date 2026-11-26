@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+pub use zetta_layout::SplitAxis;
+use zetta_layout::{LayoutTree, Node, NodeMut};
 
 /// The schema version written into every published catalog.
 /// A catalog carrying any other version is skipped.
@@ -17,7 +19,7 @@ pub const CATALOG_VERSION: u32 = 1;
 /// scale as Zetta's live pane tree. Keeping the default here lets older
 /// persisted summaries decode while newer shared snapshots retain resizing.
 pub const DEFAULT_BACKGROUND_PANE_SPLIT_RATIO: u16 = 500;
-pub const BACKGROUND_PANE_SPLIT_RATIO_SCALE: u16 = 1_000;
+pub const BACKGROUND_PANE_SPLIT_RATIO_SCALE: u16 = zetta_layout::SPLIT_RATIO_SCALE;
 
 /// A disk-retained session record before its encrypted payload has been
 /// opened. These fields are deliberately opaque: titles, commands, working
@@ -125,12 +127,48 @@ pub enum BackgroundPaneLayout {
         pane_id: u64,
     },
     Split {
-        axis: String,
+        axis: SplitAxis,
         #[serde(default = "default_background_pane_split_ratio")]
         first_ratio: u16,
         first: Box<BackgroundPaneLayout>,
         second: Box<BackgroundPaneLayout>,
     },
+}
+
+impl LayoutTree for BackgroundPaneLayout {
+    fn node(&self) -> Node<'_, Self> {
+        match self {
+            Self::Pane { pane_id } => Node::Pane(*pane_id),
+            Self::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            } => Node::Split {
+                axis: *axis,
+                first_ratio: *first_ratio,
+                first,
+                second,
+            },
+        }
+    }
+
+    fn node_mut(&mut self) -> NodeMut<'_, Self> {
+        match self {
+            Self::Pane { pane_id } => NodeMut::Pane(pane_id),
+            Self::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            } => NodeMut::Split {
+                axis,
+                first_ratio,
+                first,
+                second,
+            },
+        }
+    }
 }
 
 fn default_background_pane_split_ratio() -> u16 {
@@ -240,11 +278,12 @@ impl BackgroundPaneExit {
             BackgroundPaneExitReason::ExitedBeforeInput => {
                 "the shell exited before receiving user input".to_owned()
             }
-            BackgroundPaneExitReason::ForegroundCommand => self
-                .foreground_command
-                .as_deref()
-                .map(|command| format!("the shell exited while {command:?} was foreground"))
-                .unwrap_or_else(|| "the shell exited while a command was foreground".to_owned()),
+            BackgroundPaneExitReason::ForegroundCommand => {
+                self.foreground_command.as_deref().map_or_else(
+                    || "the shell exited while a command was foreground".to_owned(),
+                    |command| format!("the shell exited while {command:?} was foreground"),
+                )
+            }
         };
         if let Some(code) = self.exit_code {
             text.push_str(&format!(" (exit code {code})"));
@@ -267,3 +306,7 @@ impl std::fmt::Display for BackgroundPaneState {
         formatter.write_str(state)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/protocol.rs"]
+mod tests;

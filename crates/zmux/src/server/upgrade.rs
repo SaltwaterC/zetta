@@ -24,7 +24,10 @@ pub(super) use windows_handover::*;
 #[cfg(any(unix, windows))]
 pub(super) enum UpgradeRefused {
     Before(anyhow::Error),
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(
+        windows,
+        expect(dead_code, reason = "only the Unix exec can fail after answering")
+    )]
     AfterAnswering(anyhow::Error),
 }
 
@@ -407,11 +410,28 @@ pub(super) fn adopt_owner(owner: Option<u32>, started: Option<u64>) -> Option<Pr
 /// mechanism, so the handles are duplicated into the client's process first
 /// and travel in the message as plain values.
 pub(super) struct Handover {
-    #[cfg(unix)]
-    pub(super) attachments: Vec<std::os::fd::BorrowedFd<'static>>,
-    #[cfg(windows)]
-    pub(super) attachments: Vec<()>,
+    pub(super) attachments: Attachments,
     pub(super) values: Vec<i64>,
+}
+
+/// What travels attached to the message: on Unix the descriptors, owned
+/// rather than borrowed from the pane, because the message is sent after the
+/// sessions lock is dropped, when nothing stops the pane from going.
+#[derive(Default)]
+pub(super) struct Attachments(#[cfg(unix)] pub(super) Vec<std::os::fd::OwnedFd>);
+
+impl Attachments {
+    /// What [`Connection::send_with`](crate::transport::Connection::send_with)
+    /// takes.
+    #[cfg(unix)]
+    pub(super) fn borrowed(&self) -> Vec<std::os::fd::BorrowedFd<'_>> {
+        self.0.iter().map(std::os::fd::AsFd::as_fd).collect()
+    }
+
+    #[cfg(windows)]
+    pub(super) fn borrowed(&self) -> [(); 0] {
+        []
+    }
 }
 
 /// This process's own executable, if it can be established.

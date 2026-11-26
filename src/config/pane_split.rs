@@ -53,61 +53,24 @@ impl PaneSplitCommand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneSplitOverlay {
     pub text: Option<String>,
-    pub size: Option<PaneSplitOverlaySize>,
+    pub size: Option<OverlayFontSize>,
     pub opacity: Option<u8>,
     pub color: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneSplitOverlaySize {
-    Small,
-    Base,
-    Large,
-    ExtraLarge,
-    ExtraExtraLarge,
-    ExtraExtraExtraLarge,
-}
-
-impl PaneSplitOverlaySize {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
-        match value {
-            "sm" => Some(Self::Small),
-            "base" => Some(Self::Base),
-            "lg" => Some(Self::Large),
-            "xl" => Some(Self::ExtraLarge),
-            "2xl" => Some(Self::ExtraExtraLarge),
-            "3xl" => Some(Self::ExtraExtraExtraLarge),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Small => "sm",
-            Self::Base => "base",
-            Self::Large => "lg",
-            Self::ExtraLarge => "xl",
-            Self::ExtraExtraLarge => "2xl",
-            Self::ExtraExtraExtraLarge => "3xl",
-        }
-    }
-
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Small => "Small (sm)",
-            Self::Base => "Base",
-            Self::Large => "Large (lg)",
-            Self::ExtraLarge => "Extra large (xl)",
-            Self::ExtraExtraLarge => "2x large (2xl)",
-            Self::ExtraExtraExtraLarge => "3x large (3xl)",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneSplitAxis {
     Horizontal,
     Vertical,
+}
+
+impl From<PaneSplitAxis> for zetta_layout::SplitAxis {
+    fn from(axis: PaneSplitAxis) -> Self {
+        match axis {
+            PaneSplitAxis::Horizontal => Self::Horizontal,
+            PaneSplitAxis::Vertical => Self::Vertical,
+        }
+    }
 }
 
 impl PaneSplitAxis {
@@ -577,9 +540,8 @@ pub(super) fn parse_pane_split_overlay(value: &Value) -> Result<PaneSplitOverlay
             let size = size
                 .as_str()
                 .context("pane template overlay.size must be a string")?;
-            PaneSplitOverlaySize::parse(size).with_context(
-                || "pane template overlay.size must be one of sm, base, lg, xl, 2xl, or 3xl",
-            )
+            size.parse::<OverlayFontSize>()
+                .context("pane template overlay.size must be one of sm, base, lg, xl, 2xl, or 3xl")
         })
         .transpose()?;
     let opacity = object

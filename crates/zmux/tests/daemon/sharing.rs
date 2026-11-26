@@ -829,7 +829,7 @@ fn republishing_an_unattachable_pane_set_repairs_shared_reconnect_state() {
         .unwrap();
     assert_eq!(fourth.pane.pane_id(), 4);
     let vertical_layout = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: zmux::protocol::SplitAxis::Vertical,
         first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
         first: Box::new(BackgroundPaneLayout::Pane {
             pane_id: initial.pane_id,
@@ -911,7 +911,7 @@ fn republishing_an_unattachable_pane_set_repairs_shared_reconnect_state() {
     let mut republished = summary(initial.session_id, phantom_pane_id);
     republished.title = "recovered".to_owned();
     republished.layout = BackgroundPaneLayout::Split {
-        axis: "horizontal".to_owned(),
+        axis: zmux::protocol::SplitAxis::Horizontal,
         first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
         first: Box::new(BackgroundPaneLayout::Pane {
             pane_id: fourth.pane.pane_id(),
@@ -943,7 +943,7 @@ fn republishing_an_unattachable_pane_set_repairs_shared_reconnect_state() {
             assert_eq!(
                 state.summary.layout,
                 BackgroundPaneLayout::Split {
-                    axis: "vertical".to_owned(),
+                    axis: zmux::protocol::SplitAxis::Vertical,
                     first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
                     first: Box::new(BackgroundPaneLayout::Pane {
                         pane_id: initial.pane_id,

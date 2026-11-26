@@ -145,8 +145,8 @@ fn report_responsibility() {
     let Some(report) = std::env::var_os("ZETTA_RESPONSIBILITY_REPORT").map(PathBuf::from) else {
         return;
     };
-    // SAFETY: the terminated symbol names libSystem's PID query, and the
-    // checked pointer is converted to its exported signature.
+    // SAFETY: the name is NUL-terminated, and `RTLD_DEFAULT` searches the
+    // images already loaded.
     let symbol = unsafe {
         libc::dlsym(
             libc::RTLD_DEFAULT,
@@ -154,6 +154,9 @@ fn report_responsibility() {
         )
     };
     assert!(!symbol.is_null());
+    // SAFETY: a non-null function pointer to libSystem's
+    // `responsibility_get_pid_responsible_for_pid`, which takes and returns a
+    // `pid_t`.
     let responsible: unsafe extern "C" fn(libc::pid_t) -> libc::pid_t =
         unsafe { std::mem::transmute(symbol) };
     let pid = std::process::id();

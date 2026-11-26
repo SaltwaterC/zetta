@@ -318,7 +318,7 @@ fn pane_template_validation_reports_leaf_field_errors() {
         pane.environment.clear();
         pane.overlay = Some(PaneTemplateOverlayForm {
             text: TextField::new("overlay"),
-            size: Some(PaneSplitOverlaySize::Large),
+            size: Some(OverlayFontSize::Large),
             opacity: TextField::new("101"),
             color: TextField::new("cyan"),
         });

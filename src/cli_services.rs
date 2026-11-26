@@ -25,8 +25,6 @@ pub(crate) use tftp_setcap::{TFTP_SETCAP_HINT, parse_tftp_setcap_args, tftp_setc
 
 #[cfg(feature = "notifications")]
 mod notify_proxy;
-#[cfg(all(test, notify_cleanup_enabled))]
-pub(crate) use notification_request::NotifyCleanupCommand;
 #[cfg(all(target_os = "macos", feature = "notifications"))]
 pub(crate) use notify_proxy::macos_notification_target_for_response;
 #[cfg(notify_cleanup_enabled)]
@@ -35,6 +33,8 @@ pub(crate) use notify_proxy::{notify_cleanup_help, parse_notify_cleanup_args};
 pub(crate) use notify_proxy::{
     notify_help, parse_notify_args, requests_notify_help, run_notification_proxy,
 };
+#[cfg(all(test, notify_cleanup_enabled))]
+pub(crate) use zntfy::request::NotifyCleanupCommand;
 
 #[cfg(feature = "clipboard")]
 mod clipboard;
@@ -44,23 +44,11 @@ pub(crate) use clipboard::{copy_help, parse_copy_args, parse_paste_args, paste_h
 #[cfg(cli_services)]
 use anyhow::Result;
 
-// `zntfy` owns what a notification request is; Zetta includes that one file
-// rather than linking the crate, whose notification backends it does not use
-// on Linux or Windows.
-#[cfg_attr(
-    not(feature = "notifications"),
-    allow(
-        dead_code,
-        reason = "without the notify subcommand only the request types are used"
-    )
-)]
-#[path = "../crates/zntfy/src/request.rs"]
-mod notification_request;
+// `zntfy` owns what a notification request is. Zetta links it without its
+// `backends` feature everywhere but macOS, where it delivers through it.
 #[cfg(feature = "notifications")]
-pub(crate) use notification_request::NotificationTimeout;
-pub(crate) use notification_request::{
-    NotificationOptions, NotificationRequest, NotificationTarget,
-};
+pub(crate) use zntfy::request::NotificationTimeout;
+pub(crate) use zntfy::request::{NotificationOptions, NotificationRequest, NotificationTarget};
 
 #[cfg(cli_services)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,7 +64,7 @@ pub(crate) enum CliServiceCommand {
     #[cfg(feature = "notifications")]
     Notify(NotificationRequest),
     #[cfg(notify_cleanup_enabled)]
-    NotifyCleanup(notification_request::NotifyCleanupCommand),
+    NotifyCleanup(zntfy::request::NotifyCleanupCommand),
     #[cfg(feature = "clipboard")]
     Copy(clipboard::CopyCommand),
     #[cfg(feature = "clipboard")]
@@ -98,7 +86,7 @@ impl CliServiceCommand {
             #[cfg(feature = "notifications")]
             Self::Notify(command) => notify_proxy::run_notification_proxy(
                 command,
-                notification_request::notification_target_from_environment(),
+                zntfy::request::notification_target_from_environment(),
             ),
             #[cfg(notify_cleanup_enabled)]
             Self::NotifyCleanup(command) => notify_proxy::run_notification_cleanup_proxy(command),

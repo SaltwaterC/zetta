@@ -515,7 +515,9 @@ fn recover_empty_attached_tab_state(
 /// Builds the opaque tab state Zetta needs when a standalone `zmux create`
 /// request has never had a window to publish one. The canonical shared summary
 /// is the authority for every pane and for the recursive layout.
-fn headless_tab_state(summary: &BackgroundSessionSummary) -> crate::session_state::TabState {
+pub(super) fn headless_tab_state(
+    summary: &BackgroundSessionSummary,
+) -> crate::session_state::TabState {
     use crate::session_state::PaneState;
 
     let panes = summary
@@ -577,7 +579,7 @@ fn headless_tab_state(summary: &BackgroundSessionSummary) -> crate::session_stat
 fn headless_layout_state(
     layout: &zmux::protocol::BackgroundPaneLayout,
 ) -> crate::session_state::LayoutState {
-    use crate::session_state::{AxisState, LayoutState};
+    use crate::session_state::LayoutState;
 
     match layout {
         zmux::protocol::BackgroundPaneLayout::Pane { pane_id } => {
@@ -589,11 +591,7 @@ fn headless_layout_state(
             first,
             second,
         } => LayoutState::Split {
-            axis: if axis == "vertical" {
-                AxisState::Vertical
-            } else {
-                AxisState::Horizontal
-            },
+            axis: *axis,
             first_ratio: *first_ratio,
             first: Box::new(headless_layout_state(first)),
             second: Box::new(headless_layout_state(second)),
@@ -977,10 +975,12 @@ impl Zetta {
 
         self.build_attached_panes(
             &mut tab,
-            session_id,
+            AttachedSessionContext {
+                session_id,
+                restored: &restored_metadata,
+                runtime: &runtime,
+            },
             attached,
-            &restored_metadata,
-            &runtime,
             &mut pane_streams,
             window,
             cx,
@@ -1170,12 +1170,14 @@ where
         reader,
         writer,
         build.title.clone(),
-        build.settings.cursor_shape,
-        build.settings.alternate_scroll,
-        build.settings.max_scroll_history_lines,
-        build.window_id,
-        build.executor,
-        PathStyle::local(),
+        terminal::DisplayOnlySettings {
+            cursor_shape: build.settings.cursor_shape,
+            alternate_scroll: build.settings.alternate_scroll,
+            max_scroll_history_lines: build.settings.max_scroll_history_lines,
+            window_id: build.window_id,
+            background_executor: build.executor,
+            path_style: PathStyle::local(),
+        },
     )
     .with_raw_output()
     .with_shared_viewport(initial_viewport)
@@ -1196,28 +1198,35 @@ where
     (built, AttachedPaneRegistration::Shared(pane.clone()))
 }
 
+/// The session a batch of attached panes belongs to, and what this window
+/// knows about it: the same for every pane `build_attached_panes` builds.
+#[derive(Clone, Copy)]
+pub(super) struct AttachedSessionContext<'a> {
+    pub(super) session_id: u64,
+    pub(super) restored: &'a RestoredPaneMetadata,
+    pub(super) runtime: &'a MuxRuntime,
+}
+
 impl Zetta {
     /// Turns the descriptors the multiplexer handed over into live terminals.
     ///
     /// Each becomes an ordinary terminal view: from here on the pane behaves
     /// exactly like one this process spawned, because it is reading the same
     /// kind of descriptor through the same event loop.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "takes the tab by mutable borrow, so the rest cannot join it in \
-                  a bundle without borrowing the same tab twice"
-    )]
     pub(super) fn build_attached_panes(
         &mut self,
         tab: &mut Tab,
-        session_id: u64,
+        session: AttachedSessionContext<'_>,
         attached: Vec<(u64, AttachedPaneKind)>,
-        restored: &RestoredPaneMetadata,
-        runtime: &MuxRuntime,
         pane_streams: &mut RemotePaneStreams,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let AttachedSessionContext {
+            session_id,
+            restored,
+            runtime,
+        } = session;
         let settings = TerminalSpawnSettings::current(cx);
         for (pane_id, attached) in attached {
             let Some(pane) = tab.pane(pane_id) else {

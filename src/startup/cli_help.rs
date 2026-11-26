@@ -49,7 +49,7 @@ pub(crate) fn version_text() -> String {
     version.push_str(&format!(
         "\nCONTROL_VERSION={}\nCATALOG_VERSION={}",
         crate::process_control::CONTROL_VERSION,
-        crate::local_sessions::protocol::CATALOG_VERSION,
+        zmux::protocol::CATALOG_VERSION,
     ));
     version.push_str(&format!(
         "\nPROJECT_REGISTRY_VERSION={}\nPERFORMANCE_REPORT_VERSION={}\nZSH_LIFECYCLE_TRACKING_VERSION={}",
@@ -751,12 +751,7 @@ pub(crate) fn parse_overlay_args(args: &[OsString]) -> Result<StartupMode> {
                         .context("--size requires a font size")?
                         .to_string_lossy()
                         .into_owned();
-                    OverlayFontSize::parse(&value).with_context(|| {
-                        format!(
-                            "unknown overlay size {value:?}; expected one of {}",
-                            OverlayFontSize::CLI_NAMES.join(", ")
-                        )
-                    })
+                    value.parse::<OverlayFontSize>()
                 })?;
             }
             "--opacity" | "-o" => {

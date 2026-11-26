@@ -6,10 +6,10 @@ use std::ffi::OsString;
 
 use anyhow::Result;
 
-use crate::{
-    NOTIFICATION_WORKER_ENV, NotificationTimeout, NotifyCleanupCommand, format_help_table,
-    notification_expiry_duration, parse_notify_args, request,
-};
+use zetta_cli_help::format_help_table;
+
+use crate::notify::{NOTIFICATION_WORKER_ENV, notification_expiry_duration, parse_notify_args};
+use crate::request::{self, NotificationTimeout, NotifyCleanupCommand};
 
 pub fn notify_cleanup_help() -> String {
     format!(

@@ -37,6 +37,13 @@ use crate::worktree_detection::terminal_event_requires_worktree_detection;
 const BACKGROUND_PROCESS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        dead_code,
+        reason = "the prompt still collects identities, but only a disk resume reads them"
+    )
+)]
 pub(crate) struct DiskResumeIdentities {
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) passphrases: Vec<Option<SessionSecret>>,
@@ -346,7 +353,10 @@ impl ProtectedSessionAction {
 /// The passphrase case is a state, not an error, because it is answerable: the
 /// window asks for the identity's passphrase and comes back. Collapsing it into
 /// a failure is what made an encrypted SSH identity look like the wrong key.
-#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(dead_code, reason = "only an age build can open a sealed session key")
+)]
 pub(crate) enum SealedKeyRecovery {
     /// Not protected this way, or not something this window can open — the
     /// caller attaches without a secret and lets the daemon decide.
@@ -358,7 +368,10 @@ pub(crate) enum SealedKeyRecovery {
 
 /// As [`SealedKeyRecovery`], for a session another Zetta process is holding,
 /// where the proof rather than the secret is what the caller needs.
-#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(dead_code, reason = "only an age build can open a sealed session key")
+)]
 pub(crate) enum SealedKeyAuthorization {
     NotSealed,
     NeedsIdentityPassphrase,
@@ -387,9 +400,9 @@ pub(crate) mod shared_panes;
 pub(crate) mod zosh_panes;
 
 #[cfg(feature = "zmux")]
-use multiplexer::PreparedDetach;
-#[cfg(feature = "zmux")]
 pub(crate) use multiplexer::{AttachOutcomeSummary, RemoteAttachOutcome, load_remote_attach};
+#[cfg(feature = "zmux")]
+use multiplexer::{AttachedSessionContext, PreparedDetach};
 
 /// Nothing to prepare: without the multiplexer a tab is never handed over.
 #[cfg(not(feature = "zmux"))]
@@ -399,10 +412,6 @@ type PreparedDetach = std::convert::Infallible;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HandoverOrigin {
     /// Detached from this window at `index`; a refusal reinserts it there.
-    #[cfg_attr(
-        not(feature = "zmux"),
-        allow(dead_code, reason = "only a daemon can refuse a handover")
-    )]
     Tab { index: usize, shared: bool },
     /// Detached because the window is closing; there is nowhere to put it back.
     WindowClose,

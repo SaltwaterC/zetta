@@ -1,12 +1,9 @@
 use std::{env, path::Path};
 
+#[path = "build_support/conpty_runtime.rs"]
+mod conpty_runtime;
 #[path = "build_support/conpty_tools.rs"]
 mod conpty_tools;
-
-const CONPTY_PACKAGE_URL: &str = "https://github.com/microsoft/terminal/releases/download/v1.24.12741.0/Microsoft.Windows.Console.ConPTY.1.24.261001001.nupkg";
-const CONPTY_PACKAGE_ID: &str = "1.24.261001001";
-const CONPTY_PACKAGE_SHA256: &str =
-    "ECEAAFE3BDCC85E95D18666EB647E0B8E7E00AF45DBCAD7034CDC61C4A29FE74";
 
 fn main() {
     emit_cfg_aliases();
@@ -66,6 +63,7 @@ fn emit_cfg_aliases() {
     println!("cargo::rustc-check-cfg=cfg(cli_services)");
     println!("cargo::rustc-check-cfg=cfg(notify_cleanup_enabled)");
     println!("cargo::rustc-check-cfg=cfg(tftp_setcap)");
+    println!("cargo::rustc-check-cfg=cfg(ssh_clients)");
 
     let linux_like = matches!(
         env::var("CARGO_CFG_TARGET_OS").as_deref(),
@@ -97,6 +95,11 @@ fn emit_cfg_aliases() {
     if feature_enabled("TFTP_SERVER") || feature_enabled("TFTP_CLIENT") {
         println!("cargo::rustc-cfg=tftp_enabled");
     }
+    if feature_enabled("ZMUX") || feature_enabled("ZOSH_CLIENT") {
+        // The commands that reach a host over SSH: `mux` and `mosh`. They are
+        // what parse attached option values and complete `~/.ssh/config` hosts.
+        println!("cargo::rustc-cfg=ssh_clients");
+    }
     if feature_enabled("SERIAL_CONSOLE")
         || feature_enabled("HTTP_SERVER")
         || feature_enabled("TFTP_SERVER")
@@ -122,70 +125,7 @@ fn feature_enabled(feature: &str) -> bool {
 }
 
 fn stage_conpty_runtime() {
-    let out_dir = env::var("OUT_DIR").expect("Cargo did not provide OUT_DIR");
-    let out_dir = Path::new(&out_dir);
-    let target_dir = out_dir
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .expect("could not locate the Cargo target directory");
-    let conpty_target = target_dir.join("conpty.dll");
-    let open_console_target = target_dir.join("OpenConsole.exe");
-    let architecture =
-        env::var("CARGO_CFG_TARGET_ARCH").expect("Cargo did not provide target arch");
-    let (runtime_arch, console_arch) = match architecture.as_str() {
-        "x86_64" => ("win-x64", "x64"),
-        "aarch64" => ("win-arm64", "arm64"),
-        other => panic!("unsupported Windows architecture for ConPTY: {other}"),
-    };
-
-    let target_root = target_dir
-        .parent()
-        .expect("could not locate the Cargo target root");
-    let cache_dir = target_root
-        .join("zetta-conpty")
-        .join(CONPTY_PACKAGE_ID)
-        .join(&architecture);
-    let conpty_source = cache_dir.join("conpty.dll");
-    let open_console_source = cache_dir.join("OpenConsole.exe");
-
-    if !conpty_source.is_file() || !open_console_source.is_file() {
-        std::fs::create_dir_all(&cache_dir).expect("failed to create the ConPTY cache");
-        let archive = out_dir.join("conpty.nupkg.zip");
-        let extracted = out_dir.join("conpty");
-        conpty_tools::download(CONPTY_PACKAGE_URL, &archive);
-        conpty_tools::verify_sha256(&archive, CONPTY_PACKAGE_SHA256);
-        conpty_tools::extract(&archive, &extracted);
-
-        copy_runtime(
-            &extracted
-                .join("runtimes")
-                .join(runtime_arch)
-                .join("native")
-                .join("conpty.dll"),
-            &conpty_source,
-        );
-        copy_runtime(
-            &extracted
-                .join("build")
-                .join("native")
-                .join("runtimes")
-                .join(console_arch)
-                .join("OpenConsole.exe"),
-            &open_console_source,
-        );
-    }
-
-    copy_runtime(&conpty_source, &conpty_target);
-    copy_runtime(&open_console_source, &open_console_target);
-}
-
-fn copy_runtime(source: &Path, target: &Path) {
-    std::fs::copy(source, target).unwrap_or_else(|error| {
-        panic!(
-            "failed to stage {} as {}: {error}",
-            source.display(),
-            target.display()
-        )
-    });
+    let repository =
+        env::var("CARGO_MANIFEST_DIR").expect("Cargo did not provide the manifest directory");
+    conpty_runtime::stage(Path::new(&repository), &[conpty_runtime::profile_dir()]);
 }

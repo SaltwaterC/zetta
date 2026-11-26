@@ -125,7 +125,8 @@ fn bootstrap_application(command_line: &OsStr) -> std::io::Result<Option<Vec<u16
 /// STARTF_USEFILLATTRIBUTE preserves its default attributes through process startup,
 /// avoiding the loader-breakpoint debugger and its cost on every native shell launch.
 pub fn run_palette_bootstrap_from_env() -> Option<i32> {
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
         CreateProcessW, GetExitCodeProcess, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
         STARTF_USEFILLATTRIBUTE, STARTUPINFOW, WaitForSingleObject,
@@ -133,10 +134,16 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
     use windows::core::{PCWSTR, PWSTR};
 
     let command_line = std::env::var_os(PALETTE_BOOTSTRAP_ENV)?;
+    // SAFETY: this module is Windows-only, where `remove_var` is sound from any
+    // thread; it is also the first thing `zmux-pty`'s `main` does, before any
+    // thread exists.
     unsafe { std::env::remove_var(PALETTE_BOOTSTRAP_ENV) };
     // Clear the caller's inheritable ignore flag before spawning the shell;
     // installing a real handler alone does not clear it. Protect the supervisor
     // during startup, leaving close/logoff/shutdown to the default handler.
+    // SAFETY: `bootstrap_console_control` is a `'static` function with the
+    // `PHANDLER_ROUTINE` signature and reads no shared state; passing `None`
+    // only changes this process's Ctrl+C disposition.
     if let Err(error) = unsafe {
         windows::Win32::System::Console::SetConsoleCtrlHandler(
             Some(bootstrap_console_control),
@@ -161,6 +168,8 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
     let palette = std::env::var_os(PALETTE_HELPER_ENV)
         .and_then(|payload| payload.into_string().ok())
         .and_then(|payload| ConsolePalette::from_private_payload(&payload));
+    // SAFETY: Windows-only, where `remove_var` is sound from any thread; this
+    // still runs on `zmux-pty`'s only thread, before the child is started.
     unsafe {
         std::env::remove_var(PALETTE_HELPER_ENV);
         std::env::remove_var(PALETTE_READY_EVENT_ENV);
@@ -182,6 +191,10 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
         ..Default::default()
     };
     let mut process = PROCESS_INFORMATION::default();
+    // SAFETY: `application` and `validated` are NUL-terminated UTF-16 buffers
+    // that outlive the call, and `validated` is the mutable buffer
+    // `CreateProcessW` may write into. `startup.cb` is its own size and
+    // `process` is writable storage for the returned handles.
     let spawned = unsafe {
         CreateProcessW(
             application
@@ -202,16 +215,21 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
         eprintln!("zmux-pty: could not start console child: {error}");
         return Some(1);
     }
-    unsafe {
-        let _ = CloseHandle(process.hThread);
-    }
-    let wait = unsafe { WaitForSingleObject(process.hProcess, u32::MAX) };
+    // SAFETY: `CreateProcessW` succeeded, so this function owns both handles.
+    let (child, _thread) = unsafe {
+        (
+            OwnedHandle::from_raw_handle(process.hProcess.0),
+            OwnedHandle::from_raw_handle(process.hThread.0),
+        )
+    };
+    let child = HANDLE(child.as_raw_handle());
+    // SAFETY: the child handle is open until `child`'s owner drops, after
+    // these calls.
+    let wait = unsafe { WaitForSingleObject(child, u32::MAX) };
     let mut exit_code = 1;
-    let got_exit = wait == WAIT_OBJECT_0
-        && unsafe { GetExitCodeProcess(process.hProcess, &mut exit_code) }.is_ok();
-    unsafe {
-        let _ = CloseHandle(process.hProcess);
-    }
+    // SAFETY: as above, and `exit_code` is a writable `u32`.
+    let got_exit =
+        wait == WAIT_OBJECT_0 && unsafe { GetExitCodeProcess(child, &mut exit_code) }.is_ok();
     Some(if got_exit { exit_code as i32 } else { 1 })
 }
 
@@ -220,6 +238,8 @@ pub fn run_palette_bootstrap_from_env() -> Option<i32> {
 /// diagnostic is written into the user's terminal by this mode.
 pub fn run_palette_helper_from_env() -> Option<i32> {
     let payload = std::env::var_os(PALETTE_HELPER_ENV)?;
+    // SAFETY: Windows-only, where `remove_var` is sound from any thread; it
+    // also runs from `zmux-pty`'s `main` before any thread is started.
     unsafe { std::env::remove_var(PALETTE_HELPER_ENV) };
     let Some(payload) = payload.to_str() else {
         signal_palette_ready();
@@ -235,21 +255,25 @@ pub fn run_palette_helper_from_env() -> Option<i32> {
 }
 
 fn signal_palette_ready() {
-    use windows::Win32::Foundation::CloseHandle;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
     use windows::core::HSTRING;
 
     let Some(name) = std::env::var_os(PALETTE_READY_EVENT_ENV) else {
         return;
     };
+    // SAFETY: Windows-only, where `remove_var` is sound from any thread; it
+    // also runs on `zmux-pty`'s only thread.
     unsafe { std::env::remove_var(PALETTE_READY_EVENT_ENV) };
+    // SAFETY: the `HSTRING` is a NUL-terminated name that outlives the call.
     let Ok(event) = (unsafe { OpenEventW(EVENT_MODIFY_STATE, false, &HSTRING::from(name)) }) else {
         return;
     };
-    unsafe {
-        let _ = SetEvent(event);
-        let _ = CloseHandle(event);
-    }
+    // SAFETY: `OpenEventW` succeeded, so this function owns the handle.
+    let event = unsafe { OwnedHandle::from_raw_handle(event.0) };
+    // SAFETY: `event` is open, with the access `SetEvent` needs.
+    let _ = unsafe { SetEvent(HANDLE(event.as_raw_handle())) };
 }
 
 /// Private integration probe used to verify the palette from inside ConPTY.
@@ -258,6 +282,8 @@ pub fn run_palette_probe_from_env() -> Option<i32> {
     use std::io::Write as _;
 
     std::env::var_os(PALETTE_PROBE_ENV)?;
+    // SAFETY: Windows-only, where `remove_var` is sound from any thread; it
+    // also runs from `zmux-pty`'s `main` before any thread is started.
     unsafe { std::env::remove_var(PALETTE_PROBE_ENV) };
     let print_palette = || -> Result<()> {
         let info = current_console_info()?;
@@ -290,6 +316,8 @@ fn apply_current_console_palette(palette: ConsolePalette) -> Result<()> {
 
     let (output, handle, mut info) = current_console_info_with_handle()?;
     update_screen_buffer_info(&mut info, palette);
+    // SAFETY: `handle` borrows `output`, which stays open until it is dropped
+    // after this call, and `info` is a fully initialized `INFOEX` read from it.
     unsafe { SetConsoleScreenBufferInfoEx(handle, &info) }
         .context("writing console color state")?;
     drop(output);
@@ -321,6 +349,8 @@ fn current_console_info_with_handle() -> Result<(
         cbSize: std::mem::size_of::<CONSOLE_SCREEN_BUFFER_INFOEX>() as u32,
         ..Default::default()
     };
+    // SAFETY: `handle` borrows `output`, open for the call and returned with
+    // it; `info` is writable and its `cbSize` is set as the API requires.
     unsafe { GetConsoleScreenBufferInfoEx(handle, &mut info) }
         .context("reading console color state")?;
     Ok((output, handle, info))
@@ -991,9 +1021,8 @@ fn force_stop(endpoint: &Endpoint) -> Result<()> {
         endpoint.process_id > 0,
         "the pseudoconsole host published an unusable process id"
     );
-    let system_root = std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let system_root =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
     let taskkill = system_root.join(r"System32\taskkill.exe");
     let status = Command::new(&taskkill)
         .args([

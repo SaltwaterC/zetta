@@ -567,6 +567,9 @@ impl DrainWait {
             }
         }
         let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
+        // Raw descriptor numbers rather than rustix's borrowed `PollFd`s,
+        // because the wait outlives the sessions lock that keeps the panes'
+        // descriptors alive; so this stays on `libc`.
         // SAFETY: `fds` is a valid, initialised slice of exactly the length
         // given, and the descriptors outlive the call — the sessions lock is
         // released only after they are collected, and a pane closing while this

@@ -5,11 +5,12 @@ use crate::budget::{Budget, Charge};
 use crate::codepage;
 use crate::editing::SharedEditing;
 use crate::keys;
-use crate::native::{self, Handle};
+use crate::native::{self, Event};
 use crate::output::{ConsoleOutput, OutputMode};
 use crate::protocol::*;
 use std::collections::VecDeque;
 use std::io;
+use std::os::windows::io::OwnedHandle;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use zetta_sync::RecoverPoison as _;
@@ -68,8 +69,8 @@ struct Shared {
     pub output_mode: AtomicU32,
     /// Input code page, for ANSI reads.
     code_page: AtomicU32,
-    server: Arc<Handle>,
-    event: Handle,
+    server: Arc<OwnedHandle>,
+    event: Event,
     output: SharedOutput,
     readiness: Option<Arc<dyn Fn(bool) + Send + Sync>>,
     /// Attached clients by connection token, so newest is last.
@@ -85,8 +86,8 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 impl Input {
     pub fn new(
-        server: Arc<Handle>,
-        event: Handle,
+        server: Arc<OwnedHandle>,
+        event: Event,
         output: SharedOutput,
         readiness: Option<Arc<dyn Fn(bool) + Send + Sync>>,
         editing: SharedEditing,
@@ -207,9 +208,7 @@ impl Input {
         } else if state.records.len() < 65536 {
             state.records.push_back(record);
         }
-        unsafe {
-            windows_sys::Win32::System::Threading::SetEvent(self.0.event.raw());
-        }
+        self.0.event.set();
         self.0.changed.notify_all();
     }
     /// WriteConsoleInput: records an application queues itself, after or
@@ -251,9 +250,7 @@ impl Input {
             }
         }
         drop(state);
-        unsafe {
-            windows_sys::Win32::System::Threading::SetEvent(self.0.event.raw());
-        }
+        self.0.event.set();
         self.0.changed.notify_all();
         records.len()
     }
@@ -290,9 +287,7 @@ impl Input {
                 let _ = crate::control::send_ctrl_event(pid, event, 0)?;
             }
         }
-        unsafe {
-            windows_sys::Win32::System::Threading::SetEvent(self.0.event.raw());
-        }
+        self.0.event.set();
         self.0.changed.notify_all();
         Ok(count)
     }
@@ -468,19 +463,10 @@ impl Input {
             &mut bytes,
         )?;
         let completion = Completion::new(request.descriptor.id, 0, bytes.len(), &mut request.body);
-        native::ioctl(
-            &self.0.server,
-            COMPLETE_IO,
-            (&completion as *const Completion).cast(),
-            size_of::<Completion>(),
-            std::ptr::null_mut(),
-            0,
-        )?;
+        native::complete_io(&self.0.server, &completion)?;
         let state = lock(&self.0.state);
         if state.records.is_empty() {
-            unsafe {
-                windows_sys::Win32::System::Threading::ResetEvent(self.0.event.raw());
-            }
+            self.0.event.reset();
         }
         Ok(())
     }
@@ -495,36 +481,20 @@ impl Input {
             set_u32(&mut request.body, offset, 0);
         }
         let completion = Completion::new(request.descriptor.id, status, 0, &mut request.body);
-        let _ = native::ioctl(
-            &self.0.server,
-            COMPLETE_IO,
-            (&completion as *const Completion).cast(),
-            size_of::<Completion>(),
-            std::ptr::null_mut(),
-            0,
-        );
+        let _ = native::complete_io(&self.0.server, &completion);
     }
     /// FlushConsoleInputBuffer: queued records go; pending reads stay pending.
     pub fn flush(&self) {
         let mut state = lock(&self.0.state);
         state.records.clear();
         state.first_event = None;
-        unsafe {
-            windows_sys::Win32::System::Threading::ResetEvent(self.0.event.raw());
-        }
+        self.0.event.reset();
         drop(state);
         self.input_ready(true);
     }
     fn finish_error(&self, request: &mut Request, status: i32) {
         let completion = Completion::new(request.descriptor.id, status, 0, &mut []);
-        let _ = native::ioctl(
-            &self.0.server,
-            COMPLETE_IO,
-            (&completion as *const Completion).cast(),
-            size_of::<Completion>(),
-            std::ptr::null_mut(),
-            0,
-        );
+        let _ = native::complete_io(&self.0.server, &completion);
     }
 }
 const STATUS_ALERTED: i32 = 0x101;

@@ -146,9 +146,8 @@ impl age::Identity for MlKem768X25519Identity {
         if stanza.tag != PQ_STANZA {
             return None;
         }
-        let encoded = match stanza.args.as_slice() {
-            [encoded] => encoded,
-            _ => return Some(Err(age::DecryptError::InvalidHeader)),
+        let [encoded] = stanza.args.as_slice() else {
+            return Some(Err(age::DecryptError::InvalidHeader));
         };
         let encoded = match STANDARD_NO_PAD.decode(encoded) {
             Ok(encoded) if encoded.len() == PQ_ENCAPSULATED_KEY_BYTES => encoded,
@@ -157,18 +156,16 @@ impl age::Identity for MlKem768X25519Identity {
         if stanza.body.len() != PQ_CIPHERTEXT_BYTES {
             return Some(Err(age::DecryptError::InvalidHeader));
         }
-        let enc = match <XWing as hpke::kem::Kem>::EncappedKey::from_bytes(&encoded) {
-            Ok(enc) => enc,
-            Err(_) => return Some(Err(age::DecryptError::InvalidHeader)),
+        let Ok(enc) = <XWing as hpke::kem::Kem>::EncappedKey::from_bytes(&encoded) else {
+            return Some(Err(age::DecryptError::InvalidHeader));
         };
-        let mut context = match hpke::setup_receiver::<ChaCha20Poly1305, HkdfSha256, XWing>(
+        let Ok(mut context) = hpke::setup_receiver::<ChaCha20Poly1305, HkdfSha256, XWing>(
             &OpModeR::Base,
             &self.key,
             &enc,
             PQ_LABEL,
-        ) {
-            Ok(context) => context,
-            Err(_) => return Some(Err(age::DecryptError::InvalidHeader)),
+        ) else {
+            return Some(Err(age::DecryptError::InvalidHeader));
         };
         // Erased however it is dropped, including when it is the wrong length.
         let plaintext = context.open(&stanza.body, &[]).map(Zeroizing::new);

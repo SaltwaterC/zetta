@@ -160,12 +160,14 @@ pub(super) fn build_shared_pane_terminal(
             crate::background_session_ui::shared_panes::SharedPaneWriter { pane: pane.clone() },
         ),
         title,
-        cursor_shape,
-        alternate_scroll,
-        max_scroll_history_lines,
-        0,
-        executor,
-        PathStyle::local(),
+        terminal::DisplayOnlySettings {
+            cursor_shape,
+            alternate_scroll,
+            max_scroll_history_lines,
+            window_id: 0,
+            background_executor: executor,
+            path_style: PathStyle::local(),
+        },
     )
     .with_raw_output()
     .with_shared_viewport(initial_viewport)
@@ -280,11 +282,13 @@ pub(super) fn build_shared_terminal_batch(
                 restore_options: None,
                 restored_working_directory: None,
                 mux_provider: None,
-                shared_pane: Some(pane),
-                zosh_session,
-                transport_fallback,
-                shared_runtime: Some(runtime.clone()),
-                shared_state: None,
+                shared: Some(SharedSpawn {
+                    pane,
+                    runtime: runtime.clone(),
+                    zosh_session,
+                    transport_fallback,
+                    state: None,
+                }),
                 shell_integration_startup_command: launch.shell_integration_startup_command,
                 tracked_multi_command_launch: launch.tracked_multi_command_launch,
                 image_paste_handler: None,
@@ -472,11 +476,7 @@ pub(super) fn shared_draft_layout(
             first,
             second,
         } => zmux::messages::SharedDraftLayout::Split {
-            axis: match axis {
-                SplitAxis::Horizontal => "horizontal",
-                SplitAxis::Vertical => "vertical",
-            }
-            .to_owned(),
+            axis: *axis,
             first_ratio: *first_ratio,
             first: Box::new(shared_draft_layout(first, draft_pane_id, mux_ids)?),
             second: Box::new(shared_draft_layout(second, draft_pane_id, mux_ids)?),
@@ -504,11 +504,7 @@ pub(super) fn shared_complete_draft_layout(
             first,
             second,
         } => zmux::messages::SharedDraftLayout::Split {
-            axis: match axis {
-                SplitAxis::Horizontal => "horizontal",
-                SplitAxis::Vertical => "vertical",
-            }
-            .to_owned(),
+            axis: *axis,
             first_ratio: *first_ratio,
             first: Box::new(shared_complete_draft_layout(
                 first,
@@ -563,9 +559,9 @@ pub(super) fn shared_spawn_replacement(
             ))
         }
         PaneLayout::Split { first, second, .. } => {
-            if pane_layout_contains(first, draft_pane_id) {
+            if first.contains_pane(draft_pane_id) {
                 shared_spawn_replacement(first, draft_pane_id, mux_ids)
-            } else if pane_layout_contains(second, draft_pane_id) {
+            } else if second.contains_pane(draft_pane_id) {
                 shared_spawn_replacement(second, draft_pane_id, mux_ids)
             } else {
                 anyhow::bail!("shared draft pane is not in the tab layout")
@@ -575,13 +571,20 @@ pub(super) fn shared_spawn_replacement(
     }
 }
 
-pub(super) fn pane_layout_contains(layout: &PaneLayout, pane_id: u64) -> bool {
-    match layout {
-        PaneLayout::Pane(id) => *id == pane_id,
-        PaneLayout::Split { first, second, .. } => {
-            pane_layout_contains(first, pane_id) || pane_layout_contains(second, pane_id)
-        }
-    }
+/// The shared-session half of a [`SpawnedTerminal`].
+pub(super) struct SharedSpawn {
+    pub(super) pane: Arc<zmux::client::SharedPane>,
+    pub(super) runtime: crate::mux::MuxRuntime,
+    /// Set when this pane's bytes travel over Mosh rather than over the
+    /// multiplexer's own stream. `pane` is still carried, for the identities
+    /// every shared session is bookkept by; what changes is what feeds the
+    /// terminal, and what is registered for it.
+    pub(super) zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
+    /// Why this pane of a Zosh session stayed on SSH, when it did.
+    pub(super) transport_fallback: Option<String>,
+    /// The committed session state to apply once the terminal is installed,
+    /// when the spawn itself added the pane.
+    pub(super) state: Option<zmux::messages::SharedSessionState>,
 }
 
 /// What a spawned pane is registered from: the stream the multiplexer relays it
@@ -987,7 +990,7 @@ impl Zetta {
                     session_id,
                 };
                 for (_, spawned) in &terminals {
-                    let pane = spawned.shared_pane.as_ref().expect("batch pane is shared");
+                    let pane = &spawned.shared.as_ref().expect("batch pane is shared").pane;
                     self.mux_panes.record(spawned.pane_id, pane.pane_id());
                     self.shared_collaboration
                         .record_pane(&key, pane.pane_id(), spawned.pane_id);
@@ -1303,11 +1306,13 @@ impl SharedSpawnJob {
                 restore_options: None,
                 restored_working_directory: None,
                 mux_provider: None,
-                shared_pane: Some(pane),
-                zosh_session,
-                transport_fallback,
-                shared_runtime: Some(runtime),
-                shared_state: Some(committed_state),
+                shared: Some(SharedSpawn {
+                    pane,
+                    runtime,
+                    zosh_session,
+                    transport_fallback,
+                    state: Some(committed_state),
+                }),
                 shell_integration_startup_command,
                 tracked_multi_command_launch,
                 image_paste_handler: None,

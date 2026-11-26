@@ -193,6 +193,12 @@ zmux = { path = "crates/zmux", default-features = false, features = ["scrollback
 zosh = { path = "crates/zosh", optional = true }
 vt100 = { version = "0.16.2", optional = true }
 zwt = { path = "crates/zwt", optional = true }
+zetta_layout = { path = "crates/zetta_layout" }
+# What a notification request is, on every platform and with or without the
+# `notifications` feature. The backends come in only through the macOS entry
+# below: Cargo features are not per-target, so a `zntfy/backends` here would
+# link ALSA and D-Bus into the Linux build for code it never runs.
+zntfy = { path = "crates/zntfy", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 wslx = { path = "crates/wslx" }
@@ -224,6 +230,13 @@ windows = { version = "0.61", features = [
 ] }
 windows-core = "0.61"
 
+[target.'cfg(unix)'.dependencies]
+# The safe spelling of the termios, process and file-system calls Zetta makes
+# itself. 1.1.6 is the first release whose `tcgetpgrp` refuses a process group
+# of 0 on every platform; before it, macOS returned 0 for a pty with no
+# foreground group and rustix built a `NonZeroI32` from it.
+rustix = { version = "1.1.6", features = ["fs", "process", "termios"] }
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 url = "2.2"
 
@@ -233,6 +246,8 @@ url = "2.2"
 zbus = { version = "5.17", default-features = false, features = ["async-io", "blocking-api"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+# Only macOS delivers through `zntfy`'s backends, so only here does the
+# `notifications` feature enable them; see the plain `zntfy` entry above.
 zntfy = { path = "crates/zntfy", optional = true }
 block2 = "0.6"
 url = "2.2"
@@ -264,11 +279,18 @@ gpui = { path = "crates/gpui", features = ["test-support"] }
 #   variant is which, and this tree leans on exhaustive matches to route.
 # - `redundant_clone`: mostly builder chains where the clone is what keeps the
 #   value alive for a later call in the same expression.
+#
+# `undocumented_unsafe_blocks` is a restriction lint rather than a pedantic one,
+# and denied for a different reason: every `unsafe` block and `unsafe impl`
+# says, in a `// SAFETY:` comment, why what it relies on holds there. Most of
+# them sit in `cfg` arms one host never compiles, which is how half of them went
+# undocumented; `make clippy-platforms` and a macOS run are what check them.
 [lints.clippy]
 manual_let_else = "deny"
 map_unwrap_or = "deny"
 redundant_closure = "deny"
 semicolon_if_nothing_returned = "deny"
+undocumented_unsafe_blocks = "deny"
 
 [patch.crates-io]
 block = { path = "crates/block" }

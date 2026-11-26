@@ -37,8 +37,9 @@ pub(super) struct ConsoleKeyEvent {
 
 impl From<windows::Win32::System::Console::KEY_EVENT_RECORD> for ConsoleKeyEvent {
     fn from(event: windows::Win32::System::Console::KEY_EVENT_RECORD) -> Self {
-        // `ReadConsoleInputW` fills the UnicodeChar arm of this union for a
-        // key event read through the wide API.
+        // SAFETY: `ReadConsoleInputW` fills the UnicodeChar arm of this union
+        // for a key event read through the wide API, and both arms are plain
+        // integers over the same initialized bytes, so the read is defined.
         let unicode_char = unsafe { event.uChar.UnicodeChar };
         Self {
             key_down: event.bKeyDown.as_bool(),

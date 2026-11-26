@@ -3,7 +3,6 @@
 
 use std::{
     io,
-    os::fd::AsRawFd as _,
     sync::{Arc, atomic::AtomicBool},
 };
 
@@ -11,16 +10,8 @@ use anyhow::{Context as _, Result};
 
 /// The terminal's size in columns and lines, if it has one.
 pub(super) fn size() -> Option<(u16, u16)> {
-    let mut size = libc::winsize {
-        ws_row: 0,
-        ws_col: 0,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    // SAFETY: the descriptor is this process's own standard output and the
-    // argument is the `winsize` this request writes.
-    let result = unsafe { libc::ioctl(io::stdout().as_raw_fd(), libc::TIOCGWINSZ, &raw mut size) };
-    (result == 0 && size.ws_col != 0 && size.ws_row != 0).then_some((size.ws_col, size.ws_row))
+    let size = rustix::termios::tcgetwinsize(io::stdout()).ok()?;
+    (size.ws_col != 0 && size.ws_row != 0).then_some((size.ws_col, size.ws_row))
 }
 
 /// The terminal settings this process found, restored when it ends.
@@ -28,32 +19,21 @@ pub(super) fn size() -> Option<(u16, u16)> {
 /// A relay whose stdin is not a terminal — a test, or a pipe — has nothing to
 /// put in raw mode and nothing to restore.
 pub(super) struct RawMode {
-    previous: Option<libc::termios>,
+    previous: Option<rustix::termios::Termios>,
 }
 
 impl RawMode {
     pub(super) fn enter() -> io::Result<Self> {
-        let descriptor = io::stdin().as_raw_fd();
-        // SAFETY: `isatty` only inspects the descriptor.
-        if unsafe { libc::isatty(descriptor) } != 1 {
+        use rustix::termios::{OptionalActions, isatty, tcgetattr, tcsetattr};
+
+        let stdin = io::stdin();
+        if !isatty(&stdin) {
             return Ok(Self { previous: None });
         }
-        let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
-        // SAFETY: the descriptor is this process's own standard input and
-        // `tcgetattr` initializes the structure it is given.
-        if unsafe { libc::tcgetattr(descriptor, settings.as_mut_ptr()) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: `tcgetattr` returned success, so the value is initialized.
-        let previous = unsafe { settings.assume_init() };
-        let mut raw = previous;
-        // SAFETY: `cfmakeraw` only rewrites the structure it is given.
-        unsafe { libc::cfmakeraw(&raw mut raw) };
-        // SAFETY: the descriptor is this process's own standard input and
-        // `raw` is a complete, initialized settings structure.
-        if unsafe { libc::tcsetattr(descriptor, libc::TCSANOW, &raw const raw) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let previous = tcgetattr(&stdin)?;
+        let mut raw = previous.clone();
+        raw.make_raw();
+        tcsetattr(&stdin, OptionalActions::Now, &raw)?;
         Ok(Self {
             previous: Some(previous),
         })
@@ -62,14 +42,14 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        let Some(previous) = self.previous else {
+        let Some(previous) = &self.previous else {
             return;
         };
-        // SAFETY: the descriptor is this process's own standard input and
-        // `previous` is the settings structure read from it.
-        unsafe {
-            libc::tcsetattr(io::stdin().as_raw_fd(), libc::TCSANOW, &raw const previous);
-        }
+        let _ = rustix::termios::tcsetattr(
+            io::stdin(),
+            rustix::termios::OptionalActions::Now,
+            previous,
+        );
     }
 }
 
@@ -80,7 +60,8 @@ pub(super) fn watch_resizes(resized: Arc<AtomicBool>, _ending: Arc<AtomicBool>) 
     Ok(())
 }
 
-/// Where the pane's output is written: the terminal itself.
-pub(super) fn output() -> io::Stdout {
-    io::stdout()
+/// Where the pane's output is written: the terminal itself. Never fails; the
+/// `Result` matches Windows, where the handle is duplicated.
+pub(super) fn output() -> io::Result<io::Stdout> {
+    Ok(io::stdout())
 }

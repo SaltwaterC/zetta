@@ -27,20 +27,32 @@ struct ProcessInfo {
 }
 fn console_control<T>(command: u32, data: &mut T) -> io::Result<i32> {
     let name: Vec<u16> = "user32.dll".encode_utf16().chain([0]).collect();
+    // SAFETY: name is a NUL-terminated UTF-16 string that outlives the call.
     let raw = unsafe { LoadLibraryW(name.as_ptr()) };
     if raw.is_null() {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: raw is the module handle just loaded and still referenced, and
+    // the name is a NUL-terminated C string literal.
     let function = unsafe { GetProcAddress(raw, c"ConsoleControl".as_ptr().cast()) };
     let Some(function) = function else {
+        // SAFETY: raw is the reference LoadLibraryW took above, released once.
         unsafe {
             FreeLibrary(raw);
         }
         return Err(io::Error::other("user32!ConsoleControl unavailable"));
     };
+    // SAFETY: user32!ConsoleControl is declared by OpenConsole as
+    // NTSTATUS ConsoleControl(CONSOLECONTROL, PVOID, DWORD), which is this
+    // stdcall/system signature; both are plain function pointers.
     let function: unsafe extern "system" fn(u32, *mut c_void, u32) -> i32 =
         unsafe { std::mem::transmute(function) };
+    // SAFETY: user32 stays loaded until the FreeLibrary below, and `data` is
+    // an exclusive borrow of a #[repr(C)] struct (EndTask or ProcessInfo, the
+    // only callers) whose size is the length passed with it.
     let status = unsafe { function(command, (data as *mut T).cast(), size_of::<T>() as u32) };
+    // SAFETY: raw is the reference LoadLibraryW took above, released once and
+    // after the last call through `function`.
     unsafe {
         FreeLibrary(raw);
     }
@@ -88,9 +100,13 @@ unsafe extern "system" fn handler(event: u32) -> i32 {
 pub fn child_probe() -> io::Result<()> {
     // The launcher can inherit the ignore-Ctrl+C bit from its own host.
     // Registering a handler does not reset that inherited bit.
+    // SAFETY: a None handler with FALSE only clears the process's
+    // ignore-Ctrl+C flag; no pointer is passed.
     if unsafe { SetConsoleCtrlHandler(None, 0) } == 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: handler is a 'static extern "system" fn with the
+    // PHANDLER_ROUTINE signature, and it only touches an atomic.
     if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
         return Err(io::Error::last_os_error());
     }

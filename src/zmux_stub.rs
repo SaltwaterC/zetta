@@ -1,117 +1,30 @@
-//! The small part of the background-session protocol needed by a build without
-//! the `zmux` feature.
+//! The `zmux` module of a build without the multiplexer: the small part of the
+//! background-session protocol such a build still needs, under the same paths
+//! the `zmux` crate gives it, so the rest of the application names one set of
+//! paths whichever build it is.
 //!
-//! A no-`zmux` build still owns detached sessions in the Zetta process. These
-//! types intentionally mirror the application-facing pieces of the shared
-//! protocol so that authentication, catalog publication, and local reconnects
-//! do not depend on the daemon crate being present.
+//! Such a build owns its detached sessions in the Zetta process. The verifier
+//! that protects them is the multiplexer's own source, compiled in by path as
+//! [`crate::private_fs`] is, because it is security code that must not drift
+//! from the daemon's. The catalog types, the publisher and the directories
+//! mirror the application-facing pieces of the shared protocol, so catalog
+//! publication and local reconnects do not depend on the daemon crate.
 
-pub(crate) mod auth {
-    use std::{sync::Arc, time::Duration};
-
-    use anyhow::{Context as _, Result};
-    use argon2::{
-        Argon2, PasswordHash, PasswordHasher as _, PasswordVerifier as _, password_hash::SaltString,
-    };
-    use subtle::ConstantTimeEq as _;
-    use zeroize::Zeroizing;
-
-    pub(crate) fn failed_authentication_delay(failures: u32) -> Duration {
-        let doublings = failures.saturating_sub(1).min(u32::BITS - 1);
-        Duration::from_secs(1)
-            .saturating_mul(1_u32.checked_shl(doublings).unwrap_or(u32::MAX))
-            .min(Duration::from_secs(30))
-    }
-
-    #[derive(Clone, Default, Eq)]
-    pub(crate) struct SessionSecret(pub(crate) Zeroizing<String>);
-
-    impl SessionSecret {
-        pub(crate) fn new(secret: String) -> Self {
-            Self(Zeroizing::new(secret))
-        }
-
-        pub(crate) fn expose(&self) -> &str {
-            &self.0
-        }
-    }
-
-    impl std::fmt::Debug for SessionSecret {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("SessionSecret(<redacted>)")
-        }
-    }
-
-    impl PartialEq for SessionSecret {
-        fn eq(&self, other: &Self) -> bool {
-            self.0.as_bytes().ct_eq(other.0.as_bytes()).into()
-        }
-    }
-
-    #[derive(Clone)]
-    pub(crate) struct SessionAuthentication {
-        verifier: Arc<str>,
-        #[cfg(feature = "session-persistence")]
-        key_envelope: Option<Arc<str>>,
-    }
-
-    #[derive(Clone)]
-    pub(crate) struct VerifiedSession {
-        verifier: Arc<str>,
-    }
-
-    impl SessionAuthentication {
-        pub(crate) fn create(secret: &str) -> Result<Self> {
-            anyhow::ensure!(
-                !secret.is_empty(),
-                "session authentication must not be empty"
-            );
-            let mut salt = [0; 16];
-            getrandom::fill(&mut salt).context("generating session authentication salt")?;
-            let salt = SaltString::encode_b64(&salt).map_err(|error| {
-                anyhow::anyhow!("encoding session authentication salt: {error}")
-            })?;
-            let verifier = Argon2::default()
-                .hash_password(secret.as_bytes(), &salt)
-                .map_err(|error| anyhow::anyhow!("hashing session authentication: {error}"))?
-                .to_string()
-                .into();
-            Ok(Self {
-                verifier,
-                #[cfg(feature = "session-persistence")]
-                key_envelope: None,
-            })
-        }
-
-        #[cfg(feature = "session-persistence")]
-        pub(crate) fn with_key_envelope(mut self, envelope: impl Into<Arc<str>>) -> Self {
-            self.key_envelope = Some(envelope.into());
-            self
-        }
-
-        #[cfg(feature = "session-persistence")]
-        pub(crate) fn key_envelope(&self) -> Option<&str> {
-            self.key_envelope.as_deref()
-        }
-
-        pub(crate) fn verify(&self, secret: &str) -> Option<VerifiedSession> {
-            PasswordHash::new(&self.verifier)
-                .ok()
-                .filter(|verifier| {
-                    Argon2::default()
-                        .verify_password(secret.as_bytes(), verifier)
-                        .is_ok()
-                })
-                .map(|_| VerifiedSession {
-                    verifier: self.verifier.clone(),
-                })
-        }
-
-        pub(crate) fn authorizes(&self, authorization: &VerifiedSession) -> bool {
-            Arc::ptr_eq(&self.verifier, &authorization.verifier)
-        }
+pub(crate) mod remote {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct RemoteTarget {
+        pub(crate) destination: String,
+        pub(crate) port: Option<u16>,
     }
 }
+
+#[expect(
+    dead_code,
+    reason = "the multiplexer's verifier; a build without it reattaches only its own in-process sessions, \
+              so it never imports, adopts or hands a verifier on"
+)]
+#[path = "../crates/zmux/src/auth/verifier.rs"]
+pub(crate) mod auth;
 
 pub(crate) mod protocol {
     use std::path::PathBuf;
@@ -140,7 +53,7 @@ pub(crate) mod protocol {
             pane_id: u64,
         },
         Split {
-            axis: String,
+            axis: zetta_layout::SplitAxis,
             #[serde(default = "default_background_pane_split_ratio")]
             first_ratio: u16,
             first: Box<BackgroundPaneLayout>,

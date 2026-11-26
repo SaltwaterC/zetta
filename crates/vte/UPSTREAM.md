@@ -78,6 +78,35 @@ performer that ignores no controls and one that ignores most, and
 `ignored_controls_are_exactly_the_ones_execute_does_nothing_for` in
 `src/ansi.rs` pins the two control lists together.
 
+## Zetta patch: UTF-8 without unchecked conversions
+
+Upstream turned bytes `str::from_utf8` had passed into a `str` with
+`from_utf8_unchecked`, and took the first character with `unwrap_unchecked`, in
+`advance_ground`, `advance_partial_utf8` and `ground_dispatch`. None of those is
+`unsafe` any more:
+
+- `advance_ground` sets aside a character the text ends inside
+  (`partial_character_len`, a look at the last three bytes) before validating,
+  so text cut by the end of a read validates whole and is dispatched as the
+  `str` `from_utf8` returns. Only text invalid elsewhere validates its valid
+  prefix a second time, which binary output finds within a few bytes.
+- `ground_dispatch` carries the text left as a `Chars` remainder, so taking a
+  character needs no boundary check.
+- `advance_partial_utf8` decodes the buffered character with `decode_utf8`,
+  which already judges a first character as `from_utf8` does, and
+  `decode_utf8` builds the character with `char::from_u32` from the bits it
+  validated.
+
+Measured on 2026-11-26 against the previous parser in one process, interleaved
+run by run on one pinned core with a performer that only counts: CJK text +52%
+and mixed text with emoji and box drawing +18-28% (all rounds faster), binary
+noise unchanged, and text dense with SGR escapes, whose segments are a few
+characters long, -1.6% to -3% (13-16 of 41 rounds faster). Parsing runs on the
+PTY reader thread, so the draw-time benchmark does not see it.
+
+Regression test: `a_character_split_across_reads_dispatches_as_one_read_does`
+in `src/lib.rs`, beside `invalid_utf8_dispatches_as_upstream_did`.
+
 ## Zetta patch: physical cell geometry
 
 CSI 16 t dispatches to the default no-op `Handler::character_cell_size_pixels`, allowing the emulator to report physical cell dimensions.

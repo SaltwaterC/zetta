@@ -1272,8 +1272,7 @@ impl Zetta {
                     self.edit_settings_input(event, cx);
                 }
             }
-            key => {
-                let _ = key;
+            _ => {
                 self.edit_settings_input(event, cx);
             }
         }

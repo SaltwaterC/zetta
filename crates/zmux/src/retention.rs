@@ -72,40 +72,6 @@ impl Default for Retention {
 }
 
 impl Retention {
-    pub fn parse(value: &str) -> anyhow::Result<Self> {
-        match value {
-            "none" => Ok(Self::None),
-            "memory" => {
-                #[cfg(feature = "scrollback-buffer")]
-                return Ok(Self::default());
-                #[cfg(not(feature = "scrollback-buffer"))]
-                anyhow::bail!(
-                    "retention \"memory\" needs the scrollback-buffer feature, which this \
-                     multiplexer was built without"
-                )
-            }
-            "disk" => {
-                #[cfg(feature = "session-persistence")]
-                {
-                    Ok(Self::Disk)
-                }
-                #[cfg(not(feature = "session-persistence"))]
-                {
-                    anyhow::bail!(
-                        "retention \"disk\" needs the session-persistence feature, which this \
-                         multiplexer was built without"
-                    )
-                }
-            }
-            "persist" => {
-                anyhow::bail!("retention \"persist\" is no longer supported; use \"disk\"")
-            }
-            unknown => anyhow::bail!(
-                "unknown retention {unknown:?}; expected \"none\", \"memory\" or \"disk\""
-            ),
-        }
-    }
-
     /// Rejects a retention mode that this binary cannot actually provide.
     ///
     /// Keeping this separate from [`new_retained`] is intentional: the latter
@@ -155,8 +121,11 @@ impl Retention {
     }
 
     /// A pane's retained screen, at the size that pane is running at.
+    #[cfg_attr(
+        not(feature = "scrollback-buffer"),
+        expect(unused_variables, reason = "only a retained screen has a size")
+    )]
     pub fn new_retained(&self, columns: u16, lines: u16) -> Retained {
-        let _ = (columns, lines);
         match self {
             Self::None => Retained::Discarded,
             #[cfg(feature = "scrollback-buffer")]
@@ -182,6 +151,44 @@ impl Retention {
     }
 }
 
+impl std::str::FromStr for Retention {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "memory" => {
+                #[cfg(feature = "scrollback-buffer")]
+                return Ok(Self::default());
+                #[cfg(not(feature = "scrollback-buffer"))]
+                anyhow::bail!(
+                    "retention \"memory\" needs the scrollback-buffer feature, which this \
+                     multiplexer was built without"
+                )
+            }
+            "disk" => {
+                #[cfg(feature = "session-persistence")]
+                {
+                    Ok(Self::Disk)
+                }
+                #[cfg(not(feature = "session-persistence"))]
+                {
+                    anyhow::bail!(
+                        "retention \"disk\" needs the session-persistence feature, which this \
+                         multiplexer was built without"
+                    )
+                }
+            }
+            "persist" => {
+                anyhow::bail!("retention \"persist\" is no longer supported; use \"disk\"")
+            }
+            unknown => anyhow::bail!(
+                "unknown retention {unknown:?}; expected \"none\", \"memory\" or \"disk\""
+            ),
+        }
+    }
+}
+
 /// One pane's retained screen.
 pub enum Retained {
     Discarded,
@@ -191,8 +198,11 @@ pub enum Retained {
 
 impl Retained {
     /// Feeds the pane's output to the retained screen.
+    #[cfg_attr(
+        not(feature = "scrollback-buffer"),
+        expect(unused_variables, reason = "only a retained screen reads the output")
+    )]
     pub fn push(&mut self, chunk: &[u8]) {
-        let _ = chunk;
         match self {
             Self::Discarded => {}
             #[cfg(feature = "scrollback-buffer")]
@@ -207,8 +217,11 @@ impl Retained {
     /// showing, and everything the pane prints next lands on top of it. That is
     /// what makes a later reattach show the session rather than the fragments of
     /// it that happen to have arrived since.
+    #[cfg_attr(
+        not(feature = "scrollback-buffer"),
+        expect(unused_variables, reason = "only a retained screen reads the snapshot")
+    )]
     pub fn seed(&mut self, snapshot: Vec<u8>) {
-        let _ = snapshot;
         match self {
             Self::Discarded => {}
             #[cfg(feature = "scrollback-buffer")]
@@ -241,8 +254,11 @@ impl Retained {
 
     /// Follows the pane's size, so the retained screen wraps where the window
     /// showing it wraps.
+    #[cfg_attr(
+        not(feature = "scrollback-buffer"),
+        expect(unused_variables, reason = "only a retained screen has a size")
+    )]
     pub fn resize(&mut self, columns: u16, lines: u16) {
-        let _ = (columns, lines);
         match self {
             Self::Discarded => {}
             #[cfg(feature = "scrollback-buffer")]

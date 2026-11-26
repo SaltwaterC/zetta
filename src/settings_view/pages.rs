@@ -119,6 +119,10 @@ fn font_family_field(
 
 /// The Configuration page, drawn from [`configuration_layout`] — the same list
 /// its tab order is built from.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(unused_variables, reason = "read only by the macOS Focus status row")
+)]
 fn render_configuration_page(
     editor: &SettingsEditor,
     colors: &ThemeColors,
@@ -127,8 +131,6 @@ fn render_configuration_page(
     widgets: &PageWidgets<'_>,
 ) -> AnyElement {
     // Read only by the macOS Focus status row.
-    #[cfg(not(target_os = "macos"))]
-    let _ = focus_status_access;
     let rows = configuration_layout(editor)
         .into_iter()
         .map(|item| match item {

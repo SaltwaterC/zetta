@@ -11,10 +11,13 @@ pub const UTF8: u32 = 65001;
 
 /// The code page a new console starts with: ConPTY inherits the OEM one.
 pub fn default() -> u32 {
+    // SAFETY: GetOEMCP takes no arguments and only reads system settings.
     unsafe { GetOEMCP() }
 }
 
 pub fn is_valid(code_page: u32) -> bool {
+    // SAFETY: IsValidCodePage takes a plain integer and has no memory
+    // preconditions; an unknown code page just returns zero.
     code_page == UTF8 || unsafe { IsValidCodePage(code_page) } != 0
 }
 
@@ -33,7 +36,10 @@ pub fn ascii_compatible(code_page: u32) -> bool {
 }
 
 fn max_char_size(code_page: u32) -> u32 {
+    // SAFETY: CPINFO is a plain C struct of integers and byte arrays, for
+    // which all-zero is a valid value.
     let mut info: CPINFO = unsafe { std::mem::zeroed() };
+    // SAFETY: info is a live, writable CPINFO owned by this frame.
     if unsafe { GetCPInfo(code_page, &mut info) } == 0 {
         return 1;
     }
@@ -44,6 +50,8 @@ fn max_char_size(code_page: u32) -> u32 {
 /// output and VT processing off; None where the code page has none.
 pub fn glyph(code_page: u32, byte: u8) -> Option<char> {
     let mut wide = 0u16;
+    // SAFETY: the input is the one byte `byte`, length 1, and the output is
+    // the one writable u16 `wide`, capacity 1.
     let converted =
         unsafe { MultiByteToWideChar(code_page, MB_USEGLYPHCHARS, &byte, 1, &mut wide, 1) };
     (converted == 1 && wide != 0)
@@ -60,6 +68,8 @@ pub fn to_utf16(code_page: u32, bytes: &[u8]) -> Vec<u16> {
         return String::from_utf8_lossy(bytes).encode_utf16().collect();
     }
     let length = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
+    // SAFETY: bytes.as_ptr() is readable for `length` (at most bytes.len())
+    // bytes; a null output with capacity 0 only asks for the required size.
     let needed = unsafe {
         MultiByteToWideChar(
             code_page,
@@ -71,6 +81,8 @@ pub fn to_utf16(code_page: u32, bytes: &[u8]) -> Vec<u16> {
         )
     };
     let mut wide = vec![0u16; needed.max(0) as usize];
+    // SAFETY: the input is as above, and `wide` holds exactly `needed`
+    // writable u16s, the capacity passed (zero when `needed` was an error).
     let written = unsafe {
         MultiByteToWideChar(
             code_page,
@@ -94,6 +106,9 @@ pub fn from_utf16(code_page: u32, text: &[u16]) -> Vec<u8> {
         return String::from_utf16_lossy(text).into_bytes();
     }
     let length = i32::try_from(text.len()).unwrap_or(i32::MAX);
+    // SAFETY: text.as_ptr() is readable for `length` (at most text.len())
+    // u16s; a null output with capacity 0 only asks for the required size,
+    // and the default-char arguments are allowed to be null.
     let needed = unsafe {
         WideCharToMultiByte(
             code_page,
@@ -107,6 +122,8 @@ pub fn from_utf16(code_page: u32, text: &[u16]) -> Vec<u8> {
         )
     };
     let mut bytes = vec![0u8; needed.max(0) as usize];
+    // SAFETY: the input is as above, and `bytes` holds exactly `needed`
+    // writable bytes, the capacity passed (zero when `needed` was an error).
     let written = unsafe {
         WideCharToMultiByte(
             code_page,
@@ -181,6 +198,7 @@ fn utf8_complete(data: &[u8]) -> usize {
 
 /// Whether `byte` starts a two-byte character in `code_page`.
 pub fn is_lead_byte(code_page: u32, byte: u8) -> bool {
+    // SAFETY: IsDBCSLeadByteEx takes two integers and touches no caller memory.
     unsafe { IsDBCSLeadByteEx(code_page, byte) != 0 }
 }
 

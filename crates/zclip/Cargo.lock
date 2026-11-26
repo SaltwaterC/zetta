@@ -841,6 +841,7 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
  "memchr",
+ "rustix",
  "tempfile",
  "windows",
  "zetta_cli_help",

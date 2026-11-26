@@ -561,6 +561,8 @@ fn a_session_whose_process_ended_is_never_offered() {
     // The daemon keeps the shell as its child, so the test cannot wait() on
     // it. Kill it the way a process ends, and poll until the reaper has seen
     // it — the reaper only runs on SIGCHLD.
+    // SAFETY: `kill` takes no pointers; the pid is a pane shell the daemon has
+    // not reaped yet, so it cannot have been reused.
     unsafe { libc::kill(pane.child_pid as i32, libc::SIGKILL) };
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_is_alive(pane.child_pid) && Instant::now() < deadline {
@@ -818,6 +820,8 @@ fn an_upgrade_keeps_a_pane_that_is_still_attached() {
     // And it must still be able to reap it, which it can only do because an
     // `execv` keeps the parent/child relationship. Treating the child as
     // foreign left it a zombie whose exit was never reported to anybody.
+    // SAFETY: `kill` takes no pointers; the pid is a pane shell the daemon has
+    // not reaped yet, so it cannot have been reused.
     unsafe { libc::kill(child_pid as i32, libc::SIGTERM) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -963,6 +967,8 @@ fn an_exit_missed_while_disconnected_is_reported_on_reconnect() {
 
     // Ends while there is deliberately no subscriber at all, so the broadcast
     // reaches nobody.
+    // SAFETY: `kill` takes no pointers; the pid is a pane shell the daemon has
+    // not reaped yet, so it cannot have been reused.
     unsafe { libc::kill(pane.child_pid as i32, libc::SIGKILL) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1164,6 +1170,8 @@ fn an_upgrade_keeps_the_retained_screen_at_the_width_it_was_drawn_at() {
         ws_ypixel: 0,
     };
     assert_eq!(
+        // SAFETY: `descriptor` is the pane's pty, open for the call, and
+        // `TIOCSWINSZ` reads a `winsize` from the pointer, which `size` is.
         unsafe { libc::ioctl(descriptor.as_raw_fd(), libc::TIOCSWINSZ, &size) },
         0,
         "resizing the pty"

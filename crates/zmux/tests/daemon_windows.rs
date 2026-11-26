@@ -214,14 +214,19 @@ fn process_is_alive(process_id: u32) -> bool {
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
+    // SAFETY: `OpenProcess` takes no pointers; the handle it returns is closed
+    // below.
     let Ok(process) =
         (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
     else {
         return false;
     };
     let mut exit_code = 0;
+    // SAFETY: `process` is the handle opened above, still open, and
+    // `exit_code` is a writable `u32`.
     let alive = unsafe { GetExitCodeProcess(process, &mut exit_code).is_ok() }
         && exit_code == STILL_ACTIVE.0 as u32;
+    // SAFETY: `process` is owned here and closed once, after its last use.
     unsafe {
         let _ = CloseHandle(process);
     }
@@ -320,6 +325,8 @@ fn read_until(
     let mut sent_device_attributes = false;
     while Instant::now() < deadline {
         let mut available = 0;
+        // SAFETY: the handle is borrowed from `output`, open for the call; no
+        // buffer is passed and `available` is a writable `u32`.
         let peek_result = unsafe {
             windows::Win32::System::Pipes::PeekNamedPipe(
                 windows::Win32::Foundation::HANDLE(output.as_raw_handle()),

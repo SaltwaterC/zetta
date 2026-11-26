@@ -103,7 +103,7 @@ pub(super) fn set_linux_default_terminal() -> Result<String> {
     }
 
     let alternatives_available = command_available("update-alternatives");
-    let alternatives_privileged = unsafe { libc::geteuid() } == 0;
+    let alternatives_privileged = rustix::process::geteuid().is_root();
     let alternatives_changed = if alternatives_available && alternatives_privileged {
         match set_update_alternatives(&executable) {
             Ok(()) => {

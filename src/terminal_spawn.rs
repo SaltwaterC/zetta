@@ -97,21 +97,9 @@ struct SpawnedTerminal {
     /// Only set while restoring: the directory the stored session was in.
     restored_working_directory: Option<PathBuf>,
     mux_provider: Option<Arc<crate::mux::MuxPtyProvider>>,
+    /// Set when the pane belongs to a shared session.
     #[cfg(feature = "zmux")]
-    shared_pane: Option<Arc<zmux::client::SharedPane>>,
-    /// Set when this pane's bytes travel over Mosh rather than over the
-    /// multiplexer's own stream. The shared pane above is still carried, for
-    /// the identities every shared session is bookkept by; what changes is
-    /// what feeds the terminal, and what is registered for it.
-    #[cfg(feature = "zmux")]
-    zosh_session: Option<Arc<crate::remote_pane_transport::ZoshPaneHandle>>,
-    /// Why this pane of a Zosh session stayed on SSH, when it did.
-    #[cfg(feature = "zmux")]
-    transport_fallback: Option<String>,
-    #[cfg(feature = "zmux")]
-    shared_runtime: Option<crate::mux::MuxRuntime>,
-    #[cfg(feature = "zmux")]
-    shared_state: Option<zmux::messages::SharedSessionState>,
+    shared: Option<SharedSpawn>,
     shell_integration_startup_command: Option<Vec<u8>>,
     tracked_multi_command_launch: bool,
     image_paste_handler: Option<Arc<dyn terminal::ImagePasteHandler>>,
@@ -714,6 +702,13 @@ impl Zetta {
 
     /// The environment a pane's shell starts with, or `None` once a failure to
     /// build it has been reported on the pane.
+    #[cfg_attr(
+        windows,
+        expect(
+            unused_variables,
+            reason = "only Unix shells get the zsh history environment"
+        )
+    )]
     fn build_spawn_environment(
         &mut self,
         environment: TerminalEnvironment<'_>,
@@ -725,7 +720,7 @@ impl Zetta {
         // The `mut` is for the zsh history step below, which is Unix-only.
         #[cfg_attr(
             windows,
-            allow(
+            expect(
                 unused_mut,
                 reason = "only the Unix shell-history setup mutates this map"
             )
@@ -741,8 +736,6 @@ impl Zetta {
         if let Err(error) = configure_zsh_history_environment(shell, &mut environment, pane_id) {
             log::warn!("could not configure early zsh history filtering: {error:#}");
         }
-        #[cfg(windows)]
-        let _ = shell;
         Some(environment)
     }
 
@@ -779,37 +772,35 @@ impl Zetta {
             .is_some()
             .then(|| working_directory.clone())
             .flatten();
-        // The restoring and ordinary constructors take the same arguments and
-        // differ only in whether the shell starts fresh, so the choice is a
-        // function pointer rather than two spellings of the same 20 arguments.
-        // The environment's hasher is `collections::FxBuildHasher`, which this
-        // crate cannot name, so this stays inline where it is inferred.
-        let construct = if restore_options.is_some() {
-            TerminalBuilder::new_with_console_palette_for_restore
+        // A restored pane must reattach to its own multiplexer session; a local
+        // fallback would start a different one.
+        let pty_requirement = if restore_options.is_some() {
+            terminal::PtyRequirement::ProviderRequired
         } else {
-            TerminalBuilder::new_with_console_palette
+            terminal::PtyRequirement::LocalFallback
         };
-        let builder = construct(
-            working_directory,
-            None,
-            shell,
-            environment.into_iter().collect(),
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            path_hyperlink_regexes,
-            settings.path_hyperlink_timeout_ms,
-            false,
-            cx.entity_id().as_u64(),
-            None,
+        let builder = TerminalBuilder::spawn(
+            terminal::TerminalSpawnOptions {
+                working_directory,
+                env: environment.into_iter().collect(),
+                cursor_shape: settings.cursor_shape,
+                alternate_scroll: settings.alternate_scroll,
+                max_scroll_history_lines: settings.max_scroll_history_lines,
+                path_hyperlink_regexes,
+                path_hyperlink_timeout_ms: settings.path_hyperlink_timeout_ms,
+                pty_provider: mux_provider
+                    .clone()
+                    .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
+                initial_console_palette,
+                initial_bounds,
+                pty_requirement,
+                ..terminal::TerminalSpawnOptions::new(
+                    shell,
+                    cx.entity_id().as_u64(),
+                    PathStyle::local(),
+                )
+            },
             cx,
-            Vec::new(),
-            PathStyle::local(),
-            mux_provider
-                .clone()
-                .map(|provider| provider as Arc<dyn terminal::PtyProvider>),
-            initial_console_palette,
-            initial_bounds,
         );
         let this = cx.entity().downgrade();
         let spawned = SpawnedTerminal {
@@ -822,15 +813,7 @@ impl Zetta {
             restored_working_directory,
             mux_provider,
             #[cfg(feature = "zmux")]
-            shared_pane: None,
-            #[cfg(feature = "zmux")]
-            zosh_session: None,
-            #[cfg(feature = "zmux")]
-            transport_fallback: None,
-            #[cfg(feature = "zmux")]
-            shared_runtime: None,
-            #[cfg(feature = "zmux")]
-            shared_state: None,
+            shared: None,
             shell_integration_startup_command,
             tracked_multi_command_launch,
             image_paste_handler: Some(image_paste_handler),
@@ -869,6 +852,13 @@ impl Zetta {
         clippy::too_many_arguments,
         reason = "six values the spawn is resolved from, plus the GPUI context"
     )]
+    #[cfg_attr(
+        not(windows),
+        expect(
+            unused_variables,
+            reason = "only the Windows-only Cygwin arm reads the tab, the pane and the context"
+        )
+    )]
     fn resolve_spawn_shell(
         &mut self,
         profile: &Profile,
@@ -879,9 +869,6 @@ impl Zetta {
         wsl_cwd_file: Option<&Path>,
         cx: &mut Context<Self>,
     ) -> Option<Shell> {
-        // Only the Cygwin arm below reads these, and it is Windows-only.
-        #[cfg(not(windows))]
-        let (_, _, _) = (tab_id, pane_id, &cx);
         Some(match shell {
             Some(shell) => shell,
             None if is_wsl_shell(&profile.command) => {
@@ -940,15 +927,7 @@ impl Zetta {
             tracked_multi_command_launch,
             mux_provider,
             #[cfg(feature = "zmux")]
-            shared_pane,
-            #[cfg(feature = "zmux")]
-            zosh_session,
-            #[cfg(feature = "zmux")]
-            transport_fallback,
-            #[cfg(feature = "zmux")]
-            shared_runtime,
-            #[cfg(feature = "zmux")]
-            shared_state,
+            mut shared,
             image_paste_handler,
             ..
         } = spawned;
@@ -956,18 +935,18 @@ impl Zetta {
             builder = builder.with_image_paste_handler(image_paste_handler);
         }
         #[cfg(feature = "zmux")]
-        if let (Some(shared_pane), Some(runtime)) = (&shared_pane, &shared_runtime) {
-            let mux_pane_id = shared_pane.pane_id();
+        if let Some(shared) = &mut shared {
+            let mux_pane_id = shared.pane.pane_id();
             self.mux_panes.adopt_session_with_runtime(
                 tab_id,
-                shared_pane.session_id(),
-                runtime.clone(),
+                shared.pane.session_id(),
+                shared.runtime.clone(),
             );
             self.mux_panes.record(pane_id, mux_pane_id);
-            let key = SharedSessionKey::new(runtime, shared_pane.session_id());
+            let key = SharedSessionKey::new(&shared.runtime, shared.pane.session_id());
             self.shared_collaboration
                 .record_pane(&key, mux_pane_id, pane_id);
-            if let Some(state) = shared_state {
+            if let Some(state) = shared.state.take() {
                 let _ = self.shared_collaboration.accept_pane_added(
                     &key,
                     state.clone(),
@@ -1055,19 +1034,19 @@ impl Zetta {
             }
         }
         #[cfg(feature = "zmux")]
-        if let (Some(shared_pane), Some(runtime)) = (&shared_pane, &shared_runtime) {
+        if let Some(shared) = shared {
             this.register_spawned_shared_pane(
                 MuxPaneIds {
                     tab_id,
                     pane_id,
-                    session_id: shared_pane.session_id(),
-                    mux_pane_id: shared_pane.pane_id(),
+                    session_id: shared.pane.session_id(),
+                    mux_pane_id: shared.pane.pane_id(),
                 },
                 SpawnedSharedPane {
-                    shared_pane,
-                    zosh_session,
-                    transport_fallback,
-                    runtime,
+                    shared_pane: &shared.pane,
+                    zosh_session: shared.zosh_session,
+                    transport_fallback: shared.transport_fallback,
+                    runtime: &shared.runtime,
                     terminal: &terminal,
                 },
                 window,

@@ -76,6 +76,8 @@ fn impersonation_level_of_next_client(pipe: &str) -> thread::JoinHandle<i32> {
                 Some(ERROR_PIPE_CONNECTED)
             );
         }
+        // SAFETY: the pipe handle is owned by this thread alone, and the File
+        // adopts it exactly once and closes it on drop.
         let mut stream = unsafe { File::from_raw_handle(handle) };
         stream.read_exact(&mut [0_u8; 1]).unwrap();
 

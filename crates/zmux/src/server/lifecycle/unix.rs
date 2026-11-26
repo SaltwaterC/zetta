@@ -87,8 +87,8 @@ pub(super) fn read_until(
     needle: &str,
     deadline: Instant,
 ) -> Result<bool> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
     use std::io::Read as _;
-    use std::os::fd::AsRawFd as _;
 
     let mut tail = String::new();
     let mut buffer = [0_u8; 4096];
@@ -97,27 +97,17 @@ pub(super) fn read_until(
         if left.is_zero() {
             return Ok(false);
         }
-        let mut poll = libc::pollfd {
-            fd: file.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one initialized `pollfd` describing a descriptor this
-        // function owns a handle to, with a bounded millisecond timeout.
-        let ready = unsafe {
-            libc::poll(
-                &raw mut poll,
-                1,
-                i32::try_from(left.as_millis()).unwrap_or(i32::MAX),
-            )
-        };
-        if ready < 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::Interrupted {
-                continue;
+        // Clamped to what `poll`'s millisecond argument holds, where the
+        // platform has no `ppoll`.
+        let left = left.min(Duration::from_millis(i32::MAX as u64));
+        let timeout = Timespec::try_from(left).ok();
+        let ready = match poll(&mut [PollFd::new(&*file, PollFlags::IN)], timeout.as_ref()) {
+            Ok(ready) => ready,
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(error) => {
+                return Err(std::io::Error::from(error)).context("waiting for the pane's terminal");
             }
-            return Err(error).context("waiting for the pane's terminal");
-        }
+        };
         if ready == 0 {
             return Ok(false);
         }

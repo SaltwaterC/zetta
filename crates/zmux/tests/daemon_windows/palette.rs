@@ -30,14 +30,12 @@ fn assert_powershell_prompt_resets_after_cwd_marker(
     let mut prompt_count = 0;
     while let Some(marker_start) = output[search_from..].find("\u{1b}]2;zetta-cwd:") {
         let marker_start = search_from + marker_start;
-        let marker_end = output[marker_start..]
-            .find("\u{1b}\\")
-            .map(|offset| marker_start + offset + 2)
-            .unwrap_or_else(|| {
-                panic!(
-                    "{program} with profile {profile_name} emitted an unterminated CWD marker: {output:?}"
-                )
-            });
+        let Some(offset) = output[marker_start..].find("\u{1b}\\") else {
+            panic!(
+                "{program} with profile {profile_name} emitted an unterminated CWD marker: {output:?}"
+            )
+        };
+        let marker_end = marker_start + offset + 2;
         assert!(
             output[marker_end..].starts_with("\u{1b}[0mZETTA_PROMPT"),
             "{program} with profile {profile_name} did not reset before the prompt: {output:?}"
@@ -294,7 +292,7 @@ fn palette_viewer_subprocess() {
     let client = Client::connect_ready_at(&request.directory)
         .expect("connecting the second viewer")
         .expect("the test daemon must be running");
-    let pane = match client
+    let AttachOutcome::SharedAttached { pane, .. } = client
         .attach_as(
             request.session_id,
             request.pane_id,
@@ -302,9 +300,8 @@ fn palette_viewer_subprocess() {
             None,
         )
         .expect("attaching the second viewer from its own process")
-    {
-        AttachOutcome::SharedAttached { pane, .. } => pane,
-        _ => panic!("the second viewer must attach in shared mode"),
+    else {
+        panic!("the second viewer must attach in shared mode");
     };
     client
         .set_console_palette(request.session_id, request.pane_id, request.palette)

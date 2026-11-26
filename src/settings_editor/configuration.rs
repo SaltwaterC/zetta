@@ -107,7 +107,7 @@ impl ConfigurationForm {
     pub fn session_auto_protect_is_offered(&self) -> bool {
         !self.session_persistence_recipients.text.trim().is_empty()
             && (!self.session_persistence_identity.text.trim().is_empty()
-                || crate::config::default_session_identity_path().is_some())
+                || zmux::persistence::default_identity_path().is_some())
     }
 
     pub fn load(path: &Path, config: &Config) -> Result<Self> {

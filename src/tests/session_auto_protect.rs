@@ -63,7 +63,7 @@ fn automatic_protection_needs_the_flag_a_recipient_and_an_identity() {
         identity: None,
         ..complete
     };
-    let has_default_identity = crate::config::default_session_identity_path().is_some();
+    let has_default_identity = zmux::persistence::default_identity_path().is_some();
     assert_eq!(
         without_identity.auto_protect_is_configured(),
         has_default_identity

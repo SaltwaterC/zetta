@@ -72,10 +72,8 @@ fn prompt_for_new_path_with_zenity(
     suggested_name: Option<&str>,
     portal_error: &anyhow::Error,
 ) -> Result<Option<PathBuf>> {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the portal fallback runs on a background executor"
-    )]
+    // A blocking std command is fine here: the portal fallback runs on a
+    // background executor.
     let mut output = new_std_command("zenity")
         .arg("--file-selection")
         .arg("--save")

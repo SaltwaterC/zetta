@@ -62,80 +62,41 @@ mod platform {
 
     /// Blocks until the child exits, leaving it unreaped for `try_wait`.
     pub fn exit_waiter(child: &dyn Child) -> Option<impl FnOnce() + Send + 'static> {
-        let pid = libc::id_t::try_from(child.process_id()?).ok()?;
+        use rustix::process::{Pid, WaitId, WaitIdOptions, waitid};
+
+        let pid = Pid::from_raw(i32::try_from(child.process_id()?).ok()?)?;
         Some(move || {
-            loop {
-                // SAFETY: `info` is a plain C struct that waitid only writes.
-                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-                // SAFETY: waitid is given a valid pointer to `info`. WNOWAIT
-                // leaves the child waitable, so the loop's own `try_wait`
-                // still reaps it and still owns its exit status.
-                let result = unsafe {
-                    libc::waitid(
-                        libc::P_PID,
-                        pid,
-                        &raw mut info,
-                        libc::WEXITED | libc::WNOWAIT,
-                    )
-                };
-                // EINTR is retried. Anything else — ECHILD once the loop has
-                // reaped the child itself — means there is nothing left to
-                // wait for, and waking the loop for it is harmless.
-                if result == 0
-                    || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-                {
-                    return;
-                }
-            }
+            // WNOWAIT leaves the child waitable, so the loop's own `try_wait`
+            // still reaps it and still owns its exit status. EINTR is retried.
+            // Anything else — ECHILD once the loop has reaped the child itself
+            // — means there is nothing left to wait for, and waking the loop
+            // for it is harmless.
+            while let Err(rustix::io::Errno::INTR) = waitid(
+                WaitId::Pid(pid),
+                WaitIdOptions::EXITED | WaitIdOptions::NOWAIT,
+            ) {}
         })
     }
 }
 
 #[cfg(windows)]
 mod platform {
+    use std::os::windows::io::{AsRawHandle as _, BorrowedHandle};
+
     use portable_pty::Child;
-    use windows::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
-    use windows::Win32::System::Threading::{GetCurrentProcess, INFINITE, WaitForSingleObject};
-
-    /// A process handle owned by the watcher thread. A `HANDLE` is a raw
-    /// pointer and so not `Send`, but a kernel handle is usable from any
-    /// thread of the process that owns it.
-    struct OwnedProcess(HANDLE);
-
-    // SAFETY: see the type's documentation; only the watcher thread uses it.
-    unsafe impl Send for OwnedProcess {}
-
-    impl Drop for OwnedProcess {
-        fn drop(&mut self) {
-            // SAFETY: the handle was duplicated for this value alone.
-            let _ = unsafe { CloseHandle(self.0) };
-        }
-    }
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 
     /// Blocks until the child exits. The handle is duplicated so the wait
     /// does not depend on how long the loop keeps the child's own.
     pub fn exit_waiter(child: &dyn Child) -> Option<impl FnOnce() + Send + 'static> {
-        let source = HANDLE(child.as_raw_handle()?.cast());
-        let mut duplicate = HANDLE::default();
-        // SAFETY: both process handles are pseudo-handles for this process,
-        // `source` is the child's live handle, and `duplicate` is written
-        // only on success.
-        unsafe {
-            DuplicateHandle(
-                GetCurrentProcess(),
-                source,
-                GetCurrentProcess(),
-                &mut duplicate,
-                0,
-                false,
-                DUPLICATE_SAME_ACCESS,
-            )
-        }
-        .ok()?;
-        let process = OwnedProcess(duplicate);
+        // SAFETY: the child keeps its process handle open for as long as it
+        // is borrowed, which covers the duplication.
+        let source = unsafe { BorrowedHandle::borrow_raw(child.as_raw_handle()?) };
+        let process = source.try_clone_to_owned().ok()?;
         Some(move || {
             // SAFETY: the handle stays open until `process` drops below.
-            unsafe { WaitForSingleObject(process.0, INFINITE) };
+            unsafe { WaitForSingleObject(HANDLE(process.as_raw_handle()), INFINITE) };
             drop(process);
         })
     }

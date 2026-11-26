@@ -138,15 +138,18 @@ pub struct IoStatus {
     pub status: usize,
     pub information: usize,
 }
+/// A request's completion, borrowing the reply its `write` buffer points the
+/// driver at, so it cannot be sent once that reply has gone.
 #[repr(C)]
 #[derive(Default)]
-pub struct Completion {
+pub struct Completion<'reply> {
     pub id: Identifier,
     pub status: IoStatus,
     pub write: Buffer,
+    reply: std::marker::PhantomData<&'reply mut [u8]>,
 }
-impl Completion {
-    pub fn new(id: Identifier, status: i32, information: usize, bytes: &mut [u8]) -> Self {
+impl<'reply> Completion<'reply> {
+    pub fn new(id: Identifier, status: i32, information: usize, bytes: &'reply mut [u8]) -> Self {
         Self {
             id,
             status: IoStatus {
@@ -158,6 +161,7 @@ impl Completion {
                 size: bytes.len() as u32,
                 offset: 0,
             },
+            reply: std::marker::PhantomData,
         }
     }
 }

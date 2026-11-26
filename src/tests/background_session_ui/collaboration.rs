@@ -101,7 +101,7 @@ fn canonical_state(session_id: u64, revision: u64) -> SharedSessionState {
 fn two_pane_state(session_id: u64, revision: u64, active_pane: u64) -> SharedSessionState {
     let mut state = canonical_state(session_id, revision);
     let layout = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 41 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 42 }),
@@ -514,7 +514,7 @@ fn a_snapshot_placing_a_pane_the_tab_does_not_hold_is_refused() {
     let mut two_panes = canonical_state(9, 5);
     two_panes.summary.panes.push(pane_summary(42));
     two_panes.presentation.layout = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: crate::pane::DEFAULT_PANE_SPLIT_RATIO,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 41 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 42 }),
@@ -588,13 +588,13 @@ fn pane_events_update_mappings_and_watcher_lifecycle_is_generation_safe() {
 #[test]
 fn local_layout_diffs_choose_targeted_ratio_and_swap_operations() {
     let current = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 200,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
     };
     let resized = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 300,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
@@ -609,7 +609,7 @@ fn local_layout_diffs_choose_targeted_ratio_and_swap_operations() {
     ));
 
     let swapped = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 200,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
@@ -626,21 +626,21 @@ fn local_layout_diffs_choose_targeted_ratio_and_swap_operations() {
 #[test]
 fn local_layout_diffs_choose_directional_move_and_rotation_operations() {
     let current = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 300,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
         second: Box::new(BackgroundPaneLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: SplitAxis::Horizontal,
             first_ratio: 400,
             first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
             second: Box::new(BackgroundPaneLayout::Pane { pane_id: 12 }),
         }),
     };
     let moved = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 700,
         first: Box::new(BackgroundPaneLayout::Split {
-            axis: "horizontal".to_owned(),
+            axis: SplitAxis::Horizontal,
             first_ratio: 400,
             first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
             second: Box::new(BackgroundPaneLayout::Pane { pane_id: 12 }),
@@ -656,13 +656,13 @@ fn local_layout_diffs_choose_directional_move_and_rotation_operations() {
     ));
 
     let pair = BackgroundPaneLayout::Split {
-        axis: "horizontal".to_owned(),
+        axis: SplitAxis::Horizontal,
         first_ratio: 300,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
     };
     let rotated = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 700,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 11 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 10 }),

@@ -40,7 +40,10 @@ pub(crate) enum ProfileIcon {
     /// automatic discovery on Windows.
     /// Only ever constructed by `automatic_for_program` under
     /// `#[cfg(windows)]`, where an executable can carry its own icon.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(
+        not(windows),
+        expect(dead_code, reason = "only Windows executables carry their own icon")
+    )]
     Executable(PathBuf),
 }
 
@@ -256,7 +259,8 @@ fn extract_executable_icon(executable: &Path) -> Result<PathBuf> {
         Win32::{
             Graphics::Gdi::{
                 BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection,
-                DIB_RGB_COLORS, DeleteDC, DeleteObject, HGDIOBJ, SelectObject,
+                DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, HBITMAP, HDC, HGDIOBJ,
+                SelectObject,
             },
             UI::{
                 Shell::ExtractIconExW,
@@ -266,60 +270,97 @@ fn extract_executable_icon(executable: &Path) -> Result<PathBuf> {
         core::HSTRING,
     };
 
+    /// Each GDI or icon handle this function creates, destroyed on every
+    /// path out of it, including the early returns.
+    struct Icon(HICON);
+    impl Drop for Icon {
+        fn drop(&mut self) {
+            // SAFETY: `ExtractIconExW` created the icon for this function,
+            // and this is its one owner.
+            _ = unsafe { DestroyIcon(self.0) };
+        }
+    }
+    struct Bitmap(HBITMAP);
+    impl Drop for Bitmap {
+        fn drop(&mut self) {
+            // SAFETY: `CreateDIBSection` created the bitmap for this function,
+            // and it is no longer selected into a device context: `Dc` is
+            // declared after it, so it is dropped first.
+            _ = unsafe { DeleteObject(HGDIOBJ::from(self.0)) };
+        }
+    }
+    struct Dc(HDC, HGDIOBJ);
+    impl Drop for Dc {
+        fn drop(&mut self) {
+            // SAFETY: `CreateCompatibleDC` created the context for this
+            // function, and `self.1` is what was selected into it before.
+            unsafe {
+                SelectObject(self.0, self.1);
+                _ = DeleteDC(self.0);
+            }
+        }
+    }
+
     const SIZE: i32 = 32;
     let path = HSTRING::from(executable.as_os_str());
     let mut icon = HICON::default();
+    // SAFETY: `path` is a NUL-terminated HSTRING, `icon` is one writable
+    // HICON matching the count of 1, and the small-icon array is omitted.
     let extracted = unsafe { ExtractIconExW(&path, 0, Some(&mut icon), None, 1) };
     anyhow::ensure!(
         extracted > 0 && !icon.is_invalid(),
         "executable has no icon"
     );
+    let icon = Icon(icon);
 
-    // SAFETY: The icon and GDI handles are owned by this function. The DIB is
-    // top-down and 32-bit so its bytes can be copied into a safe Rust buffer
-    // after drawing.
-    let result = unsafe {
-        let info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: SIZE,
-                biHeight: -SIZE,
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
+    // The DIB is top-down and 32-bit so its bytes can be copied out as rows of
+    // pixels.
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: SIZE,
+            biHeight: -SIZE,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
             ..Default::default()
-        };
-        let mut bits: *mut c_void = std::ptr::null_mut();
-        let bitmap = CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0)
-            .context("creating the executable icon bitmap")?;
-        let dc = CreateCompatibleDC(None);
-        if dc.is_invalid() {
-            _ = DeleteObject(HGDIOBJ::from(bitmap));
-            DestroyIcon(icon)?;
-            anyhow::bail!("creating the executable icon device context");
-        }
-        let previous = SelectObject(dc, HGDIOBJ::from(bitmap));
-        let draw_result = DrawIconEx(dc, 0, 0, icon, SIZE, SIZE, 0, None, DI_NORMAL);
-        let pixels = if draw_result.is_ok() && !bits.is_null() {
-            std::slice::from_raw_parts(bits.cast::<u8>(), (SIZE * SIZE * 4) as usize).to_vec()
-        } else {
-            Vec::new()
-        };
-        SelectObject(dc, previous);
-        _ = DeleteObject(HGDIOBJ::from(bitmap));
-        _ = DeleteDC(dc);
-        DestroyIcon(icon)?;
-        anyhow::ensure!(!pixels.is_empty(), "drawing the executable icon");
-
-        let mut rgba = pixels;
-        for pixel in rgba.as_chunks_mut::<4>().0 {
-            pixel.swap(0, 2);
-        }
-        RgbaImage::from_raw(SIZE as u32, SIZE as u32, rgba)
-            .context("decoding the executable icon bitmap")?
+        },
+        ..Default::default()
     };
+    let mut bits: *mut c_void = std::ptr::null_mut();
+    // SAFETY: `info` describes the bitmap and `bits` is a writable pointer
+    // for its pixels; no file mapping is passed.
+    let bitmap = unsafe { CreateDIBSection(None, &info, DIB_RGB_COLORS, &mut bits, None, 0) }
+        .context("creating the executable icon bitmap")?;
+    let bitmap = Bitmap(bitmap);
+    anyhow::ensure!(!bits.is_null(), "creating the executable icon bitmap");
+    // SAFETY: a memory context compatible with the screen; no handle is passed.
+    let dc = unsafe { CreateCompatibleDC(None) };
+    anyhow::ensure!(
+        !dc.is_invalid(),
+        "creating the executable icon device context"
+    );
+    // SAFETY: `dc` and `bitmap.0` are live handles this function created.
+    let dc = Dc(dc, unsafe { SelectObject(dc, HGDIOBJ::from(bitmap.0)) });
+    // SAFETY: `dc` has the bitmap selected and `icon.0` is a live icon; the
+    // icon is drawn at the bitmap's own size.
+    unsafe { DrawIconEx(dc.0, 0, 0, icon.0, SIZE, SIZE, 0, None, DI_NORMAL) }
+        .context("drawing the executable icon")?;
+    // GDI may batch the drawing; the bits are read directly, so it has to have
+    // reached them first.
+    // SAFETY: takes no arguments and only flushes this thread's GDI batch.
+    _ = unsafe { GdiFlush() };
+    // SAFETY: `bits` is the DIB section's pixel memory, SIZE x SIZE 32-bit
+    // pixels, which lives as long as `bitmap` does, past this copy.
+    let mut rgba =
+        unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), (SIZE * SIZE * 4) as usize) }
+            .to_vec();
+    drop((dc, bitmap, icon));
+    for pixel in rgba.as_chunks_mut::<4>().0 {
+        pixel.swap(0, 2);
+    }
+    let result = RgbaImage::from_raw(SIZE as u32, SIZE as u32, rgba)
+        .context("decoding the executable icon bitmap")?;
 
     let cache_dir = std::env::var_os("LOCALAPPDATA")
         .map_or_else(std::env::temp_dir, PathBuf::from)

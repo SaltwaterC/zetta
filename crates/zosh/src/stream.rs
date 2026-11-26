@@ -98,7 +98,7 @@ pub struct PaneSession {
     thread: Option<JoinHandle<()>>,
     #[cfg_attr(
         not(all(test, unix)),
-        allow(
+        expect(
             dead_code,
             reason = "only the Unix interop tests count the loop's passes"
         )
@@ -157,7 +157,7 @@ impl PaneSession {
             session.request_scrollback(scrollback_kib);
         }
 
-        let wake = Arc::new(Wake::new().context("creating the session wake-up pipe")?);
+        let wake = Arc::new(Wake::new().context("creating the session wake-up")?);
         let output = Arc::new(OutputPipe::default());
         let finished = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));

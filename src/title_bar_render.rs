@@ -351,7 +351,7 @@ impl Zetta {
                     compact_tab_bottom_right: frame.compact_tab_bottom_right,
                     corner_radius: frame.corner_radius,
                     tab_bar_background: colors.tab_bar_background,
-                    compact_leading_background: if self.tab_move_mode {
+                    compact_leading_background: if self.tab_move_mode() {
                         colors.status_bar_background
                     } else {
                         title_bar_background
@@ -371,7 +371,7 @@ impl Zetta {
                         .position(|index| *index == self.active_tab)
                         .unwrap_or_default(),
                     view: view.clone(),
-                    tab_move_mode_active: self.tab_move_mode,
+                    tab_move_mode_active: self.tab_move_mode(),
                     overflow_selection: self.tab_overflow_selection_side,
                     border_color: colors.border,
                     left_menu_handle: self.tab_overflow_left_menu_handle.clone(),

@@ -213,7 +213,7 @@ pub(super) fn subscription_loop(client: Client, first: Connection, subscription:
                 // into an informational log.
                 Ok((Event::Replacing, _)) => announced = true,
                 Ok((Event::SharedSessionUpdated { state }, _)) => {
-                    shared.report(SharedSessionEvent::Updated(state))
+                    shared.report(SharedSessionEvent::Updated(state));
                 }
                 Ok((
                     Event::SharedPaneAdded {

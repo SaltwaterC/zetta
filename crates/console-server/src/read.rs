@@ -100,6 +100,8 @@ pub(crate) fn get_char(record: &[u8; 20], keys: Keys, vt: bool) -> Option<Key> {
             return Some(Key::Vkey(vk, state));
         }
         // The key that types NUL (Ctrl+@ on US layouts).
+        // SAFETY: VkKeyScanW takes a UTF-16 unit by value and touches no
+        // caller memory.
         let zero = unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::VkKeyScanW(0) };
         let needs = |bit: i16| zero & bit != 0;
         if (zero & 0xff) as u16 == vk

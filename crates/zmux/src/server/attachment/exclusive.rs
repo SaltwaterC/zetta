@@ -181,7 +181,7 @@ pub(in crate::server) fn take_exclusive(
             summary,
             handles: handles.values,
         },
-        &handles.attachments,
+        &handles.attachments.borrowed(),
     ) {
         release_failed_handover(daemon, daemon.sessions(), session_id, pane_id, &client_id);
         return Err(error);

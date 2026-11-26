@@ -10,8 +10,7 @@
 use std::{
     fs::File,
     io,
-    mem::ManuallyDrop,
-    os::windows::io::{AsRawHandle as _, FromRawHandle as _},
+    os::windows::io::AsRawHandle as _,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -62,15 +61,15 @@ pub(super) fn size() -> Option<(u16, u16)> {
 /// otherwise, which would end the relay over one stray byte of pane output.
 /// Writing the handle as a file passes the bytes to the console as they are,
 /// decoded in the UTF-8 code page [`RawMode::enter`] selects.
-pub(super) fn output() -> ConsoleOutput {
-    // SAFETY: the handle is this process's standard output, which stays open
-    // for the life of the process; `ManuallyDrop` keeps this from closing it.
-    ConsoleOutput(ManuallyDrop::new(unsafe {
-        File::from_raw_handle(io::stdout().as_raw_handle())
-    }))
+/// A duplicate of the handle, so the relay owns what it writes to; this fails
+/// when there is no standard output to duplicate.
+pub(super) fn output() -> io::Result<ConsoleOutput> {
+    use std::os::windows::io::AsHandle as _;
+    let handle = io::stdout().as_handle().try_clone_to_owned()?;
+    Ok(ConsoleOutput(File::from(handle)))
 }
 
-pub(super) struct ConsoleOutput(ManuallyDrop<File>);
+pub(super) struct ConsoleOutput(File);
 
 impl io::Write for ConsoleOutput {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {

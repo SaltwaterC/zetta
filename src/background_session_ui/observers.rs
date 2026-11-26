@@ -390,7 +390,25 @@ impl Zetta {
         cx.subscribe_in(
             &terminal,
             window,
-            move |this, _, event: &TerminalEvent, window, cx| {
+            move |this,
+                  _,
+                  event: &TerminalEvent,
+                  #[cfg_attr(
+                not(feature = "notifications"),
+                expect(
+                    unused_variables,
+                    reason = "only a desktop notification needs the window"
+                )
+            )]
+                  window,
+                  #[cfg_attr(
+                not(feature = "notifications"),
+                expect(
+                    unused_variables,
+                    reason = "only a desktop notification needs the context"
+                )
+            )]
+                  cx| {
                 if let Some(command) = restorable_command_change(event) {
                     this.update_active_command(tab_id, pane_id, command);
                 }
@@ -404,8 +422,6 @@ impl Zetta {
                 if let TerminalEvent::DesktopNotification(notification) = event {
                     this.show_desktop_notification(tab_id, pane_id, notification, window, cx);
                 }
-                #[cfg(not(feature = "notifications"))]
-                let _ = (window, cx);
             },
         )
         .detach();

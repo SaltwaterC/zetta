@@ -224,11 +224,10 @@ pub(crate) fn append_grid_snapshot(
     if style != Style::default() {
         out.extend_from_slice(b"\x1b[0m");
     }
-    // Whatever newlines are still pending belong to trailing blank rows. A
-    // grid is always full height, so emitting them would push the restored
-    // screen up by however many rows the session was not using, and leave the
-    // cursor below the content rather than at it.
-    let _ = pending_newlines;
+    // Whatever newlines are still pending belong to trailing blank rows, and
+    // are dropped. A grid is always full height, so emitting them would push
+    // the restored screen up by however many rows the session was not using,
+    // and leave the cursor below the content rather than at it.
 
     // The cursor the session left behind. The position only needs to be
     // emitted when it differs from where the plain replay lands. A cursor

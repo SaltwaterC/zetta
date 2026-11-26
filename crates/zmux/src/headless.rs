@@ -4,6 +4,7 @@
 //! model.  A headless host only needs the execution half of a profile and a
 //! small, strict layout description that can be sent to the mux daemon.
 
+use crate::protocol::SplitAxis;
 use std::{collections::HashMap, io::Read, path::PathBuf};
 
 use alacritty_terminal::tty::ConsolePalette;
@@ -223,7 +224,7 @@ fn convert_layout(
 ) -> Result<SharedDraftLayout> {
     match node {
         LayoutNode::Horizontal(layout) => Ok(split_layout(
-            "horizontal",
+            SplitAxis::Horizontal,
             &layout.horizontal,
             inherited_env,
             panes,
@@ -232,7 +233,7 @@ fn convert_layout(
             active_pane,
         )?),
         LayoutNode::Vertical(layout) => Ok(split_layout(
-            "vertical",
+            SplitAxis::Vertical,
             &layout.vertical,
             inherited_env,
             panes,
@@ -279,7 +280,7 @@ fn convert_layout(
                 working_directory,
                 inherit_working_directory_from: None,
                 load_shell_integration: pane.load_shell_integration,
-                size: pane.size.map(Into::into).unwrap_or_else(default_size),
+                size: pane.size.map_or_else(default_size, Into::into),
                 console_palette: pane.console_palette.unwrap_or_default(),
                 metadata,
             });
@@ -289,7 +290,7 @@ fn convert_layout(
 }
 
 fn split_layout(
-    axis: &str,
+    axis: SplitAxis,
     children: &[Box<LayoutNode>; 2],
     inherited_env: &HashMap<String, String>,
     panes: &mut Vec<SharedPaneDraft>,
@@ -314,7 +315,7 @@ fn split_layout(
         active_pane,
     )?;
     Ok(SharedDraftLayout::Split {
-        axis: axis.to_owned(),
+        axis,
         first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
         first: Box::new(first),
         second: Box::new(second),

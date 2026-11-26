@@ -106,7 +106,7 @@ impl Server {
     /// The count always; the pids only when they fit after the header.
     pub(super) fn process_list(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         offset: u32,
     ) -> io::Result<(i32, usize)> {

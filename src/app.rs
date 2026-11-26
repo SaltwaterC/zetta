@@ -24,17 +24,26 @@ use strum::IntoEnumIterator as _;
 pub(crate) enum TabDropPosition {
     Before(u64),
     After(u64),
-    /// No tab surface was hit. The tab bar does not construct this during a
-    /// normal drag, but it keeps the outside-drop no-op explicit — which is
-    /// why only the sidecar builds one, to pin that the drop is a no-op.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "matched in production, constructed only by the sidecar"
-        )
-    )]
-    Outside,
+}
+
+/// The keyboard layout-editing mode the window is in, if any.
+///
+/// The modes are mutually exclusive: each rebinds the same arrow keys, so
+/// entering one leaves whichever other was active.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum LayoutEditMode {
+    #[default]
+    None,
+    PaneResize,
+    PaneMove,
+    TabMove,
+}
+
+impl LayoutEditMode {
+    /// Enters `mode`, or leaves it when it is the one already active.
+    pub(crate) fn toggled(self, mode: Self) -> Self {
+        if self == mode { Self::None } else { mode }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,6 +74,37 @@ pub(crate) enum TerminalLaunch {
     Handoff(crate::windows_integration::WindowsHandoffRequest),
 }
 
+/// What [`Zetta::open_tab_with_profile_context`] opens. Most tabs are a profile
+/// spawned fresh in some project, so [`NewTabRequest::new`] leaves the command,
+/// directory and launch at their defaults; struct update syntax sets the rest.
+pub(crate) struct NewTabRequest {
+    pub(crate) profile: Profile,
+    pub(crate) project: Option<Arc<ProjectConfig>>,
+    pub(crate) origin: NewTabOrigin,
+    /// A command for the new pane's shell to run, quoted for it on the way in.
+    pub(crate) pending_command: Option<Vec<String>>,
+    /// Overrides the profile's, the project's and any inherited directory.
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) launch: TerminalLaunch,
+}
+
+impl NewTabRequest {
+    pub(crate) fn new(
+        profile: Profile,
+        project: Option<Arc<ProjectConfig>>,
+        origin: NewTabOrigin,
+    ) -> Self {
+        Self {
+            profile,
+            project,
+            origin,
+            pending_command: None,
+            working_directory: None,
+            launch: TerminalLaunch::Spawn,
+        }
+    }
+}
+
 impl NewTabOrigin {
     fn inherits_working_directory(self, scope: WorkingDirectoryScope) -> bool {
         match self {
@@ -84,7 +124,6 @@ fn reorder_items_by_id<T>(
     let (target_id, insert_after) = match position {
         TabDropPosition::Before(target_id) => (target_id, false),
         TabDropPosition::After(target_id) => (target_id, true),
-        TabDropPosition::Outside => return None,
     };
     let source_index = items.iter().position(|item| item_id(item) == source_id)?;
     let target_index = items.iter().position(|item| item_id(item) == target_id)?;
@@ -171,10 +210,7 @@ pub(crate) fn tab_drop_preserves_pinning(
     let Some(source_pinned) = tabs.by_id(source_id).map(|tab| tab.pinned) else {
         return false;
     };
-    let target_id = match position {
-        TabDropPosition::Before(target_id) | TabDropPosition::After(target_id) => target_id,
-        TabDropPosition::Outside => return false,
-    };
+    let (TabDropPosition::Before(target_id) | TabDropPosition::After(target_id)) = position;
     tabs.by_id(target_id)
         .is_some_and(|tab| tab.pinned == source_pinned)
 }
@@ -709,12 +745,10 @@ pub(crate) struct Zetta {
     pub(crate) pane_controls_hidden_for: HashSet<u64>,
     pub(crate) pane_controls_last_motion: Instant,
     pub(crate) pane_controls_hide_task: Option<Task<()>>,
-    pub(crate) pane_resize_mode: bool,
+    pub(crate) layout_edit_mode: LayoutEditMode,
     pub(crate) pane_resize_keys: PaneResizeKeys,
     pub(crate) pane_resize_repeat_generation: u64,
     pub(crate) pane_resize_drag: Option<PaneResizeDrag>,
-    pub(crate) pane_move_mode: bool,
-    pub(crate) tab_move_mode: bool,
     pub(crate) titlebar_dragging: bool,
     pub(crate) button_layout: WindowButtonLayout,
     pub(crate) performance_overlay: Option<PerformanceOverlay>,
@@ -776,6 +810,18 @@ pub(crate) struct CloseTabConfirmation {
 }
 
 impl Zetta {
+    pub(crate) fn pane_resize_mode(&self) -> bool {
+        self.layout_edit_mode == LayoutEditMode::PaneResize
+    }
+
+    pub(crate) fn pane_move_mode(&self) -> bool {
+        self.layout_edit_mode == LayoutEditMode::PaneMove
+    }
+
+    pub(crate) fn tab_move_mode(&self) -> bool {
+        self.layout_edit_mode == LayoutEditMode::TabMove
+    }
+
     fn serial_console_is_open(&self) -> bool {
         #[cfg(feature = "serial-console")]
         {
@@ -845,7 +891,9 @@ impl Zetta {
         // Named groups belong to the window, and a reopened one gets its tabs
         // back by directory, so they would come back empty.
         self.tab_groups = Default::default();
-        self.tab_move_mode = false;
+        if self.tab_move_mode() {
+            self.layout_edit_mode = LayoutEditMode::None;
+        }
         self.command_palette = None;
         self.multi_command = None;
         self.multi_command_mode = CommandPromptMode::Multi;
@@ -1000,12 +1048,12 @@ impl Zetta {
             });
             if let Some(profile) = profile {
                 this.open_tab_with_profile_context(
-                    profile,
-                    Some(project),
-                    NewTabOrigin::ProjectEntry,
-                    initial_command.clone(),
-                    initial_working_directory.clone(),
-                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                    NewTabRequest {
+                        pending_command: initial_command.clone(),
+                        working_directory: initial_working_directory.clone(),
+                        launch: initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                        ..NewTabRequest::new(profile, Some(project), NewTabOrigin::ProjectEntry)
+                    },
                     window,
                     cx,
                 );
@@ -1014,12 +1062,12 @@ impl Zetta {
             }
         } else if let Some(profile) = initial_profile {
             this.open_tab_with_profile_context(
-                profile,
-                None,
-                NewTabOrigin::CurrentSession,
-                initial_command.clone(),
-                initial_working_directory.clone(),
-                initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                NewTabRequest {
+                    pending_command: initial_command.clone(),
+                    working_directory: initial_working_directory.clone(),
+                    launch: initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                    ..NewTabRequest::new(profile, None, NewTabOrigin::CurrentSession)
+                },
                 window,
                 cx,
             );
@@ -1032,12 +1080,12 @@ impl Zetta {
             );
             if let Some(profile) = profile {
                 this.open_tab_with_profile_context(
-                    profile,
-                    None,
-                    NewTabOrigin::CurrentSession,
-                    initial_command,
-                    initial_working_directory,
-                    initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                    NewTabRequest {
+                        pending_command: initial_command,
+                        working_directory: initial_working_directory,
+                        launch: initial_launch.take().unwrap_or(TerminalLaunch::Spawn),
+                        ..NewTabRequest::new(profile, None, NewTabOrigin::CurrentSession)
+                    },
                     window,
                     cx,
                 );
@@ -1202,12 +1250,10 @@ impl Zetta {
             pane_controls_hidden_for: HashSet::new(),
             pane_controls_last_motion: Instant::now(),
             pane_controls_hide_task: None,
-            pane_resize_mode: false,
+            layout_edit_mode: LayoutEditMode::None,
             pane_resize_keys: PaneResizeKeys::default(),
             pane_resize_repeat_generation: 0,
             pane_resize_drag: None,
-            pane_move_mode: false,
-            tab_move_mode: false,
             titlebar_dragging: false,
             button_layout,
             performance_overlay: None,

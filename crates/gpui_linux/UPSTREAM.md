@@ -57,6 +57,12 @@ Retain these Zetta patches when synchronizing:
   `src/tests/linux/x11/clipboard_capture.rs`; run the ignored
   `captured_selection_tests` with `--features test-support -- --ignored
   --test-threads=1` against an isolated X server.
+  The Wayland half's own pipe handling is safe code: the write end is lent to
+  `receive` with `as_fd()`, the read end becomes a `File` through a
+  duplicate, and the calloop source reads through `&File` rather than
+  `NoIoDrop::get_mut`. That needs `filedescriptor` 0.8.3, whose
+  `FileDescriptor` implements `AsFd`. Upstream's synchronous `read_bytes`
+  keeps its `borrow_raw`.
 - create a Wayland window's `WgpuRenderer` when the window is first painted
   rather than when it opens (`src/linux/wayland/deferred_renderer.rs`, a
   Zetta-authored module with tests in

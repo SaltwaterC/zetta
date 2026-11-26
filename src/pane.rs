@@ -50,9 +50,8 @@ pub(crate) const MAX_PANES_PER_TAB: usize = 64;
 pub(crate) const MAX_CONCURRENT_MULTI_COMMAND_SPAWNS: usize = 4;
 pub(crate) const TERMINAL_SPAWN_NOTIFY_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const PANE_OUTPUT_DEFAULT_FILENAME: &str = "terminal-output.txt";
-pub(crate) const PANE_SPLIT_RATIO_SCALE: u16 = 1_000;
+pub(crate) const PANE_SPLIT_RATIO_SCALE: u16 = zetta_layout::SPLIT_RATIO_SCALE;
 pub(crate) const DEFAULT_PANE_SPLIT_RATIO: u16 = PANE_SPLIT_RATIO_SCALE / 2;
-const PANE_ROTATION_AREA_EPSILON: f64 = 1e-9;
 /// Below this score gap, two directional-navigation candidates are treated
 /// as equally close and disambiguated by recency instead of tree order.
 const ADJACENT_PANE_TIE_EPSILON: f32 = 1e-4;

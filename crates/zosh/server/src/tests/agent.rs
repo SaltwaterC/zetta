@@ -188,8 +188,8 @@ fn windows_agent_pipe_is_ready_and_bridges_a_complete_frame() {
 #[cfg(windows)]
 #[test]
 fn windows_bootstrap_primes_the_forwarded_agent_pipe() {
-    use std::os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _};
-    use windows::Win32::System::Pipes::ConnectNamedPipe;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows::Win32::{Foundation::HANDLE, System::Pipes::ConnectNamedPipe};
 
     let path = PathBuf::from(format!(
         r"\\.\pipe\zosh-prime-test-{}-{}",
@@ -199,23 +199,17 @@ fn windows_bootstrap_primes_the_forwarded_agent_pipe() {
             .unwrap()
             .as_nanos()
     ));
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let handle = windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), 1024, true)
+    let handle = windows_pipe::create(&windows_pipe::PipeName::new(path.as_os_str()), 1024, true)
         .expect("create test agent pipe");
-    let handle = handle.0 as usize;
     let agent = thread::spawn(move || {
-        let handle = windows::Win32::Foundation::HANDLE(handle as _);
-        if let Err(error) = unsafe { ConnectNamedPipe(handle, None) } {
+        // SAFETY: `handle` is open until it becomes `stream` below.
+        if let Err(error) = unsafe { ConnectNamedPipe(HANDLE(handle.as_raw_handle()), None) } {
             assert_eq!(
                 error.code().0 as u32 & 0xffff,
                 windows::Win32::Foundation::ERROR_PIPE_CONNECTED.0
             );
         }
-        let mut stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
+        let mut stream = std::fs::File::from(handle);
         let mut request = [0_u8; 5];
         stream.read_exact(&mut request).unwrap();
         assert_eq!(request, [0, 0, 0, 1, 11]);
@@ -223,70 +217,6 @@ fn windows_bootstrap_primes_the_forwarded_agent_pipe() {
     });
     prime_agent_path(&path).expect("prime a Windows forwarded agent");
     agent.join().unwrap();
-}
-
-/// Serves one connection on a fresh pipe at `path` the way an agent would:
-/// reads `request_len` bytes, then reports the impersonation level the client
-/// granted, then answers with `reply`.
-#[cfg(windows)]
-fn impersonation_level_of_next_client(
-    path: &Path,
-    request_len: usize,
-    reply: Vec<u8>,
-) -> thread::JoinHandle<windows::Win32::Security::SECURITY_IMPERSONATION_LEVEL> {
-    use std::os::windows::{ffi::OsStrExt as _, io::FromRawHandle as _};
-    use windows::Win32::{
-        Foundation::{CloseHandle, ERROR_PIPE_CONNECTED, HANDLE},
-        Security::{
-            GetTokenInformation, RevertToSelf, SECURITY_IMPERSONATION_LEVEL, TOKEN_QUERY,
-            TokenImpersonationLevel,
-        },
-        System::{
-            Pipes::{ConnectNamedPipe, ImpersonateNamedPipeClient},
-            Threading::{GetCurrentThread, OpenThreadToken},
-        },
-    };
-
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let handle = windows_pipe::create(windows::core::PCWSTR(wide.as_ptr()), 1024, true)
-        .expect("create test agent pipe")
-        .0 as usize;
-    thread::spawn(move || {
-        let handle = HANDLE(handle as _);
-        if let Err(error) = unsafe { ConnectNamedPipe(handle, None) } {
-            assert_eq!(error.code().0 as u32 & 0xffff, ERROR_PIPE_CONNECTED.0);
-        }
-        let mut stream = unsafe { std::fs::File::from_raw_handle(handle.0 as _) };
-        let mut request = vec![0_u8; request_len];
-        stream.read_exact(&mut request).unwrap();
-
-        unsafe { ImpersonateNamedPipeClient(handle) }.expect("impersonating the client");
-        let mut token = HANDLE::default();
-        // As self: an identification-level token cannot be opened as itself.
-        let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, &mut token) };
-        unsafe { RevertToSelf() }.expect("reverting");
-        opened.expect("opening the impersonation token");
-        let mut level = SECURITY_IMPERSONATION_LEVEL::default();
-        let mut length = 0_u32;
-        let queried = unsafe {
-            GetTokenInformation(
-                token,
-                TokenImpersonationLevel,
-                Some((&raw mut level).cast()),
-                std::mem::size_of::<SECURITY_IMPERSONATION_LEVEL>() as u32,
-                &mut length,
-            )
-        };
-        let _ = unsafe { CloseHandle(token) };
-        queried.expect("reading the impersonation level");
-
-        stream.write_all(&reply).unwrap();
-        level
-    })
 }
 
 /// Priming connects to the forwarded agent's pipe, which another process
@@ -304,7 +234,8 @@ fn windows_priming_grants_the_agent_pipe_identification_only() {
             .unwrap()
             .as_nanos()
     ));
-    let agent = impersonation_level_of_next_client(&path, 5, frame(&[12, 0, 0, 0, 0]));
+    let agent =
+        windows_pipe::impersonation_level_of_next_client(&path, 5, frame(&[12, 0, 0, 0, 0]));
     prime_agent_path(&path).expect("prime a Windows forwarded agent");
     assert_eq!(agent.join().unwrap(), SecurityIdentification);
 }
@@ -314,18 +245,15 @@ fn windows_priming_grants_the_agent_pipe_identification_only() {
 #[cfg(windows)]
 #[test]
 fn windows_agent_pipe_refuses_a_name_that_already_exists() {
-    use windows::Win32::Foundation::CloseHandle;
+    let name = windows_pipe::PipeName::new(std::ffi::OsStr::new(&format!(
+        r"\\.\pipe\zosh-first-instance-test-{}",
+        std::process::id()
+    )));
+    let squatter = windows_pipe::create(&name, 1024, true).expect("the first instance");
 
-    let wide = format!(r"\\.\pipe\zosh-first-instance-test-{}", std::process::id())
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let name = windows::core::PCWSTR(wide.as_ptr());
-    let squatter = windows_pipe::create(name, 1024, true).expect("the first instance");
+    assert!(windows_pipe::create(&name, 1024, true).is_err());
 
-    assert!(windows_pipe::create(name, 1024, true).is_err());
-
-    let _ = unsafe { CloseHandle(squatter) };
+    drop(squatter);
 }
 
 /// The directory is never more open than `0700`, not just once `bind` is done:

@@ -14,10 +14,40 @@ pub(super) fn request(token: &str, command: &str) -> ControlRequest {
     }
 }
 
+/// The words are the wire format: older and newer clients, and zmux's
+/// `reconnect_result`, match on them as strings.
+#[test]
+fn control_statuses_keep_their_wire_words() {
+    for (status, word) in [
+        (ControlStatus::Ok, "ok"),
+        (ControlStatus::Rejected, "rejected"),
+        (ControlStatus::Unchanged, "unchanged"),
+        (ControlStatus::Failed, "failed"),
+        (ControlStatus::Ready, "ready"),
+        (ControlStatus::AuthenticationFailed, "authentication_failed"),
+        (ControlStatus::SessionNotFound, "session_not_found"),
+        (ControlStatus::SessionStarting, "session_starting"),
+    ] {
+        let encoded = serde_json::to_string(&status).unwrap();
+        assert_eq!(encoded, format!("\"{word}\""));
+        assert_eq!(
+            serde_json::from_str::<ControlStatus>(&encoded).unwrap(),
+            status
+        );
+    }
+}
+
+#[test]
+fn a_status_from_another_version_decodes_as_unknown() {
+    let decoded: ControlResponse =
+        serde_json::from_str(r#"{"status":"deferred","themes":[]}"#).unwrap();
+    assert_eq!(decoded.status, ControlStatus::Unknown);
+}
+
 #[test]
 fn pane_control_responses_round_trip_labels_and_structured_errors() {
     let response = ControlResponse {
-        status: "rejected".to_owned(),
+        status: ControlStatus::Rejected,
         run_id: None,
         themes: Vec::new(),
         pane_theme: None,
@@ -31,7 +61,7 @@ fn pane_control_responses_round_trip_labels_and_structured_errors() {
     };
     let encoded = serde_json::to_vec(&response).unwrap();
     let decoded: ControlResponse = serde_json::from_slice(&encoded).unwrap();
-    assert_eq!(decoded.status, "rejected");
+    assert_eq!(decoded.status, ControlStatus::Rejected);
     assert_eq!(decoded.pane_labels, ["Pane 1", "api"]);
     assert_eq!(decoded.error.as_ref().unwrap().code, "pane_rejected");
 }
@@ -39,7 +69,7 @@ fn pane_control_responses_round_trip_labels_and_structured_errors() {
 #[test]
 fn silent_mode_response_round_trips_its_state() {
     let response = ControlResponse {
-        status: "ok".to_owned(),
+        status: ControlStatus::Ok,
         run_id: None,
         themes: Vec::new(),
         pane_theme: None,

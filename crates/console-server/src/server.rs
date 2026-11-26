@@ -5,15 +5,21 @@ use crate::budget::{Budget, Charge};
 use crate::codepage::{self, Decoder};
 use crate::editing::{self, SharedEditing};
 use crate::input::ReadParams;
-use crate::native::{self, Handle};
+use crate::native;
 use crate::output::ConsoleOutput;
 use crate::protocol::*;
 use crate::state::{ConsoleState, Palette};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::mem::size_of;
+use std::os::windows::io::OwnedHandle;
 use std::thread::JoinHandle;
 use zetta_sync::RecoverPoison as _;
+
+// The two errors reading the next request reports once ConDrv has closed the
+// console. They end the request loop rather than fail it.
+const DRIVER_CLOSED: i32 = windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE as i32;
+const DRIVER_DISCONNECTED: i32 = windows_sys::Win32::Foundation::ERROR_PIPE_NOT_CONNECTED as i32;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Object {
@@ -201,25 +207,25 @@ impl Server {
                     .is_some_and(|&open| access.conflicts_with(open))
         })
     }
-    pub fn serve(&mut self, handle: &Handle) -> io::Result<()> {
+    pub fn serve(&mut self, handle: &OwnedHandle) -> io::Result<()> {
         let mut packet = Packet::default();
-        let mut completion: Option<Completion> = None;
+        // The previous request's answer, sent with the next read: completing
+        // and receiving in one ioctl removes a round trip per write.
+        let mut answer: Option<(Identifier, i32, usize)> = None;
         loop {
-            // The previous reply's pointers stay live through this call.
-            // Completing and receiving in one ioctl removes a round trip per write.
-            let (input, len) = completion.as_ref().map_or((std::ptr::null(), 0), |value| {
-                ((value as *const Completion).cast(), size_of::<Completion>())
+            let completion = answer.take().map(|(id, status, information)| {
+                Completion::new(id, status, information, &mut self.reply)
             });
-            let received = match native::ioctl(
-                handle,
-                READ_IO,
-                input,
-                len,
-                (&mut packet as *mut Packet).cast(),
-                size_of::<Packet>(),
-            ) {
-                Ok(received) => received as usize,
-                Err(error) if matches!(error.raw_os_error(), Some(109 | 233)) => break,
+            let received = match native::read_io(handle, completion.as_ref(), &mut packet) {
+                Ok(received) => received,
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(DRIVER_CLOSED | DRIVER_DISCONNECTED)
+                    ) =>
+                {
+                    break;
+                }
                 Err(error) => return Err(error),
             };
             if received < size_of::<Descriptor>() {
@@ -234,15 +240,9 @@ impl Server {
                 result => result?,
             };
             if status == 0x103 {
-                completion = None;
                 continue;
             }
-            completion = Some(Completion::new(
-                packet.descriptor.id,
-                status,
-                information,
-                &mut self.reply,
-            ));
+            answer = Some((packet.descriptor.id, status, information));
         }
         if !self.processes.is_empty() {
             return Err(io::Error::other("console pipe broke with attached clients"));
@@ -253,7 +253,7 @@ impl Server {
     }
     fn dispatch(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         packet: &Packet,
         available: usize,
     ) -> io::Result<(i32, usize)> {
@@ -300,7 +300,7 @@ impl Server {
     }
     /// ConsoleHandleConnectionRequest: the first client names the console,
     /// and each client gets its process token plus input and output handles.
-    fn connect(&mut self, handle: &Handle, d: Descriptor) -> io::Result<(i32, usize)> {
+    fn connect(&mut self, handle: &OwnedHandle, d: Descriptor) -> io::Result<(i32, usize)> {
         if d.input_size < 36 {
             return Ok((INVALID_PARAMETER, 0));
         }
@@ -366,7 +366,7 @@ impl Server {
     }
     pub fn write_request(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         offset: u32,
         unicode: bool,

@@ -289,7 +289,7 @@ fn refuse_busy_connection(mut stream: UnixStream) {
     let _ = write_message(
         &mut stream,
         &refusal_response(
-            "rejected",
+            ControlStatus::Rejected,
             PROCESS_BUSY,
             "the Zetta process is serving too many control connections",
         ),
@@ -297,9 +297,9 @@ fn refuse_busy_connection(mut stream: UnixStream) {
 }
 
 /// A response that carries only a status and a structured error.
-fn refusal_response(status: &str, code: &str, message: &str) -> ControlResponse {
+fn refusal_response(status: ControlStatus, code: &str, message: &str) -> ControlResponse {
     ControlResponse {
-        status: status.to_owned(),
+        status,
         run_id: None,
         themes: Vec::new(),
         pane_theme: None,
@@ -317,7 +317,7 @@ fn refusal_response(status: &str, code: &str, message: &str) -> ControlResponse 
 fn serve_control_connection(mut stream: UnixStream, state: &ControlServerState, accepted: Instant) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     let mut response = ControlResponse {
-        status: String::new(),
+        status: ControlStatus::Rejected,
         run_id: None,
         themes: Vec::new(),
         pane_theme: None,
@@ -348,10 +348,10 @@ fn serve_control_connection(mut stream: UnixStream, state: &ControlServerState, 
     // A request that was applied while the process was quitting is reported as
     // refused, so a client cannot be told a change landed that the closing
     // window may not have kept.
-    response.status = if status == "ok" && state.stopping.load(Ordering::Acquire) {
-        "rejected".to_owned()
+    response.status = if status == ControlStatus::Ok && state.stopping.load(Ordering::Acquire) {
+        ControlStatus::Rejected
     } else {
-        status.to_owned()
+        status
     };
     let _ = write_message(&mut stream, &response);
 }
@@ -389,17 +389,17 @@ impl ControlDispatch<'_> {
     }
 
     /// Sends a command and waits for the window to acknowledge it.
-    fn send(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> &'static str {
+    fn send(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> ControlStatus {
         dispatch_control_command(self, build)
     }
 
     /// Acknowledge when the application queue accepts the command.
-    fn queue(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> &'static str {
+    fn queue(&self, build: impl FnOnce(Sender<bool>) -> ProcessControlCommand) -> ControlStatus {
         let (completion, _) = channel();
         if self.stopping.load(Ordering::Acquire) || !self.submit(build(completion)) {
-            "rejected"
+            ControlStatus::Rejected
         } else {
-            "ok"
+            ControlStatus::Ok
         }
     }
 
@@ -411,7 +411,7 @@ impl ControlDispatch<'_> {
         code: &str,
         build: impl FnOnce(Sender<std::result::Result<T, String>>) -> ProcessControlCommand,
         apply: impl FnOnce(T, &mut ControlResponse),
-    ) -> &'static str {
+    ) -> ControlStatus {
         dispatch_control_result(self, response, code, build, apply)
     }
 }
@@ -428,12 +428,12 @@ fn apply_control_request(
     token: &str,
     deadline: Instant,
     response: &mut ControlResponse,
-) -> Option<&'static str> {
+) -> Option<ControlStatus> {
     let Some(command) = handle_control_request(stream, token, Some(deadline)) else {
         // An unauthenticated or undecodable request is refused on the
         // connection rather than dropped, so a client is told rather than left
         // waiting on a socket that closed.
-        return Some("rejected");
+        return Some(ControlStatus::Rejected);
     };
     // `run_wait` takes the connection over rather than answering with a status
     // — the client blocks on it until the command it is waiting for finishes —
@@ -493,7 +493,7 @@ fn apply_control_request(
 fn apply_window_command(
     command: ControlRequestCommand,
     dispatch: &ControlDispatch<'_>,
-) -> &'static str {
+) -> ControlStatus {
     match command {
         ControlRequestCommand::ReloadConfiguration { config_path } => {
             let (completion, completed) = channel();
@@ -502,9 +502,9 @@ fn apply_window_command(
                 completion,
             });
             if sent && wait_for_reload_completion(&completed, dispatch.stopping) {
-                "ok"
+                ControlStatus::Ok
             } else {
-                "rejected"
+                ControlStatus::Rejected
             }
         }
         ControlRequestCommand::OpenWindow => {
@@ -541,7 +541,7 @@ fn apply_pane_command(
     command: ControlRequestCommand,
     dispatch: &ControlDispatch<'_>,
     response: &mut ControlResponse,
-) -> &'static str {
+) -> ControlStatus {
     match command {
         ControlRequestCommand::ReplacePane {
             split,
@@ -581,7 +581,7 @@ fn apply_pane_command(
             },
             |(), _| {},
         ),
-        ControlRequestCommand::RunComplete { .. } => "rejected",
+        ControlRequestCommand::RunComplete { .. } => ControlStatus::Rejected,
         ControlRequestCommand::ListPaneLabels { attention_id } => dispatch.send_for(
             response,
             "pane_list_rejected",
@@ -602,7 +602,7 @@ fn apply_pane_command(
 fn apply_session_command(
     command: ControlRequestCommand,
     dispatch: &ControlDispatch<'_>,
-) -> &'static str {
+) -> ControlStatus {
     match command {
         ControlRequestCommand::ReconnectSession {
             runner_id,
@@ -664,7 +664,7 @@ fn apply_appearance_command(
     command: ControlRequestCommand,
     dispatch: &ControlDispatch<'_>,
     response: &mut ControlResponse,
-) -> &'static str {
+) -> ControlStatus {
     match command {
         ControlRequestCommand::SetTabIcon {
             attention_id,
@@ -712,9 +712,9 @@ fn apply_appearance_command(
             {
                 Some(themes) => {
                     response.themes = themes;
-                    "ok"
+                    ControlStatus::Ok
                 }
-                None => "rejected",
+                None => ControlStatus::Rejected,
             }
         }
         ControlRequestCommand::GetPaneTheme {
@@ -729,7 +729,7 @@ fn apply_appearance_command(
             let revision = pane_theme_revision();
             response.pane_theme_revision = Some(revision);
             if known_revision == Some(revision) {
-                return "unchanged";
+                return ControlStatus::Unchanged;
             }
             dispatch.send_for(
                 response,
@@ -769,7 +769,7 @@ fn apply_tab_command(
     command: ControlRequestCommand,
     dispatch: &ControlDispatch<'_>,
     response: &mut ControlResponse,
-) -> &'static str {
+) -> ControlStatus {
     match command {
         ControlRequestCommand::SetTabAttention {
             attention_id,
@@ -807,14 +807,14 @@ fn apply_tab_command(
                 attention_id,
                 completion,
             }) {
-                "rejected"
+                ControlStatus::Rejected
             } else if let Some(silent_mode) =
                 wait_for_silent_mode_completion(&completed, dispatch.stopping)
             {
                 response.silent_mode = silent_mode;
-                "ok"
+                ControlStatus::Ok
             } else {
-                "rejected"
+                ControlStatus::Rejected
             }
         }
         _ => unreachable!("apply_control_request routes only tab dispatch.commands here"),
@@ -830,11 +830,15 @@ fn apply_tab_command(
 fn dispatch_control_command(
     dispatch: &ControlDispatch<'_>,
     build: impl FnOnce(Sender<bool>) -> ProcessControlCommand,
-) -> &'static str {
+) -> ControlStatus {
     let (completion, completed) = channel();
     let accepted = dispatch.submit(build(completion))
         && wait_for_control_completion(&completed, dispatch.stopping);
-    if accepted { "ok" } else { "rejected" }
+    if accepted {
+        ControlStatus::Ok
+    } else {
+        ControlStatus::Rejected
+    }
 }
 
 /// The same, for a command that answers with a value or the reason it refused.
@@ -847,24 +851,24 @@ fn dispatch_control_result<T>(
     code: &str,
     build: impl FnOnce(Sender<std::result::Result<T, String>>) -> ProcessControlCommand,
     apply: impl FnOnce(T, &mut ControlResponse),
-) -> &'static str {
+) -> ControlStatus {
     let (completion, completed) = channel();
     if !dispatch.submit(build(completion)) {
-        return "rejected";
+        return ControlStatus::Rejected;
     }
     match wait_for_result_completion(&completed, dispatch.stopping) {
         Some(Ok(value)) => {
             apply(value, response);
-            "ok"
+            ControlStatus::Ok
         }
         Some(Err(message)) => {
             response.error = Some(ControlError {
                 code: code.to_owned(),
                 message,
             });
-            "rejected"
+            ControlStatus::Rejected
         }
-        None => "rejected",
+        None => ControlStatus::Rejected,
     }
 }
 
@@ -874,7 +878,7 @@ fn dispatch_control_result<T>(
 fn dispatch_reconnect_command(
     dispatch: &ControlDispatch<'_>,
     build: impl FnOnce(Sender<ReconnectSessionResult>) -> ProcessControlCommand,
-) -> &'static str {
+) -> ControlStatus {
     let (completion, completed) = channel();
     let result = if dispatch.submit(build(completion)) {
         wait_for_reconnect_completion(&completed, dispatch.stopping)
@@ -895,7 +899,7 @@ fn serve_run_wait_connection(
         let _ = write_message(
             stream,
             &ControlResponse {
-                status: "rejected".to_owned(),
+                status: ControlStatus::Rejected,
                 run_id: None,
                 themes: Vec::new(),
                 pane_theme: None,
@@ -924,7 +928,7 @@ fn serve_run_wait_connection(
         let _ = write_message(
             stream,
             &ControlResponse {
-                status: "rejected".to_owned(),
+                status: ControlStatus::Rejected,
                 run_id: None,
                 themes: Vec::new(),
                 pane_theme: None,
@@ -946,10 +950,10 @@ fn serve_run_wait_connection(
         completion,
     }) {
         let response = if dispatch.refused_full.get() {
-            refusal_response("rejected", PROCESS_BUSY, QUEUE_FULL_MESSAGE)
+            refusal_response(ControlStatus::Rejected, PROCESS_BUSY, QUEUE_FULL_MESSAGE)
         } else {
             refusal_response(
-                "rejected",
+                ControlStatus::Rejected,
                 "process_unavailable",
                 "the Zetta process is no longer accepting run requests",
             )
@@ -964,7 +968,7 @@ fn serve_run_wait_connection(
             let _ = write_message(
                 stream,
                 &ControlResponse {
-                    status: "failed".to_owned(),
+                    status: ControlStatus::Failed,
                     run_id: None,
                     themes: Vec::new(),
                     pane_theme: None,
@@ -989,7 +993,7 @@ fn serve_run_wait_connection(
             let _ = write_message(
                 stream,
                 &ControlResponse {
-                    status: "rejected".to_owned(),
+                    status: ControlStatus::Rejected,
                     run_id: None,
                     themes: Vec::new(),
                     pane_theme: None,
@@ -1068,7 +1072,7 @@ fn write_run_resolution(
             let _ = write_message(
                 stream,
                 &ControlResponse {
-                    status: "failed".to_owned(),
+                    status: ControlStatus::Failed,
                     run_id: Some(id),
                     themes: Vec::new(),
                     pane_theme: None,
@@ -1090,7 +1094,7 @@ fn write_run_resolution(
             if write_message(
                 stream,
                 &ControlResponse {
-                    status: "ready".to_owned(),
+                    status: ControlStatus::Ready,
                     run_id: Some(id),
                     themes: Vec::new(),
                     pane_theme: None,
@@ -1127,7 +1131,7 @@ fn write_run_resolution(
                     let _ = write_message(
                         stream,
                         &ControlResponse {
-                            status: "ok".to_owned(),
+                            status: ControlStatus::Ok,
                             run_id: Some(id),
                             themes: Vec::new(),
                             pane_theme: None,
@@ -1320,13 +1324,13 @@ fn wait_for_reconnect_completion(
     }
 }
 
-fn reconnect_session_status(result: ReconnectSessionResult) -> &'static str {
+fn reconnect_session_status(result: ReconnectSessionResult) -> ControlStatus {
     match result {
-        ReconnectSessionResult::Reconnected => "ok",
-        ReconnectSessionResult::AuthenticationFailed => "authentication_failed",
-        ReconnectSessionResult::SessionNotFound => "session_not_found",
-        ReconnectSessionResult::StillStarting => "session_starting",
-        ReconnectSessionResult::Rejected => "rejected",
+        ReconnectSessionResult::Reconnected => ControlStatus::Ok,
+        ReconnectSessionResult::AuthenticationFailed => ControlStatus::AuthenticationFailed,
+        ReconnectSessionResult::SessionNotFound => ControlStatus::SessionNotFound,
+        ReconnectSessionResult::StillStarting => ControlStatus::SessionStarting,
+        ReconnectSessionResult::Rejected => ControlStatus::Rejected,
     }
 }
 

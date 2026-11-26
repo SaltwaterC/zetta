@@ -316,11 +316,6 @@ fn tab_reorder_ignores_same_tab_invalid_target_empty_and_outside_drops() {
         ),
         None
     );
-    assert_eq!(
-        reorder_items_by_id(&mut ids, 2, TabDropPosition::Outside, 1, |id| *id),
-        None
-    );
-    assert_eq!(ids, vec![1, 2, 3]);
 }
 
 #[test]

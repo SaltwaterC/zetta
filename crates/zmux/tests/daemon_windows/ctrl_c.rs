@@ -41,6 +41,8 @@ fn ignored_ctrl_c_subprocess() {
     if std::env::var(IGNORE_CTRL_C_ENV).as_deref() != Ok("1") {
         return;
     }
+    // SAFETY: passing no handler only sets this process's ignore-Ctrl+C flag;
+    // there is no pointer for the call to keep.
     unsafe { SetConsoleCtrlHandler(None, true) }.expect("disabling the caller's Ctrl+C handling");
     let daemon = TestDaemon::start();
     assert_returns_to_prompt(&daemon.client());

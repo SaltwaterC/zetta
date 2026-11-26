@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::session_state::{AxisState, LayoutState, PaneState, TabState};
+use crate::session_state::{LayoutState, PaneState, TabState};
 
 fn pane_summary(id: u64) -> BackgroundPaneSummary {
     BackgroundPaneSummary {
@@ -131,7 +131,7 @@ fn detached_attach_drops_an_ended_pane_and_keeps_the_survivor() {
     let mut stale = tab_state(vec![pane_state(101, Some(11)), pane_state(102, Some(12))]);
     stale.shared = false;
     stale.layout = LayoutState::Split {
-        axis: AxisState::Vertical,
+        axis: SplitAxis::Vertical,
         first_ratio: 500,
         first: Box::new(LayoutState::Pane { pane_id: 101 }),
         second: Box::new(LayoutState::Pane { pane_id: 102 }),
@@ -206,7 +206,7 @@ fn canonical_presentation_repairs_layout_focus_and_visibility() {
     stale.minimized_panes = vec![302];
     stale.selected_minimized_pane = Some(302);
     let layout = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: SplitAxis::Vertical,
         first_ratio: 300,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 32 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 31 }),
@@ -222,7 +222,7 @@ fn canonical_presentation_repairs_layout_focus_and_visibility() {
     assert_eq!(
         repaired.layout,
         LayoutState::Split {
-            axis: AxisState::Vertical,
+            axis: SplitAxis::Vertical,
             first_ratio: 300,
             first: Box::new(LayoutState::Pane { pane_id: 32 }),
             second: Box::new(LayoutState::Pane { pane_id: 31 }),
@@ -239,7 +239,7 @@ fn canonical_presentation_repairs_layout_focus_and_visibility() {
 fn a_live_pane_missing_from_the_blob_is_synthesized_from_the_summary() {
     let stale = tab_state(vec![pane_state(401, Some(41))]);
     let layout = BackgroundPaneLayout::Split {
-        axis: "horizontal".to_owned(),
+        axis: SplitAxis::Horizontal,
         first_ratio: 700,
         first: Box::new(BackgroundPaneLayout::Pane { pane_id: 41 }),
         second: Box::new(BackgroundPaneLayout::Pane { pane_id: 42 }),
@@ -416,7 +416,7 @@ fn reattached_tabs_are_grouped_before_terminal_metadata_arrives(cx: &mut gpui::T
                 let mut state = tab_state(vec![pane_state(2, Some(1)), pane_state(1, Some(2))]);
                 state.active_pane = 1;
                 state.layout = LayoutState::Split {
-                    axis: AxisState::Vertical,
+                    axis: SplitAxis::Vertical,
                     first_ratio: 500,
                     first: Box::new(LayoutState::Pane { pane_id: 2 }),
                     second: Box::new(LayoutState::Pane { pane_id: 1 }),
@@ -606,11 +606,11 @@ fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::Test
         state.theme_override = None;
         state.active_pane = 1;
         state.layout = LayoutState::Split {
-            axis: AxisState::Vertical,
+            axis: SplitAxis::Vertical,
             first_ratio: 270,
             first: Box::new(LayoutState::Pane { pane_id: 3 }),
             second: Box::new(LayoutState::Split {
-                axis: AxisState::Horizontal,
+                axis: SplitAxis::Horizontal,
                 first_ratio: 630,
                 first: Box::new(LayoutState::Pane { pane_id: 2 }),
                 second: Box::new(LayoutState::Pane { pane_id: 1 }),
@@ -654,11 +654,11 @@ fn detach_publication_preserves_layout_cwd_and_project_theme(cx: &mut gpui::Test
                 vec![1, 3, 2]
             );
             let expected = BackgroundPaneLayout::Split {
-                axis: "vertical".into(),
+                axis: SplitAxis::Vertical,
                 first_ratio: 270,
                 first: Box::new(BackgroundPaneLayout::Pane { pane_id: 2 }),
                 second: Box::new(BackgroundPaneLayout::Split {
-                    axis: "horizontal".into(),
+                    axis: SplitAxis::Horizontal,
                     first_ratio: 630,
                     first: Box::new(BackgroundPaneLayout::Pane { pane_id: 1 }),
                     second: Box::new(BackgroundPaneLayout::Pane { pane_id: 3 }),

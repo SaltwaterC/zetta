@@ -92,9 +92,7 @@ pub struct PersistenceOptions {
 /// has no configured identity. This is deliberately client-side discovery: the
 /// daemon never receives the path or the private key.
 pub fn default_identity_path() -> Option<PathBuf> {
-    let home =
-        std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)?;
-    let path = home.join(".ssh").join("id_ed25519");
+    let path = crate::paths::home_dir()?.join(".ssh").join("id_ed25519");
     path.is_file().then_some(path)
 }
 
@@ -786,9 +784,7 @@ impl PersistenceStore {
             .recipients
             .encrypt_parts(&[&binding.header(), &plaintext])?;
         let path = authentication_path(&self.directory, id);
-        let previous_bytes = fs::metadata(&path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        let previous_bytes = fs::metadata(&path).map_or(0, |metadata| metadata.len());
         atomic_write(&path, &ciphertext)?;
         let new_bytes = ciphertext.len() as u64;
         let record = &mut self.manifest.records[record_index];

@@ -64,7 +64,8 @@ layering rule: every module named here is a sibling under `src/`.
 - `pane.rs`: pane layout, tab models, terminal creation, and pane focus. A
   module directory — the root owns `TerminalPane` and the settings a spawn is
   made with; `pane/layout.rs` (the `PaneLayout` split tree and every operation
-  that reshapes it), `pane/tab.rs` (`Tab`, and the maximize/minimize/focus
+  that reshapes it — move, swap and rotate delegate to `crates/zetta_layout`,
+  which the multiplexer's shared layouts use too), `pane/tab.rs` (`Tab`, and the maximize/minimize/focus
   state that changes what it shows without changing the tree),
   `pane/stack.rs` (`PaneStack`), and `pane/overlay.rs` (the overlay text,
   font-size steps, and the colour model the style picker edits). The root
@@ -405,9 +406,12 @@ without that feature, so no call site needs a feature predicate:
   by both builds; here these values deliberately do nothing
 - `logging.rs`: the GUI process's `log` sink (stderr, so the user journal);
   subcommands deliberately install none
-- `local_sessions.rs`: the part of the background-session protocol a no-`zmux`
-  build needs. Such a build still owns detached sessions in the Zetta process,
-  so these types mirror the application-facing pieces of the shared protocol
+- `zmux_stub.rs`: the `zmux` module of a no-`zmux` build, under the crate's own
+  paths (`zmux::auth`, `zmux::catalog`, `zmux::protocol`, `zmux::paths`,
+  `zmux::remote`). Such a build still owns detached sessions in the Zetta
+  process. Its verifier is the multiplexer's `auth/verifier.rs`, compiled in by
+  path; the catalog types mirror the application-facing pieces of the shared
+  protocol
 - `session_state_stub.rs`: restore-command validation shared by local sessions
 - `remote_session_ui_stub.rs`: the remote-session picker's disabled-build surface
 - `cli_service_stubs.rs`: disabled-build fallbacks for CLI-service actions
@@ -431,7 +435,8 @@ without that feature, so no call site needs a feature predicate:
   displaying-window request state, and standalone helper TTY transport.
   When enabled, the `notify` arm proxies to sibling `zntfy` through
   `cli_services/notify_proxy.rs`; its backend and built-in sounds live in
-  `crates/zntfy`
+  `crates/zntfy` behind its `backends` feature. Zetta links that crate on
+  every platform for `zntfy::request`, and enables the backends only on macOS
 - `byte_stream_pane.rs`: shared pane opener for byte-stream-backed panes
   (HTTP/TFTP server log panes, the serial console)
 - `http_server.rs`: proxy to sibling `zhttp` and engine re-exports for the HTTP
@@ -446,8 +451,10 @@ without that feature, so no call site needs a feature predicate:
 
 ## Platform and shell integration
 
-- `windows_integration.rs`: the Windows Terminal handoff ABI and console
-  handover; gated to Windows at its `mod` declaration
+- `windows_integration.rs`: default-terminal registration, the profile jump
+  list and the application identity; gated to Windows at its `mod`
+  declaration. The Windows Terminal handoff ABI and the COM server that
+  receives a handed-over console are `windows_integration/handoff.rs`
 - `linux_desktop.rs`: the managed user desktop entry and its profile actions;
   only the executable the entry launches may rewrite it
 - `shell_integration.rs`: the shell integration scripts, their feature

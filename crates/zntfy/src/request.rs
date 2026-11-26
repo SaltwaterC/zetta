@@ -1,12 +1,12 @@
 //! What a notification request is, and how a command line spells one.
 //!
 //! Zetta's own `zetta notify` parses the same options before handing the
-//! request to this crate's executable, but it does not link this crate on
-//! Linux or Windows, where the backends here are not wanted. It includes this
-//! file by path instead, so the module depends on nothing but `std`,
-//! `anyhow` and `zetta_cli_help`, and takes the program name and help text
-//! from its caller. `zetta attention --notify` reads its notification options
-//! through [`NotificationOptions`] for the same reason.
+//! request to this crate's executable. On Linux and Windows it links this
+//! crate without the `backends` feature, which leaves only this module, so the
+//! module depends on nothing but `std`, `anyhow` and `zetta_cli_help`, and
+//! takes the program name and help text from its caller.
+//! `zetta attention --notify` reads its notification options through
+//! [`NotificationOptions`] for the same reason.
 
 use std::ffi::{OsStr, OsString};
 

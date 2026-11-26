@@ -250,11 +250,9 @@ impl GitFixture {
             return false;
         };
         let reference_objects = fs::canonicalize(self.git_dir(reference).join("objects")).unwrap();
-        contents.lines().any(|line| {
-            fs::canonicalize(line)
-                .map(|path| path == reference_objects)
-                .unwrap_or(false)
-        })
+        contents
+            .lines()
+            .any(|line| fs::canonicalize(line).is_ok_and(|path| path == reference_objects))
     }
 }
 

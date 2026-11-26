@@ -423,6 +423,13 @@ impl Zetta {
         cx.notify();
     }
 
+    #[cfg_attr(
+        not(feature = "zmux"),
+        expect(
+            unused_variables,
+            reason = "only a zmux build has sessions shown in another window"
+        )
+    )]
     pub(crate) fn process_background_session_picker_entries(
         &self,
         cx: &App,
@@ -440,7 +447,6 @@ impl Zetta {
                 }
                 #[cfg(not(feature = "zmux"))]
                 {
-                    let _ = entry;
                     false
                 }
             };

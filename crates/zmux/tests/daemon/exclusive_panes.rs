@@ -28,7 +28,7 @@ fn closed_panes_do_not_return_when_the_remaining_session_is_restored() {
     saved.panes.push(pane_summary(panes[1].0));
     saved.active_pane = panes[1].0;
     saved.layout = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: zmux::protocol::SplitAxis::Vertical,
         first_ratio: 630,
         first: Box::new(BackgroundPaneLayout::Pane {
             pane_id: panes[0].0,
@@ -282,7 +282,7 @@ fn every_pane_in_a_restored_layout_keeps_its_exclusive_reader() {
     published.panes.push(second_summary);
     published.active_pane = second.pane_id;
     published.layout = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: zmux::protocol::SplitAxis::Vertical,
         first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
         first: Box::new(BackgroundPaneLayout::Pane {
             pane_id: first.pane_id,
@@ -370,7 +370,7 @@ fn an_exited_held_pane_is_unpublished_without_stalling_its_live_sibling() {
     second_summary.label = "Pane 2".to_owned();
     published.panes.push(second_summary);
     published.layout = BackgroundPaneLayout::Split {
-        axis: "vertical".to_owned(),
+        axis: zmux::protocol::SplitAxis::Vertical,
         first_ratio: zmux::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
         first: Box::new(BackgroundPaneLayout::Pane {
             pane_id: first.pane_id,
@@ -392,6 +392,8 @@ fn an_exited_held_pane_is_unpublished_without_stalling_its_live_sibling() {
     // End it while the exclusive viewer still owns its descriptor. This is
     // the interval in which pruning deliberately waits for that viewer, while
     // the catalog still has to stop offering the pane immediately.
+    // SAFETY: `kill` takes no pointers; the pid is a pane shell the daemon has
+    // not reaped yet, so it cannot have been reused.
     unsafe { libc::kill(first.child_pid as i32, libc::SIGKILL) };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {

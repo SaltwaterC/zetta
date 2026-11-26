@@ -13,35 +13,59 @@ doctest = false
 [[bin]]
 name = "zntfy"
 path = "src/main.rs"
+required-features = ["backends"]
+
+[features]
+default = ["backends"]
+# Everything but `request`: delivery, the worker, sounds and the CLI. Zetta
+# turns it off on Linux and Windows, where it parses requests itself and hands
+# them to the `zntfy` executable.
+backends = [
+    "dep:zetta_sync",
+    "dep:futures",
+    "dep:libc",
+    "dep:notify-rust",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:sysinfo",
+    "dep:tempfile",
+    "dep:zmux",
+    "dep:cpal",
+    "dep:ashpd",
+    "dep:url",
+    "dep:mac-usernotifications",
+    "dep:windows-registry",
+]
 
 [dependencies]
 zetta_cli_help = { path = "../zetta_cli_help" }
-zetta_sync = { path = "../zetta_sync" }
 anyhow = "1"
-futures = "0.3"
-libc = "0.2"
-notify-rust = { version = "4", features = ["preview-macos-un"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sysinfo = "0.37"
-tempfile = "3"
-zmux = { path = "../zmux", default-features = false }
+zetta_sync = { path = "../zetta_sync", optional = true }
+futures = { version = "0.3", optional = true }
+libc = { version = "0.2", optional = true }
+notify-rust = { version = "4", features = ["preview-macos-un"], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+sysinfo = { version = "0.37", optional = true }
+tempfile = { version = "3", optional = true }
+zmux = { path = "../zmux", default-features = false, optional = true }
 
 [target.'cfg(not(target_os = "macos"))'.dependencies]
-cpal = "0.16"
+cpal = { version = "0.16", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification"] }
-url = "2.2"
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "notification"], optional = true }
+url = { version = "2.2", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mac-usernotifications = { version = "0.3.1", features = ["blocking-wrappers"] }
+mac-usernotifications = { version = "0.3.1", features = ["blocking-wrappers"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-registry = "0.5"
+windows-registry = { version = "0.5", optional = true }
 
 [lints.clippy]
 manual_let_else = "deny"
 map_unwrap_or = "deny"
 redundant_closure = "deny"
 semicolon_if_nothing_returned = "deny"
+undocumented_unsafe_blocks = "deny"

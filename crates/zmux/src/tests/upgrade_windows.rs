@@ -20,6 +20,8 @@ fn handover_round_trips_through_a_pipe() {
     let mut announcement = Vec::new();
 
     send_handover_to(
+        // SAFETY: `GetCurrentProcess` takes nothing and returns a pseudo
+        // handle that needs no closing.
         unsafe { GetCurrentProcess() },
         &mut announcement,
         &handover(HANDOVER_VERSION),
@@ -52,6 +54,8 @@ fn the_lifetime_lock_is_announced_after_the_pipe() {
     let mut announcement = Vec::new();
 
     send_handover_to(
+        // SAFETY: `GetCurrentProcess` takes nothing and returns a pseudo
+        // handle that needs no closing.
         unsafe { GetCurrentProcess() },
         &mut announcement,
         &handover(HANDOVER_VERSION),

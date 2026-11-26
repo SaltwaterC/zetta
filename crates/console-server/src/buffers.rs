@@ -516,7 +516,7 @@ impl Server {
     /// NumRecords (out); the characters or attributes follow in the input.
     pub(super) fn write_output_string(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -559,7 +559,7 @@ impl Server {
     /// NumRecords (out); the result goes after the message.
     pub(super) fn read_output_string(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -654,7 +654,7 @@ impl Server {
     /// the buffer is written and the written rectangle returned.
     pub(super) fn write_output(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -699,7 +699,7 @@ impl Server {
     /// belong in the caller's array for the request rectangle.
     pub(super) fn read_output(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -930,7 +930,7 @@ impl Server {
     /// records follow. Prepending puts them before what is queued.
     pub(super) fn write_console_input(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {

@@ -49,7 +49,7 @@ impl Drop for ReconnectCompletion {
 /// are meaningless apart from the target they apply to.
 #[cfg_attr(
     not(feature = "zmux"),
-    allow(
+    expect(
         dead_code,
         reason = "a build without the multiplexer refuses the request whole, \
                   without reading what it asked for"
@@ -335,17 +335,20 @@ impl Zetta {
         let summary_title = persisted.summary.title.clone();
         let persisted_summary = persisted.summary;
         let snapshots = persisted.snapshots;
-        let mut state: crate::session_state::TabState =
-            match serde_json::from_value(persisted.state).context("reading restored tab state") {
-                Ok(state) => state,
-                Err(error) => {
-                    self.show_session_operation_error(
-                        format!("Could not restore disk session {session_id}: {error:#}"),
-                        cx,
-                    );
-                    return ReconnectSessionResult::Rejected;
-                }
-            };
+        let mut state = match restored_disk_tab_state(
+            persisted.state,
+            persisted.shared_state.as_ref(),
+            &persisted_summary,
+        ) {
+            Ok(state) => state,
+            Err(error) => {
+                self.show_session_operation_error(
+                    format!("Could not restore disk session {session_id}: {error:#}"),
+                    cx,
+                );
+                return ReconnectSessionResult::Rejected;
+            }
+        };
         let restored_panes = restored_pane_metadata(&state, &persisted_summary);
         let restored_metadata =
             self.prepare_restored_panes(restored_panes.clone(), ProjectContextPolicy::Local);
@@ -513,14 +516,12 @@ impl Zetta {
     #[cfg(not(feature = "session-persistence"))]
     pub(crate) fn resume_disk_session(
         &mut self,
-        session_id: u64,
-        secret: Option<SessionSecret>,
-        identities: Option<DiskResumeIdentities>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _session_id: u64,
+        _secret: Option<SessionSecret>,
+        _identities: Option<DiskResumeIdentities>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) -> ReconnectSessionResult {
-        let identities = identities.map(|identities| (identities.paths, identities.passphrases));
-        let _ = (session_id, secret, identities, window, cx);
         ReconnectSessionResult::Rejected
     }
 
@@ -729,12 +730,11 @@ impl Zetta {
     #[cfg(not(feature = "zmux"))]
     pub(crate) fn open_remote_session_from_cli(
         &mut self,
-        request: RemoteSessionRequest,
+        _request: RemoteSessionRequest,
         completion: std::sync::mpsc::Sender<ReconnectSessionResult>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
     ) {
-        let _ = (request, window, cx);
         let _ = completion.send(ReconnectSessionResult::Rejected);
     }
 
@@ -891,6 +891,34 @@ impl Zetta {
         }
         ReconnectSessionResult::SessionNotFound
     }
+}
+
+/// The tab a disk record rebuilds into.
+///
+/// A record's tab state is the window's own, and is null in a record no window
+/// ever published one to: a shared session made headless by `zmux create`, or
+/// a record an older daemon wrote for a tab that was never detached. Those are
+/// rebuilt from the canonical layout, as a live attach of the same session
+/// would be, rather than refused as unreadable.
+#[cfg(feature = "session-persistence")]
+fn restored_disk_tab_state(
+    state: serde_json::Value,
+    shared_state: Option<&zmux::messages::SharedSessionState>,
+    summary: &BackgroundSessionSummary,
+) -> Result<crate::session_state::TabState> {
+    let state = match (state.is_null(), shared_state) {
+        (true, Some(shared)) if !shared.state.is_null() => shared.state.clone(),
+        (true, shared) => {
+            let summary = shared.map_or(summary, |shared| &shared.summary);
+            anyhow::ensure!(
+                !summary.panes.is_empty(),
+                "the record has neither a saved tab nor any pane to rebuild one from"
+            );
+            return Ok(super::multiplexer::headless_tab_state(summary));
+        }
+        (false, _) => state,
+    };
+    serde_json::from_value(state).context("reading restored tab state")
 }
 
 #[cfg(test)]

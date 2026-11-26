@@ -11,12 +11,15 @@ fn the_window_is_hidden_reports_show_window_and_goes_away_cleanly() {
     )
     .unwrap();
     let hwnd = window.hwnd() as HWND;
+    // SAFETY: IsWindow takes a window handle by value and accepts any value.
     assert!(unsafe { IsWindow(hwnd) } != 0);
     assert_eq!(
+        // SAFETY: hwnd is the window `window` keeps alive until dropped.
         unsafe { IsWindowVisible(hwnd) },
         0,
         "a console window starts hidden"
     );
+    // SAFETY: hwnd is the window `window` keeps alive until dropped.
     unsafe {
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         ShowWindow(hwnd, SW_HIDE);
@@ -33,5 +36,6 @@ fn the_window_is_hidden_reports_show_window_and_goes_away_cleanly() {
         "{seen:?}"
     );
     drop(window);
+    // SAFETY: IsWindow accepts any handle value, including a destroyed one.
     assert_eq!(unsafe { IsWindow(hwnd) }, 0);
 }

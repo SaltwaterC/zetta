@@ -160,7 +160,7 @@ pub(super) fn remove_image_session(daemon: &Daemon, session_id: u64) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            log::warn!("could not remove staged images for session {session_id}: {error}")
+            log::warn!("could not remove staged images for session {session_id}: {error}");
         }
     }
 }

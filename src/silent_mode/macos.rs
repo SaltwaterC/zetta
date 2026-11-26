@@ -31,13 +31,20 @@ pub(super) fn request_focus_status_authorization() -> Option<FocusStatusAccess> 
     if !is_packaged_gui_launch() {
         return None;
     }
+    // SAFETY: a class getter with no arguments; objc2 leaves it unsafe only
+    // because the binding is unaudited, and it returns a retained object.
     let center = unsafe { INFocusStatusCenter::defaultCenter() };
+    // SAFETY: a no-argument getter on the live `center` returning a plain
+    // enum value.
     let status = unsafe { center.authorizationStatus() };
     let access = focus_status_access(status);
     if status == INFocusStatusAuthorizationStatus::NotDetermined {
         let completion = RcBlock::new(|status: INFocusStatusAuthorizationStatus| {
             eprintln!("zetta: macOS Focus status authorization result: {status:?}");
         });
+        // SAFETY: `center` is live, and the block has the declared
+        // signature. Intents copies the block before returning and may call
+        // it on any thread, which is sound because it captures nothing.
         unsafe {
             center.requestAuthorizationWithCompletionHandler(Some(&completion));
         }
@@ -73,11 +80,17 @@ pub(super) fn detect_macos_focus_observation() -> (FocusStatusAccess, SystemSile
     if !is_packaged_gui_launch() {
         return (FocusStatusAccess::Unknown, SystemSilentState::Unknown);
     }
+    // SAFETY: a class getter with no arguments; objc2 leaves it unsafe only
+    // because the binding is unaudited, and it returns a retained object.
     let center = unsafe { INFocusStatusCenter::defaultCenter() };
+    // SAFETY: a no-argument getter on the live `center` returning a plain
+    // enum value.
     let access = focus_status_access(unsafe { center.authorizationStatus() });
     if access != FocusStatusAccess::Authorized {
         return (access, SystemSilentState::Unknown);
     }
+    // SAFETY: no-argument getters on the live `center` and on the retained
+    // INFocusStatus it returns, which lives to the end of the statement.
     let Some(focused) = (unsafe { center.focusStatus().isFocused() }) else {
         return (
             FocusStatusAccess::AuthorizedButUnavailable,

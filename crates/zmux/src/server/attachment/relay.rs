@@ -104,7 +104,7 @@ pub(in crate::server) fn spawn_relay(
                 },
                 session_id,
                 pane_id,
-            )
+            );
         })
         .with_context(|| format!("starting the relay for client {client_process_id}"))?;
     Ok(Relay {

@@ -11,7 +11,7 @@
 //! It is compiled twice: as `zmux::private_fs`, and straight into a Zetta built
 //! without the `zmux` feature (see `src/main.rs`), so the checks have exactly
 //! one implementation. It may therefore use nothing beyond `std`, `anyhow`,
-//! `getrandom`, `libc` and `windows`, which both crates depend on.
+//! `getrandom`, `libc`, `rustix` and `windows`, which both crates depend on.
 //!
 //! # Unix
 //!
@@ -87,9 +87,7 @@ pub fn validate_private_dir(path: &Path) -> io::Result<()> {
 pub fn private_fallback_dir() -> PathBuf {
     #[cfg(unix)]
     {
-        // SAFETY: geteuid only reads the calling process's effective user ID
-        // and cannot fail.
-        std::env::temp_dir().join(format!("zetta-{}", unsafe { libc::geteuid() }))
+        std::env::temp_dir().join(format!("zetta-{}", rustix::process::geteuid().as_raw()))
     }
     #[cfg(not(unix))]
     std::env::temp_dir().join("zetta")
@@ -263,9 +261,7 @@ mod unix {
     }
 
     fn euid() -> u32 {
-        // SAFETY: geteuid only reads the calling process's effective user ID
-        // and cannot fail.
-        unsafe { libc::geteuid() }
+        rustix::process::geteuid().as_raw()
     }
 
     pub(super) fn resolve_private_dir(path: &Path, create: bool) -> io::Result<()> {
@@ -516,18 +512,18 @@ mod unix {
 }
 
 #[cfg(windows)]
-mod windows_impl {
+pub(crate) mod windows_impl {
     use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
 
     use windows::{
         Win32::{
-            Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree},
+            Foundation::{HANDLE, HLOCAL, LocalFree},
             Security::{
                 Authorization::{
                     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
                     SDDL_REVISION_1,
                 },
-                GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+                GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY,
                 TOKEN_USER, TokenUser,
             },
             Storage::FileSystem::{
@@ -607,31 +603,68 @@ mod windows_impl {
     }
 
     fn current_user_sid() -> io::Result<String> {
-        // SAFETY: the token handle is closed before returning, the buffer is
-        // sized by the first query and aligned for `TOKEN_USER`, and the SID
-        // string is freed after it has been copied.
+        // SAFETY: the current-process pseudo-handle is always open and needs
+        // no closing.
+        token_user(unsafe { GetCurrentProcess() })?.sid_string()
+    }
+
+    /// The user a process runs as: its token's `TOKEN_USER`, read into a
+    /// buffer aligned for it. The one reader of it, for this module and for
+    /// zmux's peer checks, so the alignment is got right once.
+    pub(crate) struct ProcessUser(Vec<u64>);
+
+    /// Reads the user of `process`, which must be open with query access.
+    pub(crate) fn token_user(process: HANDLE) -> io::Result<ProcessUser> {
+        use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+
+        let mut opened = HANDLE::default();
+        // SAFETY: `process` is a handle the caller holds open, and `opened`
+        // is written only on success.
+        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut opened) }.map_err(io::Error::other)?;
+        // SAFETY: `OpenProcessToken` succeeded, so this function owns `opened`.
+        let token = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+        let token = HANDLE(token.as_raw_handle());
+        let mut length = 0_u32;
+        // SAFETY: a size query: no buffer, and `length` receives the size.
+        let _ = unsafe { GetTokenInformation(token, TokenUser, None, 0, &mut length) };
+        if (length as usize) < std::mem::size_of::<TOKEN_USER>() {
+            return Err(io::Error::other("a process token reported no user"));
+        }
+        let mut buffer = vec![0_u64; (length as usize).div_ceil(8)];
+        // SAFETY: `buffer` is u64-aligned, which covers `TOKEN_USER`, and at
+        // least `length` bytes, the size passed.
         unsafe {
-            let mut token = HANDLE::default();
-            OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
-                .map_err(io::Error::other)?;
-            let mut length = 0_u32;
-            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut length);
-            let mut buffer = vec![0_u64; (length as usize).div_ceil(8)];
-            let queried = GetTokenInformation(
+            GetTokenInformation(
                 token,
                 TokenUser,
                 Some(buffer.as_mut_ptr().cast()),
                 length,
                 &mut length,
-            );
-            let _ = CloseHandle(token);
-            queried.map_err(io::Error::other)?;
-            let user = &*buffer.as_ptr().cast::<TOKEN_USER>();
-            let mut sid = PWSTR::null();
-            ConvertSidToStringSidW(user.User.Sid, &mut sid).map_err(io::Error::other)?;
-            let text = sid.to_string().map_err(io::Error::other);
-            LocalFree(Some(HLOCAL(sid.0.cast())));
-            text
+            )
+        }
+        .map_err(io::Error::other)?;
+        Ok(ProcessUser(buffer))
+    }
+
+    impl ProcessUser {
+        /// The user's SID, pointing into this value.
+        pub(crate) fn sid(&self) -> PSID {
+            // SAFETY: the query filled the buffer, which is aligned and large
+            // enough for it, with a `TOKEN_USER`.
+            unsafe { (*self.0.as_ptr().cast::<TOKEN_USER>()).User.Sid }
+        }
+
+        pub(crate) fn sid_string(&self) -> io::Result<String> {
+            let mut text = PWSTR::null();
+            // SAFETY: the SID points into `self`, alive for the call, and
+            // `text` receives a string freed below once copied.
+            unsafe { ConvertSidToStringSidW(self.sid(), &mut text) }.map_err(io::Error::other)?;
+            // SAFETY: the conversion succeeded, so `text` is NUL-terminated.
+            let copied = unsafe { text.to_string() }.map_err(io::Error::other);
+            // SAFETY: `ConvertSidToStringSidW` allocated `text` with
+            // `LocalAlloc`, and nothing reads it after this.
+            unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
+            copied
         }
     }
 

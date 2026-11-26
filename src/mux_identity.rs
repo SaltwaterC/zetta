@@ -72,8 +72,7 @@ fn expand_home(path: &str, home: &Path) -> PathBuf {
 }
 
 fn home_dir() -> PathBuf {
-    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
+    zmux::paths::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Whether a `zmux` command can need an identity, and so is worth reading

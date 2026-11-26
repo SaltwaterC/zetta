@@ -144,12 +144,8 @@ pub(crate) fn write_output_benchmark(
 }
 
 #[cfg(unix)]
-fn terminal_size_from_fd(fd: std::os::fd::RawFd) -> Option<TerminalSize> {
-    let mut size = std::mem::MaybeUninit::<libc::winsize>::zeroed();
-    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, size.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    let size = unsafe { size.assume_init() };
+fn terminal_size_from_fd(fd: impl std::os::fd::AsFd) -> Option<TerminalSize> {
+    let size = rustix::termios::tcgetwinsize(fd).ok()?;
     let columns = usize::from(size.ws_col);
     let rows = usize::from(size.ws_row);
     (columns > 0 && rows > 0).then_some(TerminalSize { columns, rows })
@@ -157,14 +153,9 @@ fn terminal_size_from_fd(fd: std::os::fd::RawFd) -> Option<TerminalSize> {
 
 #[cfg(unix)]
 fn current_terminal_size() -> Option<TerminalSize> {
-    use std::os::fd::AsRawFd;
-
-    terminal_size_from_fd(libc::STDOUT_FILENO)
-        .or_else(|| terminal_size_from_fd(libc::STDERR_FILENO))
-        .or_else(|| {
-            let terminal = std::fs::File::open("/dev/tty").ok()?;
-            terminal_size_from_fd(terminal.as_raw_fd())
-        })
+    terminal_size_from_fd(std::io::stdout())
+        .or_else(|| terminal_size_from_fd(std::io::stderr()))
+        .or_else(|| terminal_size_from_fd(std::fs::File::open("/dev/tty").ok()?))
 }
 
 #[cfg(windows)]
@@ -172,6 +163,8 @@ fn terminal_size_from_handle(handle: windows::Win32::Foundation::HANDLE) -> Opti
     use windows::Win32::System::Console::{CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo};
 
     let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+    // SAFETY: the API validates `handle` and writes one
+    // CONSOLE_SCREEN_BUFFER_INFO into `info`, which is writable.
     unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }.ok()?;
     let columns = usize::try_from(info.srWindow.Right - info.srWindow.Left + 1).ok()?;
     let rows = usize::try_from(info.srWindow.Bottom - info.srWindow.Top + 1).ok()?;
@@ -182,10 +175,14 @@ fn terminal_size_from_handle(handle: windows::Win32::Foundation::HANDLE) -> Opti
 fn current_terminal_size() -> Option<TerminalSize> {
     use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 
+    // SAFETY: GetStdHandle takes a constant selector and only reads this
+    // process's standard handle table.
     unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
         .ok()
         .and_then(terminal_size_from_handle)
         .or_else(|| {
+            // SAFETY: as above, a constant selector into this process's own
+            // standard handles.
             unsafe { GetStdHandle(STD_ERROR_HANDLE) }
                 .ok()
                 .and_then(terminal_size_from_handle)

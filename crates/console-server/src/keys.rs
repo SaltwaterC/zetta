@@ -306,6 +306,8 @@ impl Decoder {
         if pressed {
             buttons |= flag;
             let now = Instant::now();
+            // SAFETY: GetDoubleClickTime takes no arguments and only reads a
+            // system setting.
             let window = Duration::from_millis(u64::from(unsafe { GetDoubleClickTime() }));
             match self.last_click {
                 Some((at, place, last))
@@ -413,6 +415,8 @@ fn wrapped(ch: u16, vk: u16, state: u32) -> Vec<Record> {
 /// character on the current layout, with Shift or AltGr pressed around it,
 /// or a bare character where no key types it.
 fn char_to_keys(unit: u16, records: &mut Vec<Record>) {
+    // SAFETY: VkKeyScanW takes a UTF-16 unit by value and touches no caller
+    // memory; an untyped character returns -1.
     let scan = unsafe { VkKeyScanW(unit) };
     let (vk, shift_state) = if scan == -1 {
         (0, 0)
@@ -455,6 +459,8 @@ fn char_to_keys(unit: u16, records: &mut Vec<Record>) {
 
 /// _GenerateKeyFromChar: VkKeyScanW's key and the modifiers it needs.
 fn key_from_char(unit: u16) -> Option<(u16, u32)> {
+    // SAFETY: VkKeyScanW takes a UTF-16 unit by value and touches no caller
+    // memory; an untyped character returns -1.
     let scan = unsafe { VkKeyScanW(unit) };
     if scan == -1 {
         return None;
@@ -474,11 +480,13 @@ fn key_from_char(unit: u16) -> Option<(u16, u32)> {
 }
 
 fn scan_code(vk: u16) -> u16 {
+    // SAFETY: MapVirtualKeyW takes two integers and touches no caller memory.
     unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_VSC) as u16 }
 }
 
 /// The character a key types unshifted, as _WriteSingleKey(vkey) uses.
 fn vk_char(vk: u16) -> u16 {
+    // SAFETY: MapVirtualKeyW takes two integers and touches no caller memory.
     unsafe { MapVirtualKeyW(u32::from(vk), MAPVK_VK_TO_CHAR) as u16 }
 }
 

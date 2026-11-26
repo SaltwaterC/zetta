@@ -197,3 +197,18 @@ fn injectable_backend_can_fail_after_a_partial_copy() {
     );
     assert!(!destination.join("two").exists());
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_clone_leaves_a_file_already_at_the_destination_alone() {
+    let directory = TempDir::new().unwrap();
+    let source = directory.path().join("source");
+    let destination = directory.path().join("destination");
+    fs::write(&source, b"new").unwrap();
+    fs::write(&destination, b"somebody else's").unwrap();
+
+    // `clonefile` refuses an existing destination with `EEXIST`, which is not
+    // one of the errors that mean cloning is unsupported.
+    assert!(copy_macos_clone(&source, &destination).is_err());
+    assert_eq!(fs::read(&destination).unwrap(), b"somebody else's");
+}

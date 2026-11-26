@@ -4,8 +4,8 @@
 use super::projects::{editing_project, mark_project_dirty, project_editor};
 use super::*;
 
-use crate::config::{PaneSplitAxis, PaneSplitOverlaySize};
-use crate::pane::MAX_PANES_PER_TAB;
+use crate::config::PaneSplitAxis;
+use crate::pane::{MAX_PANES_PER_TAB, OverlayFontSize};
 use crate::settings_editor::{
     PaneTemplateCommandForm, PaneTemplateEnvironmentForm, PaneTemplateForm, PaneTemplateNodeField,
     PaneTemplateNodeForm, PaneTemplateNodePath, PaneTemplateOverlayForm, PaneTemplatePaneForm,
@@ -241,35 +241,19 @@ fn selected_pane_mut(
 }
 
 fn overlay_size_options() -> Arc<[String]> {
-    [
-        "Default".to_owned(),
-        PaneSplitOverlaySize::Small.label().to_owned(),
-        PaneSplitOverlaySize::Base.label().to_owned(),
-        PaneSplitOverlaySize::Large.label().to_owned(),
-        PaneSplitOverlaySize::ExtraLarge.label().to_owned(),
-        PaneSplitOverlaySize::ExtraExtraLarge.label().to_owned(),
-        PaneSplitOverlaySize::ExtraExtraExtraLarge
-            .label()
-            .to_owned(),
-    ]
-    .into()
+    std::iter::once("Default".to_owned())
+        .chain(OverlayFontSize::ALL.map(|size| size.label().to_owned()))
+        .collect()
 }
 
-fn overlay_size_label(size: PaneSplitOverlaySize) -> String {
+fn overlay_size_label(size: OverlayFontSize) -> String {
     size.label().to_owned()
 }
 
-fn overlay_size_from_label(value: &str) -> Option<PaneSplitOverlaySize> {
-    [
-        PaneSplitOverlaySize::Small,
-        PaneSplitOverlaySize::Base,
-        PaneSplitOverlaySize::Large,
-        PaneSplitOverlaySize::ExtraLarge,
-        PaneSplitOverlaySize::ExtraExtraLarge,
-        PaneSplitOverlaySize::ExtraExtraExtraLarge,
-    ]
-    .into_iter()
-    .find(|size| size.label() == value)
+fn overlay_size_from_label(value: &str) -> Option<OverlayFontSize> {
+    OverlayFontSize::ALL
+        .into_iter()
+        .find(|size| size.label() == value)
 }
 
 pub(crate) fn pane_template_dropdown_options(

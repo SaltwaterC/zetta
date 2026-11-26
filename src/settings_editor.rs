@@ -17,11 +17,10 @@ use ui::IconName;
 
 use crate::config::{
     Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitCommand,
-    PaneSplitOverlaySize, PaneSplitTemplate, PaneSplitTemplateConfig, SessionRetention,
-    WorkingDirectoryScope, built_in_pane_split_templates, is_valid_pane_split_label,
-    profile_is_hidden,
+    PaneSplitTemplate, PaneSplitTemplateConfig, SessionRetention, WorkingDirectoryScope,
+    built_in_pane_split_templates, is_valid_pane_split_label, profile_is_hidden,
 };
-use crate::pane::MAX_PANES_PER_TAB;
+use crate::pane::{MAX_PANES_PER_TAB, OverlayFontSize};
 use crate::profile_icon::ProfileIcon;
 use crate::startup::{keymap_keystroke_display, keymap_keystroke_storage};
 use crate::text_edit::TextField;

@@ -39,7 +39,7 @@ impl LineSize {
 }
 
 /// A row in the grid.
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Row<T> {
     inner: Vec<T>,
@@ -58,6 +58,13 @@ pub struct Row<T> {
     characters_only: bool,
 }
 
+/// An empty row, which needs no template cell and does not allocate.
+impl<T> Default for Row<T> {
+    fn default() -> Self {
+        Self { inner: Vec::new(), line_size: LineSize::default(), occ: 0, characters_only: false }
+    }
+}
+
 impl<T: PartialEq> PartialEq for Row<T> {
     fn eq(&self, other: &Self) -> bool {
         self.inner == other.inner && self.line_size == other.line_size
@@ -69,7 +76,9 @@ impl<T: Default> Row<T> {
     ///
     /// Ideally the `template` should be `Copy` in all performance sensitive scenarios.
     pub fn new(columns: usize) -> Row<T> {
-        debug_assert!(columns >= 1);
+        // Not a `debug_assert`: the writes below assume at least one column,
+        // and a NaN cell width reaches here as zero columns.
+        assert!(columns >= 1, "a row has at least one column");
 
         let mut inner: Vec<T> = Vec::with_capacity(columns);
 

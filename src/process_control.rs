@@ -623,7 +623,7 @@ impl PaneControlOverlayRequest {
             return None;
         }
         let font_size = match self.font_size {
-            Some(font_size) => Some(OverlayFontSize::parse(&font_size)?),
+            Some(font_size) => Some(font_size.parse().ok()?),
             None => None,
         };
         if self
@@ -695,9 +695,31 @@ impl PaneControlRequest {
     }
 }
 
+/// The outcome a control response reports.
+///
+/// Serialises as the snake_case word, which is the wire format clients of
+/// older and newer builds read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ControlStatus {
+    Ok,
+    Rejected,
+    Unchanged,
+    Failed,
+    Ready,
+    AuthenticationFailed,
+    SessionNotFound,
+    SessionStarting,
+    /// A status this build does not know, from a Zetta process of another
+    /// version. Every caller treats it as "not ok", as the string comparison
+    /// this enum replaced did.
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Serialize, Deserialize)]
 struct ControlResponse {
-    status: String,
+    status: ControlStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     run_id: Option<u64>,
     #[serde(default)]

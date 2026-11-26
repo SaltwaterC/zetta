@@ -1,7 +1,7 @@
 use log::{info, warn};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::{Error, Result};
+use std::io::{Error, ErrorKind, Result};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, IntoRawHandle, OwnedHandle};
 use std::{
@@ -9,11 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, S_OK, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, S_OK, WAIT_OBJECT_0,
+};
 use windows_sys::Win32::System::Console::{
     COORD, ClosePseudoConsole, CreatePseudoConsole, HPCON, ResizePseudoConsole,
 };
-use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryW};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetModuleHandleW, GetProcAddress, LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+    LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+};
 use windows_sys::core::{HRESULT, PWSTR};
 use windows_sys::{s, w};
 
@@ -46,8 +51,9 @@ const KERNEL_PIPE_CAPACITY: u32 = 128 * 1024;
 /// supports loading OpenConsole.exe, which offers many improvements and
 /// bugfixes compared to the standard conpty that ships with Windows.
 ///
-/// The conpty.dll and OpenConsole.exe files will be searched in PATH and in
-/// the directory where Alacritty's executable is located.
+/// Zetta looks for conpty.dll only beside its own executable and in System32,
+/// never on `PATH` or in the current directory, where anybody who can write
+/// there could plant one.
 type CreatePseudoConsoleFn =
     unsafe extern "system" fn(COORD, HANDLE, HANDLE, u32, *mut HPCON) -> HRESULT;
 type ResizePseudoConsoleFn = unsafe extern "system" fn(HPCON, COORD) -> HRESULT;
@@ -98,7 +104,11 @@ impl ConptyApi {
     fn load_conpty() -> Option<Self> {
         type LoadedFn = unsafe extern "system" fn() -> isize;
         unsafe {
-            let hmodule = LoadLibraryW(w!("conpty.dll"));
+            let hmodule = LoadLibraryExW(
+                w!("conpty.dll"),
+                ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+            );
             if hmodule.is_null() {
                 return None;
             }
@@ -248,17 +258,30 @@ fn start_palette_helper(
     pty_handle: HPCON,
     helper: &std::path::Path,
     palette: ConsolePalette,
-) -> Result<PROCESS_INFORMATION> {
+) -> Result<PaletteHelper> {
     let event_name = format!(
         "Local\\ZettaPalette-{}-{}",
+        // SAFETY: takes no arguments and only reads this process's id.
         unsafe { GetCurrentProcessId() },
         PALETTE_EVENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let event_name_wide = win32_string(OsStr::new(&event_name));
+    // SAFETY: `event_name_wide` is NUL-terminated and outlives the call; no
+    // security attributes are passed.
     let ready_event =
         unsafe { CreateEventW(ptr::null(), true as i32, false as i32, event_name_wide.as_ptr()) };
     if ready_event.is_null() {
         return Err(Error::last_os_error());
+    }
+    // Read before anything else can reset the thread's last error.
+    let already_existed =
+        Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32);
+    // SAFETY: `CreateEventW` returned a handle nothing else owns.
+    let ready_event = unsafe { OwnedHandle::from_raw_handle(ready_event as _) };
+    if already_existed {
+        // Somebody else made the event first, and could signal it before the
+        // helper has applied the palette.
+        return Err(Error::new(ErrorKind::AlreadyExists, "palette ready event already exists"));
     }
     let mut env = HashMap::new();
     env.insert(PALETTE_HELPER_ENV.to_owned(), palette.to_private_payload());
@@ -269,36 +292,28 @@ fn start_palette_helper(
         escape_args: true,
         ..Options::default()
     };
-    let process = match spawn_attached_process(pty_handle, &helper_config) {
-        Ok(process) => process,
-        Err(error) => {
-            unsafe { CloseHandle(ready_event) };
-            return Err(error);
-        },
-    };
+    let process = PaletteHelper::new(spawn_attached_process(pty_handle, &helper_config)?);
     let timeout = u32::try_from(PALETTE_HELPER_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
-    let wait = unsafe { WaitForSingleObject(ready_event, timeout) };
-    unsafe { CloseHandle(ready_event) };
+    // SAFETY: `ready_event` is an open event this function owns.
+    let wait = unsafe { WaitForSingleObject(ready_event.as_raw_handle() as HANDLE, timeout) };
     if wait != WAIT_OBJECT_0 {
-        terminate_palette_helper(process);
+        process.terminate();
         return Err(Error::other("palette helper timed out"));
     }
     Ok(process)
 }
 
-fn finish_palette_helper(process: PROCESS_INFORMATION) -> Result<()> {
+fn finish_palette_helper(process: PaletteHelper) -> Result<()> {
     let timeout = u32::try_from(PALETTE_HELPER_TIMEOUT.as_millis()).unwrap_or(u32::MAX);
-    if unsafe { WaitForSingleObject(process.hProcess, timeout) } != WAIT_OBJECT_0 {
-        terminate_palette_helper(process);
+    // SAFETY: `process` owns the open process handle.
+    if unsafe { WaitForSingleObject(process.handle(), timeout) } != WAIT_OBJECT_0 {
+        process.terminate();
         return Err(Error::other("palette helper did not exit"));
     }
     let mut exit_code = 1;
-    let got_exit = unsafe { GetExitCodeProcess(process.hProcess, &mut exit_code) } > 0;
-    unsafe {
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-    }
-    if !got_exit {
+    // SAFETY: `process` owns the open process handle, and `exit_code` is a
+    // writable u32.
+    if unsafe { GetExitCodeProcess(process.handle(), &mut exit_code) } == 0 {
         return Err(Error::last_os_error());
     }
     if exit_code != 0 {
@@ -307,16 +322,35 @@ fn finish_palette_helper(process: PROCESS_INFORMATION) -> Result<()> {
     Ok(())
 }
 
-fn terminate_palette_helper(process: PROCESS_INFORMATION) {
-    terminate_process(process);
+/// A palette helper's process and thread, closed when dropped.
+struct PaletteHelper {
+    process: OwnedHandle,
+    _thread: OwnedHandle,
 }
 
-fn terminate_process(process: PROCESS_INFORMATION) {
-    unsafe {
-        let _ = TerminateProcess(process.hProcess, 1);
-        WaitForSingleObject(process.hProcess, 1000);
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
+impl PaletteHelper {
+    fn new(created: PROCESS_INFORMATION) -> Self {
+        // SAFETY: `CreateProcessW` returned both handles to the caller, which
+        // hands them over here and keeps no copy.
+        unsafe {
+            Self {
+                process: OwnedHandle::from_raw_handle(created.hProcess as _),
+                _thread: OwnedHandle::from_raw_handle(created.hThread as _),
+            }
+        }
+    }
+
+    fn handle(&self) -> HANDLE {
+        self.process.as_raw_handle() as HANDLE
+    }
+
+    fn terminate(self) {
+        // SAFETY: `self` owns the open process handle until it is dropped
+        // below.
+        unsafe {
+            let _ = TerminateProcess(self.handle(), 1);
+            WaitForSingleObject(self.handle(), 1000);
+        }
     }
 }
 

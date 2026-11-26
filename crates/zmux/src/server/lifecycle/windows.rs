@@ -1,6 +1,6 @@
 //! Windows' half of pane startup and peer checks: a pane's agent pipe, and
-//! the attestation a named-pipe client gives in place of Unix peer
-//! credentials.
+//! the attestation a client gives where the kernel does not report which
+//! process connected.
 
 use super::*;
 
@@ -20,8 +20,8 @@ pub(in crate::server) fn remove_pane_agent_links(pane_id: u64) {
     super::agent_pipe::stop(pane_id);
 }
 
-/// Whether this request's answer could depend on who the peer is, on a platform
-/// that cannot tell without asking.
+/// Whether this request's answer could depend on who the peer is, when the
+/// kernel did not say and the daemon cannot tell without asking.
 ///
 /// Narrow on purpose, because asking costs a round trip: only requests that can
 /// act on a session somebody else owns, and only when the session they name is

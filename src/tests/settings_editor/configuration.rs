@@ -482,13 +482,13 @@ fn the_automatic_protection_toggle_is_offered_only_with_a_recipient_and_an_ident
     form.session_persistence_recipients = TextField::new("age1example".to_owned());
     assert_eq!(
         form.session_auto_protect_is_offered(),
-        crate::config::default_session_identity_path().is_some()
+        zmux::persistence::default_identity_path().is_some()
     );
 
     form.session_persistence_identity = TextField::new("   ".to_owned());
     assert_eq!(
         form.session_auto_protect_is_offered(),
-        crate::config::default_session_identity_path().is_some()
+        zmux::persistence::default_identity_path().is_some()
     );
 
     form.session_persistence_identity = TextField::new("~/keys/zetta.txt".to_owned());

@@ -16,7 +16,7 @@ use std::process::{Child, Command, ExitStatus};
 use std::sync::Arc;
 use std::{env, ptr};
 
-use libc::{F_GETFL, F_SETFL, O_NONBLOCK, TIOCSCTTY, c_int, fcntl};
+use libc::{TIOCSCTTY, c_int};
 use log::error;
 use polling::{Event, PollMode, Poller};
 use rustix_openpty::openpty;
@@ -274,10 +274,7 @@ pub fn reclaim(master: OwnedFd, child_pid: u32) -> Result<Pty> {
             format!("reclaimed child pid {child_pid} is not a single process"),
         ));
     }
-    let master_fd = master.as_raw_fd();
-    unsafe {
-        set_nonblocking(master_fd)?;
-    }
+    set_nonblocking(&master)?;
     let (sender, signals) = UnixStream::pair()?;
     let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
     signals.set_nonblocking(true)?;
@@ -296,10 +293,7 @@ pub fn reclaim(master: OwnedFd, child_pid: u32) -> Result<Pty> {
 /// master — but reaping does not, so the returned [`AttachedChildEvents`] is
 /// how the exit status gets in.
 pub fn attach(master: OwnedFd, child_pid: u32) -> Result<(Pty, AttachedChildEvents)> {
-    let master_fd = master.as_raw_fd();
-    unsafe {
-        set_nonblocking(master_fd)?;
-    }
+    set_nonblocking(&master)?;
     let (reporter, events) = UnixStream::pair()?;
     events.set_nonblocking(true)?;
     Ok((
@@ -495,11 +489,9 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
 
     match builder.spawn() {
         Ok(child) => {
-            unsafe {
-                // Maybe this should be done outside of this function so nonblocking
-                // isn't forced upon consumers. Although maybe it should be?
-                set_nonblocking(master_fd)?;
-            }
+            // Maybe this should be done outside of this function so nonblocking
+            // isn't forced upon consumers. Although maybe it should be?
+            set_nonblocking(&master)?;
 
             Ok(Pty {
                 child: PtyChild::Owned(child),
@@ -565,7 +557,7 @@ fn terminate_child(pid: libc::pid_t, master: &File) {
     if child_has_exited(pid) {
         return;
     }
-    unsafe { libc::kill(pid, libc::SIGHUP) };
+    signal_child(pid, rustix::process::Signal::HUP);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
     loop {
         discard_pending_output(master);
@@ -578,6 +570,12 @@ fn terminate_child(pid: libc::pid_t, master: &File) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     kill_and_reap_child(pid, master);
+}
+
+fn signal_child(pid: libc::pid_t, signal: rustix::process::Signal) {
+    if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+        let _ = rustix::process::kill_process(pid, signal);
+    }
 }
 
 fn child_has_exited(pid: libc::pid_t) -> bool {
@@ -596,7 +594,7 @@ fn child_has_exited(pid: libc::pid_t) -> bool {
 /// Polls rather than blocking in `waitpid`, because the child's exit can be
 /// waiting on this side to read the pty; see [`terminate_child`].
 fn kill_and_reap_child(pid: libc::pid_t, master: &File) {
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    signal_child(pid, rustix::process::Signal::KILL);
     loop {
         discard_pending_output(master);
         if child_has_exited(pid) {
@@ -696,11 +694,11 @@ impl EventedPty for Pty {
     }
 
     fn redraw(&mut self) {
-        let process_group = unsafe { libc::tcgetpgrp(self.file.as_raw_fd()) };
-        if process_group > 0 {
-            // SAFETY: `process_group` came from this PTY's foreground process
-            // group and SIGWINCH is the terminal redraw notification.
-            unsafe { libc::killpg(process_group, libc::SIGWINCH) };
+        // SIGWINCH is the terminal redraw notification, sent to this PTY's
+        // foreground process group.
+        if let Ok(process_group) = rustix::termios::tcgetpgrp(&self.file) {
+            let _ =
+                rustix::process::kill_process_group(process_group, rustix::process::Signal::WINCH);
         }
     }
 
@@ -1136,9 +1134,10 @@ impl ToWinsize for WindowSize {
     }
 }
 
-unsafe fn set_nonblocking(fd: c_int) -> Result<()> {
-    let res = unsafe { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK) };
-    if res == 0 { Ok(()) } else { Err(Error::last_os_error()) }
+fn set_nonblocking(fd: impl std::os::fd::AsFd) -> Result<()> {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    let flags = fcntl_getfl(&fd)?;
+    Ok(fcntl_setfl(&fd, flags | OFlags::NONBLOCK)?)
 }
 
 #[test]
@@ -1231,7 +1230,6 @@ mod attached_tests {
             child.try_wait().unwrap().is_none(),
             "the attached child was killed by dropping the PTY"
         );
-        let _ = pid;
         let _ = child.kill();
         let _ = child.wait();
     }

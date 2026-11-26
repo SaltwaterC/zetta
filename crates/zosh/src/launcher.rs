@@ -696,9 +696,9 @@ fn external_client_arguments(command: &MoshCommand, host: &str, port: u16) -> Ve
 }
 
 fn endpoint_color_count(client: Option<&str>) -> u16 {
-    client
-        .map(|path| client_color_count(Path::new(path)))
-        .unwrap_or_else(terminal::color_count)
+    client.map_or_else(terminal::color_count, |path| {
+        client_color_count(Path::new(path))
+    })
 }
 
 fn client_color_count(client: &Path) -> u16 {

@@ -52,7 +52,7 @@ pub(crate) struct ProjectWorktrees {
     /// cannot replace it.
     #[cfg_attr(
         not(feature = "worktree"),
-        allow(dead_code, reason = "only worktree_ui.rs refreshes listings")
+        expect(dead_code, reason = "only worktree_ui.rs refreshes listings")
     )]
     pub(crate) generation: u64,
     pub(crate) loading: bool,
@@ -62,7 +62,7 @@ pub(crate) struct ProjectWorktrees {
     /// Where a new worktree would be created.
     #[cfg_attr(
         not(feature = "worktree"),
-        allow(dead_code, reason = "only worktree_ui.rs creates worktrees")
+        expect(dead_code, reason = "only worktree_ui.rs creates worktrees")
     )]
     pub(crate) worktree_root: Option<PathBuf>,
     /// Why the project has no listing — usually that it is not a Git

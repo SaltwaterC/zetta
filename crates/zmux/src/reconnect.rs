@@ -38,7 +38,10 @@ struct SessionTarget {
     /// The sealed session key, when this session was protected with the user's
     /// age key rather than a typed secret. Opening it is what stands in for the
     /// prompt, so a build without age has nothing to do with it.
-    #[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "session-persistence"),
+        expect(dead_code, reason = "only an age build opens a sealed session key")
+    )]
     key_envelope: Option<String>,
     /// Whether the multiplexer holds this session rather than a Zetta
     /// process. The published process is then the multiplexer's, which has no
@@ -66,6 +69,13 @@ enum ReconnectSessionResult {
 }
 
 /// Opens a catalogued session in a Zetta window.
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(
+        unused_variables,
+        reason = "reconnect needs a control endpoint, which only Unix and Windows have"
+    )
+)]
 pub fn run_reconnect_session(identifier: &str, identity_paths: &[PathBuf]) -> Result<()> {
     #[cfg(any(unix, windows))]
     {
@@ -73,7 +83,6 @@ pub fn run_reconnect_session(identifier: &str, identity_paths: &[PathBuf]) -> Re
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (identifier, identity_paths);
         anyhow::bail!("session reconnect is not supported on this platform");
     }
 }
@@ -95,6 +104,13 @@ pub struct RemoteProtocolRequest {
     pub forward_agent: Option<bool>,
 }
 
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(
+        unused_variables,
+        reason = "remote attach needs a control endpoint, which only Unix and Windows have"
+    )
+)]
 pub fn run_remote_attach(
     destination: &str,
     port: Option<u16>,
@@ -104,7 +120,6 @@ pub fn run_remote_attach(
 ) -> Result<()> {
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (destination, port, session_id, identity_paths, protocol);
         anyhow::bail!("remote session attach is not supported on this platform");
     }
     #[cfg(any(unix, windows))]
@@ -152,6 +167,13 @@ pub fn run_remote_attach(
 /// Performs a stream-safe administration operation against a remote daemon.
 /// Destructive operations still require the remote session's secret when it is
 /// protected; the secret is never placed in argv or the SSH command.
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(
+        unused_variables,
+        reason = "remote administration needs a control endpoint, which only Unix and Windows have"
+    )
+)]
 pub fn run_remote_admin(
     command: &str,
     destination: &str,
@@ -161,7 +183,6 @@ pub fn run_remote_admin(
 ) -> Result<()> {
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (command, destination, port, session_id, identity_paths);
         anyhow::bail!("remote session administration is not supported on this platform");
     }
     #[cfg(any(unix, windows))]
@@ -181,10 +202,10 @@ pub fn run_remote_admin(
             "kill" => client.kill_with_secret(session_id, secret.as_ref())?,
             "forget" => client.forget_with_secret(session_id, secret.as_ref())?,
             "share" => {
-                client.set_session_scope_with_secret(session_id, true, None, secret.as_ref())?
+                client.set_session_scope_with_secret(session_id, true, None, secret.as_ref())?;
             }
             "unshare" => {
-                client.set_session_scope_with_secret(session_id, false, None, secret.as_ref())?
+                client.set_session_scope_with_secret(session_id, false, None, secret.as_ref())?;
             }
             _ => anyhow::bail!("unsupported remote administration command {command:?}"),
         }
@@ -200,6 +221,13 @@ pub fn run_remote_admin(
 /// offered the envelope is the one the key would be sent to. See
 /// [`crate::auto_protect::open_for_remote`].
 #[cfg(any(unix, windows))]
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        unused_variables,
+        reason = "without persistence there is no sealed envelope to open with the identities"
+    )
+)]
 fn remote_session_secret(
     summary: &crate::protocol::BackgroundSessionSummary,
     identity_paths: &[PathBuf],
@@ -213,7 +241,6 @@ fn remote_session_secret(
     }
     #[cfg(not(feature = "session-persistence"))]
     {
-        let _ = (identity_paths, target);
         if !summary.authentication_required {
             return Ok(None);
         }
@@ -305,6 +332,10 @@ fn run_reconnect_session_supported(identifier: &str, identity_paths: &[PathBuf])
 /// open it is therefore reported rather than fallen back on, because falling
 /// back would land on an unanswerable prompt.
 #[cfg(any(unix, windows))]
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(unused_variables, reason = "identities only open persisted sessions")
+)]
 fn session_secret_for(
     target: &SessionTarget,
     identity_paths: &[PathBuf],
@@ -330,8 +361,6 @@ fn session_secret_for(
         )?;
         return crate::auto_protect::open(envelope, &identities).map(Some);
     }
-    #[cfg(not(feature = "session-persistence"))]
-    let _ = identity_paths;
     crate::secret_prompt::prompt_for_reconnect_secret().map(Some)
 }
 
@@ -481,10 +510,16 @@ fn request_multiplexer_reconnect(
 /// invocation falls back to acknowledgement-only resume when no Zetta process
 /// is available.
 #[cfg(feature = "session-persistence")]
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(
+        unused_variables,
+        reason = "handing a resume to a Zetta process needs a control endpoint"
+    )
+)]
 pub fn try_run_resume_disk_session(identifier: &str, identity_paths: &[PathBuf]) -> Result<bool> {
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (identifier, identity_paths);
         return Ok(false);
     }
     #[cfg(any(unix, windows))]

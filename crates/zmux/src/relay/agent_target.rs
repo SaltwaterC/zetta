@@ -27,7 +27,7 @@ pub(super) struct ForwardedAgentTarget {
 impl ForwardedAgentTarget {
     #[cfg_attr(
         not(windows),
-        allow(
+        expect(
             dead_code,
             reason = "only a Windows relay installs one; tests on other hosts publish directly"
         )

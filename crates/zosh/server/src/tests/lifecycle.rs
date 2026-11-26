@@ -56,7 +56,11 @@ fn bootstrap_child_does_not_inherit_the_ssh_output_pipe() {
 
     const CHILD_MARKER: &str = "ZOSH_TEST_BOOTSTRAP_HANDLE_CHILD";
     if std::env::var_os(CHILD_MARKER).is_some() {
+        // SAFETY: GetStdHandle takes a constant selector and only reads this
+        // process's standard handle table.
         let stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }.unwrap();
+        // SAFETY: `stdout` is this process's open standard output, which stays
+        // open; this only sets its inheritance flag.
         unsafe { SetHandleInformation(stdout, HANDLE_FLAG_INHERIT.0, HANDLE_FLAG_INHERIT) }
             .unwrap();
         let args = [

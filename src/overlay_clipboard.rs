@@ -117,13 +117,11 @@ impl Zetta {
             self.overlay_clipboard.clear();
             return;
         }
-        while self
+        while let Some(pending) = self
             .overlay_clipboard
             .events
-            .front()
-            .is_some_and(|event| event.text.is_some())
+            .pop_front_if(|event| event.text.is_some())
         {
-            let pending = self.overlay_clipboard.events.pop_front().unwrap();
             cx.set_global(ResolvedPaste(pending.text.flatten()));
             self.dispatch_overlay_key(&pending.event, window, cx);
             cx.remove_global::<ResolvedPaste>();

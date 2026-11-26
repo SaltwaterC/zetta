@@ -189,11 +189,13 @@ impl Zetta {
         if !tab.layout.replace(active_pane_id, replacement) {
             return;
         }
-        let active_view = tab.pane(active_pane_id).and_then(|pane| pane.view.clone());
-        tab.pane_mut(active_pane_id).unwrap().generated_label = Some(expansions[0].label.clone());
+        let active = tab
+            .pane_mut(active_pane_id)
+            .expect("the layout just replaced this pane, so the tab still has it");
+        active.generated_label = Some(expansions[0].label.clone());
+        let active_view = active.view.clone();
         if active_view.is_none() {
-            tab.pane_mut(active_pane_id).unwrap().pending_command =
-                Some(expansions[0].command.clone());
+            active.pending_command = Some(expansions[0].command.clone());
         }
         let mut launches = Vec::with_capacity(additional);
         for (pane_id, expansion) in new_pane_ids.iter().copied().zip(expansions.iter().skip(1)) {

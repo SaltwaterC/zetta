@@ -421,6 +421,15 @@ struct ContrastCache {
     misses: usize,
 }
 
+/// What `cell_style` reads that is the same for every cell of one layout pass.
+#[derive(Clone, Copy)]
+struct CellStyleFrame<'a> {
+    colors: &'a Theme,
+    text_style: &'a TextStyle,
+    hyperlink: Option<(HighlightStyle, &'a Range)>,
+    minimum_contrast: f32,
+}
+
 #[derive(Copy, Clone)]
 struct ContrastCacheEntry {
     foreground: Hsla,
@@ -737,6 +746,12 @@ impl TerminalElement {
         let mut background_regions: Vec<BackgroundRegion> = Vec::with_capacity(estimated_regions);
         let mut current_batch: Option<BatchedTextRun> = None;
         let mut contrast_cache = ContrastCache::default();
+        let style_frame = CellStyleFrame {
+            colors: theme,
+            text_style,
+            hyperlink,
+            minimum_contrast,
+        };
 
         // First pass: collect all cells and their backgrounds
         let linegroups = grid.into_iter().chunk_by(|cell| cell.point().line);
@@ -801,10 +816,7 @@ impl TerminalElement {
                             cell,
                             fg,
                             bg,
-                            theme,
-                            text_style,
-                            hyperlink,
-                            minimum_contrast,
+                            style_frame,
                             &mut contrast_cache,
                         );
 
@@ -1152,12 +1164,15 @@ impl TerminalElement {
         cell: &Cell,
         fg: Color,
         bg: Color,
-        colors: &Theme,
-        text_style: &TextStyle,
-        hyperlink: Option<(HighlightStyle, &Range)>,
-        minimum_contrast: f32,
+        frame: CellStyleFrame<'_>,
         contrast_cache: &mut ContrastCache,
     ) -> CellStyle {
+        let CellStyleFrame {
+            colors,
+            text_style,
+            hyperlink,
+            minimum_contrast,
+        } = frame;
         let skip_contrast = Self::is_app_chosen_exact_color(&fg);
         let mut fg = convert_color(&fg, colors);
         let bg = convert_color(&bg, colors);

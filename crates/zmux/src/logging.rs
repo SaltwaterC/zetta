@@ -80,7 +80,7 @@ struct OpenLog {
 impl FileLogger {
     pub(crate) fn open(path: PathBuf, level: LevelFilter) -> std::io::Result<Self> {
         let file = open_append(&path)?;
-        let written = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        let written = file.metadata().map_or(0, |metadata| metadata.len());
         Ok(Self {
             path,
             level,

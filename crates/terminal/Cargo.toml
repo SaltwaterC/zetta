@@ -48,6 +48,13 @@ vte = { path = "../vte", version = "0.15.0", features = ["ansi"] }
 zetta_profiles = { path = "../zetta_profiles" }
 zclip = { path = "../zclip", default-features = false }
 
+[target.'cfg(unix)'.dependencies]
+# The safe spelling of the foreground process group lookup and the group
+# signals. 1.1.6 is the first release whose `tcgetpgrp` refuses a process group
+# of 0 on every platform; before it, macOS returned 0 for a pty with no
+# foreground group and rustix built a `NonZeroI32` from it.
+rustix = { version = "1.1.6", features = ["process", "termios"] }
+
 [target.'cfg(windows)'.dependencies]
 console-server = { path = "../console-server", default-features = false, features = ["grid"] }
 windows = { version = "0.61", features = [

@@ -162,7 +162,7 @@ pub fn run(options: RelayOptions) -> Result<()> {
         .then(read_viewer_line)
         .transpose()?;
 
-    let mut stdout = terminal::output();
+    let mut stdout = terminal::output().context("opening the relay's output")?;
     blank_the_screen(&mut stdout)?;
 
     let client = Arc::new(
@@ -336,8 +336,7 @@ fn attach(
         AttachOutcome::SharedAttached { pane, .. } => {
             let revision = client
                 .shared_snapshot(options.session_id)
-                .map(|state| state.revision)
-                .unwrap_or(SessionRevision::INITIAL);
+                .map_or(SessionRevision::INITIAL, |state| state.revision);
             Ok((pane, revision))
         }
         AttachOutcome::Attached { .. } => anyhow::bail!(

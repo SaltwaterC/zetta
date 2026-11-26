@@ -409,9 +409,7 @@ pub(super) fn is_valid_reference_repository(path: &Path) -> bool {
         return false;
     }
     let arguments = [os("rev-parse"), os("--git-dir")];
-    run_git(Some(path), &arguments)
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    run_git(Some(path), &arguments).is_ok_and(|output| output.status.success())
 }
 
 pub(super) fn rollback_new_worktree(

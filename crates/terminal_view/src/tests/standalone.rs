@@ -127,12 +127,14 @@ async fn normal_drag_in_mouse_mode_leaves_ctrl_c_with_the_application(
                 Box::new(std::io::empty()),
                 Box::new(input.clone()),
                 String::new(),
-                terminal::terminal_settings::CursorShape::Block,
-                terminal::terminal_settings::AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                terminal::DisplayOnlySettings {
+                    cursor_shape: terminal::terminal_settings::CursorShape::Block,
+                    alternate_scroll: terminal::terminal_settings::AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .subscribe(cx)
         });

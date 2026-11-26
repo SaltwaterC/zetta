@@ -2,13 +2,15 @@
 //! session loop, non-blocking, rather than through reader and writer threads.
 
 use super::*;
+use rustix::io::Errno;
 
 /// A PTY master the loop reads and writes itself.
 ///
-/// The descriptor is borrowed from the `MasterPty` it came from, which the
-/// session keeps for resizing; this never closes it.
+/// The descriptor is a duplicate of the `MasterPty`'s, which the session keeps
+/// beside this for resizing and drops with it, so the terminal hangs up when
+/// the session ends exactly as it did when this borrowed the master's own.
 pub struct DirectPty {
-    pub(super) fd: std::os::fd::RawFd,
+    pub(super) fd: std::os::fd::OwnedFd,
     pub(super) writes: VecDeque<PtyWrite>,
     /// How much of the front write has gone out.
     pub(super) written: usize,
@@ -20,17 +22,18 @@ pub struct DirectPty {
 }
 
 impl DirectPty {
-    pub(super) fn new(fd: std::os::fd::RawFd) -> Result<Self> {
+    pub(super) fn new(master: std::os::fd::BorrowedFd<'_>) -> Result<Self> {
         use anyhow::Context as _;
+        use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 
-        // SAFETY: only reads and replaces the flags of a descriptor the
-        // caller's `MasterPty` owns.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-                return Err(io::Error::last_os_error()).context("making the PTY nonblocking");
-            }
-        }
+        let fd = master
+            .try_clone_to_owned()
+            .context("duplicating the PTY master")?;
+        // The flag belongs to the open file, so the master is nonblocking too.
+        fcntl_getfl(&fd)
+            .and_then(|flags| fcntl_setfl(&fd, flags | OFlags::NONBLOCK))
+            .map_err(io::Error::from)
+            .context("making the PTY nonblocking")?;
         Ok(Self {
             fd,
             writes: VecDeque::new(),
@@ -49,34 +52,29 @@ impl DirectPty {
             return None;
         }
         loop {
-            // SAFETY: the buffer is as long as the count passed with it, and
-            // the descriptor is the live master.
-            let read = unsafe { libc::read(self.fd, self.buffer.as_mut_ptr().cast(), PTY_CHUNK) };
-            if read > 0 {
-                let read = read as usize;
-                timing::record("pty_read", read as u64, 0);
-                return Some(PtyEvent::Output(self.buffer[..read].to_vec()));
-            }
-            if read == 0 {
-                timing::record("pty_eof", 0, 0);
-                self.closed = true;
-                return Some(PtyEvent::Eof);
-            }
-            let error = io::Error::last_os_error();
-            match error.kind() {
-                io::ErrorKind::Interrupted => {}
-                io::ErrorKind::WouldBlock => return None,
-                // Linux reports the last slave closing as EIO: the program
-                // and everything it started have gone, which is an end of
-                // file rather than a failure.
-                _ if error.raw_os_error() == Some(libc::EIO) => {
+            match rustix::io::read(&self.fd, &mut self.buffer[..]) {
+                Ok(0) => {
                     timing::record("pty_eof", 0, 0);
                     self.closed = true;
                     return Some(PtyEvent::Eof);
                 }
-                _ => {
+                Ok(read) => {
+                    timing::record("pty_read", read as u64, 0);
+                    return Some(PtyEvent::Output(self.buffer[..read].to_vec()));
+                }
+                Err(Errno::INTR) => {}
+                Err(Errno::WOULDBLOCK) => return None,
+                // Linux reports the last slave closing as EIO: the program
+                // and everything it started have gone, which is an end of
+                // file rather than a failure.
+                Err(Errno::IO) => {
+                    timing::record("pty_eof", 0, 0);
                     self.closed = true;
-                    return Some(PtyEvent::Error(error.to_string()));
+                    return Some(PtyEvent::Eof);
+                }
+                Err(error) => {
+                    self.closed = true;
+                    return Some(PtyEvent::Error(io::Error::from(error).to_string()));
                 }
             }
         }
@@ -108,27 +106,23 @@ impl DirectPty {
                         timing::record("pty_write_begin", data.len() as u64, 0);
                     }
                     let rest = &data[self.written..];
-                    // SAFETY: `rest` is a live slice and the count is its
-                    // length; the descriptor is the live master.
-                    let wrote = unsafe { libc::write(self.fd, rest.as_ptr().cast(), rest.len()) };
-                    if wrote >= 0 {
-                        self.written += wrote as usize;
-                        if self.written == data.len() {
-                            timing::record("pty_write_end", data.len() as u64, 0);
-                            self.writes.pop_front();
-                            self.written = 0;
+                    match rustix::io::write(&self.fd, rest) {
+                        Ok(wrote) => {
+                            self.written += wrote;
+                            if self.written == data.len() {
+                                timing::record("pty_write_end", data.len() as u64, 0);
+                                self.writes.pop_front();
+                                self.written = 0;
+                            }
                         }
-                        continue;
-                    }
-                    let error = io::Error::last_os_error();
-                    match error.kind() {
-                        io::ErrorKind::Interrupted => {}
-                        io::ErrorKind::WouldBlock => return,
-                        _ => {
+                        Err(Errno::INTR) => {}
+                        Err(Errno::WOULDBLOCK) => return,
+                        Err(error) => {
                             timing::record("pty_write_error", 0, 0);
                             self.closed = true;
                             self.writes.clear();
-                            self.pending.push_back(PtyEvent::Error(error.to_string()));
+                            self.pending
+                                .push_back(PtyEvent::Error(io::Error::from(error).to_string()));
                         }
                     }
                 }
@@ -137,40 +131,15 @@ impl DirectPty {
     }
 
     /// What `poll` should watch the master for, if anything.
-    pub(super) fn interest(&self, read: bool) -> Option<libc::pollfd> {
+    pub(super) fn interest(&self, read: bool) -> Option<rustix::event::PollFlags> {
+        use rustix::event::PollFlags;
+
         if self.closed {
             return None;
         }
-        let mut events = 0;
-        if read {
-            events |= libc::POLLIN;
-        }
-        if !self.writes.is_empty() {
-            events |= libc::POLLOUT;
-        }
-        (events != 0).then_some(libc::pollfd {
-            fd: self.fd,
-            events,
-            revents: 0,
-        })
+        let mut events = PollFlags::empty();
+        events.set(PollFlags::IN, read);
+        events.set(PollFlags::OUT, !self.writes.is_empty());
+        (!events.is_empty()).then_some(events)
     }
-}
-
-/// Sets `O_NONBLOCK` and `FD_CLOEXEC` on a descriptor the caller owns.
-pub fn set_nonblocking_cloexec(descriptor: &std::os::fd::OwnedFd) -> io::Result<()> {
-    use std::os::fd::AsRawFd as _;
-
-    let fd = descriptor.as_raw_fd();
-    // SAFETY: `fd` is owned by the caller and both calls only read or
-    // replace its flags.
-    unsafe {
-        if libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let flags = libc::fcntl(fd, libc::F_GETFL);
-        if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-            return Err(io::Error::last_os_error());
-        }
-    }
-    Ok(())
 }

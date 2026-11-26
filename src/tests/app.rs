@@ -60,6 +60,24 @@ fn mouse_window_resize_clamps_each_dimension_to_the_minimum() {
 }
 
 #[test]
+fn entering_a_layout_edit_mode_leaves_the_active_one() {
+    let mode = LayoutEditMode::None.toggled(LayoutEditMode::PaneResize);
+    assert_eq!(mode, LayoutEditMode::PaneResize);
+    assert_eq!(
+        mode.toggled(LayoutEditMode::PaneMove),
+        LayoutEditMode::PaneMove
+    );
+    assert_eq!(
+        mode.toggled(LayoutEditMode::TabMove),
+        LayoutEditMode::TabMove
+    );
+    assert_eq!(
+        mode.toggled(LayoutEditMode::PaneResize),
+        LayoutEditMode::None
+    );
+}
+
+#[test]
 fn pane_resize_mode_pauses_terminal_input() {
     assert!(pane_input_enabled(false));
     assert!(!pane_input_enabled(true));

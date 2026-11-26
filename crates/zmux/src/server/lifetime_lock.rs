@@ -124,8 +124,7 @@ fn open_lock_file(path: &Path) -> Result<Option<File>> {
         .open(path)
         .with_context(|| format!("opening the multiplexer lock {}", path.display()))?;
     let metadata = file.metadata()?;
-    // SAFETY: geteuid only reads the calling process's effective user ID.
-    let user = unsafe { libc::geteuid() };
+    let user = rustix::process::geteuid().as_raw();
     anyhow::ensure!(
         metadata.file_type().is_file() && metadata.uid() == user,
         "{} is not a file this user owns",

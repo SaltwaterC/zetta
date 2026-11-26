@@ -27,6 +27,9 @@ vt100 = { path = "../../vt100" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Already in the graph at this version; the safe spelling of the PTY, poll,
+# terminal and peer-credential calls.
+rustix = { version = "1.1.4", features = ["event", "fs", "net", "process", "termios"] }
 
 # Holds the systemd-logind sleep inhibitor; see sleep_guard.rs.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -50,3 +53,10 @@ windows = { version = "0.61", features = [
 lto = true
 codegen-units = 1
 strip = true
+
+[lints.clippy]
+manual_let_else = "deny"
+map_unwrap_or = "deny"
+redundant_closure = "deny"
+semicolon_if_nothing_returned = "deny"
+undocumented_unsafe_blocks = "deny"

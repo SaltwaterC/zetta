@@ -8,11 +8,11 @@ use std::{ffi::OsString, path::PathBuf, process::Command};
 
 use anyhow::{Context as _, Result};
 
-#[cfg(notify_cleanup_enabled)]
-use super::notification_request::NotifyCleanupCommand;
-use super::notification_request::{self, notification_reexec_args};
 use super::{NotificationRequest, NotificationTarget};
 use crate::startup::format_help_table;
+#[cfg(notify_cleanup_enabled)]
+use zntfy::request::NotifyCleanupCommand;
+use zntfy::request::{self, notification_reexec_args};
 
 pub(crate) fn notify_help() -> String {
     format!(
@@ -41,13 +41,13 @@ pub(crate) fn notify_help() -> String {
 
 /// Whether `--help` appears as an option: after `--` it is notification text.
 pub(crate) fn requests_notify_help(arguments: &[OsString]) -> bool {
-    notification_request::requests_help(arguments)
+    request::requests_help(arguments)
 }
 
 pub(crate) fn parse_notify_args(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<NotificationRequest> {
-    notification_request::parse_notify_args(args, "zetta notify", notify_help)
+    request::parse_notify_args(args, "zetta notify", notify_help)
 }
 
 #[cfg(notify_cleanup_enabled)]
@@ -68,7 +68,7 @@ pub(crate) fn notify_cleanup_help() -> String {
 pub(crate) fn parse_notify_cleanup_args(
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<NotifyCleanupCommand> {
-    notification_request::parse_notify_cleanup_args(args, notify_cleanup_help)
+    request::parse_notify_cleanup_args(args, notify_cleanup_help)
 }
 
 fn notification_helper_executable() -> Result<PathBuf> {
@@ -86,13 +86,7 @@ pub(crate) fn run_notification_proxy(
         == Some(std::ffi::OsStr::new("1"))
     {
         let command = zntfy::parse_notify_args(notification_reexec_args(notification))?;
-        return zntfy::run_macos_hosted_notification(
-            &command,
-            target.map(|target| zntfy::NotificationTarget {
-                process_id: target.process_id,
-                attention_id: target.attention_id,
-            }),
-        );
+        return zntfy::run_macos_hosted_notification(&command, target);
     }
     let executable = notification_helper_executable()?;
     let mut command = Command::new(&executable);

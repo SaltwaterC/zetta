@@ -10,22 +10,9 @@ mod fuzzy_match;
 #[cfg(feature = "http-server")]
 mod http_server;
 mod image_paste;
-#[cfg(not(feature = "zmux"))]
-mod local_sessions;
-mod logging;
-mod overlay_frame;
-#[cfg(not(feature = "zmux"))]
-mod zmux {
-    pub(crate) mod remote {
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub(crate) struct RemoteTarget {
-            pub(crate) destination: String,
-            pub(crate) port: Option<u16>,
-        }
-    }
-}
 mod key_passthrough;
 mod keymap_file;
+mod logging;
 #[cfg(feature = "zosh-client")]
 mod mosh;
 #[cfg(feature = "zmux")]
@@ -36,6 +23,10 @@ mod mux;
 #[cfg(feature = "session-persistence")]
 mod mux_identity;
 mod overlay_clipboard;
+mod overlay_frame;
+#[cfg(not(feature = "zmux"))]
+#[path = "zmux_stub.rs"]
+mod zmux;
 // The session directory's privacy checks: the multiplexer's own, or the same
 // source compiled in directly when there is no multiplexer, so a no-`zmux`
 // build cannot drift from what the daemon enforces.
@@ -112,9 +103,9 @@ use command_palette::{
     CommandPalette, PaletteCommand, PaletteKey, humanize_action_name, project_palette_commands,
 };
 use config::{
-    Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitOverlaySize,
-    PaneSplitPane, PaneSplitTemplate, PaneSplitTemplateConfig, Profile, WorkingDirectoryScope,
-    profile_is_hidden, visible_profile_count, visible_profile_index,
+    Config, NewTabProfile, PaneControlsPosition, PaneSplitAxis, PaneSplitPane, PaneSplitTemplate,
+    PaneSplitTemplateConfig, Profile, WorkingDirectoryScope, profile_is_hidden,
+    visible_profile_count, visible_profile_index,
 };
 use futures::StreamExt as _;
 #[cfg(drawn_window_controls)]
@@ -481,6 +472,11 @@ mod pane_resize;
 use pane_resize::*;
 mod app_render;
 mod background_session_ui;
+#[cfg(not(all(
+    feature = "serial-console",
+    feature = "http-server",
+    feature = "tftp-server"
+)))]
 mod cli_service_stubs;
 mod close_confirmation_ui;
 mod pane_overlay;

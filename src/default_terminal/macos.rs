@@ -29,78 +29,25 @@ pub(crate) fn script_paths_from_urls(urls: &[String]) -> Vec<PathBuf> {
 }
 
 pub(super) fn register_macos_script_handlers() -> Result<()> {
-    use std::{
-        ffi::CString,
-        os::raw::{c_char, c_void},
+    let Some((tag_class, bundle)) = launch_services_strings() else {
+        anyhow::bail!("could not create Launch Services strings");
     };
-
-    type CfString = *const c_void;
-    const UTF8: u32 = 0x0800_0100;
-    const ALL_ROLES: u32 = 0xFFFF_FFFF;
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    unsafe extern "C" {
-        fn CFStringCreateWithCString(
-            allocator: *const c_void,
-            string: *const c_char,
-            encoding: u32,
-        ) -> CfString;
-        fn CFRelease(value: CfString);
-    }
-    #[link(name = "CoreServices", kind = "framework")]
-    unsafe extern "C" {
-        fn UTTypeCreatePreferredIdentifierForTag(
-            tag_class: CfString,
-            tag: CfString,
-            conforming_to: CfString,
-        ) -> CfString;
-        fn LSSetDefaultRoleHandlerForContentType(
-            content_type: CfString,
-            role_handler: u32,
-            bundle_identifier: CfString,
-        ) -> i32;
-    }
-
-    let tag_class = CString::new("public.filename-extension")?;
-    let bundle = CString::new("com.zetta.Zetta")?;
-    // SAFETY: all C strings remain alive until their corresponding Core
-    // Foundation objects have been created, and each returned object is
-    // released on every path below.
-    let tag_class =
-        unsafe { CFStringCreateWithCString(std::ptr::null(), tag_class.as_ptr(), UTF8) };
-    let bundle = unsafe { CFStringCreateWithCString(std::ptr::null(), bundle.as_ptr(), UTF8) };
-    anyhow::ensure!(
-        !tag_class.is_null() && !bundle.is_null(),
-        "could not create Launch Services strings"
-    );
     let mut failure = None;
     for extension in MACOS_SCRIPT_EXTENSIONS {
-        let extension = CString::new(*extension)?;
-        let tag = unsafe { CFStringCreateWithCString(std::ptr::null(), extension.as_ptr(), UTF8) };
-        if tag.is_null() {
-            failure = Some(format!(
-                "could not create Launch Services tag for .{extension:?}"
-            ));
+        let Some(content_type) = content_type_for(&tag_class, extension) else {
+            failure.get_or_insert_with(|| {
+                format!("could not create a Launch Services type for .{extension}")
+            });
             continue;
-        }
-        let content_type =
-            unsafe { UTTypeCreatePreferredIdentifierForTag(tag_class, tag, std::ptr::null()) };
-        let status = if content_type.is_null() {
-            -1
-        } else {
-            unsafe { LSSetDefaultRoleHandlerForContentType(content_type, ALL_ROLES, bundle) }
         };
-        if !content_type.is_null() {
-            unsafe { CFRelease(content_type) };
+        // SAFETY: `content_type` and `bundle` are live CFStrings; Launch
+        // Services only reads them.
+        let status = unsafe {
+            cf::LSSetDefaultRoleHandlerForContentType(content_type.0, cf::ALL_ROLES, bundle.0)
+        };
+        if status != 0 {
+            failure.get_or_insert_with(|| format!("Launch Services returned OSStatus {status}"));
         }
-        unsafe { CFRelease(tag) };
-        if status != 0 && failure.is_none() {
-            failure = Some(format!("Launch Services returned OSStatus {status}"));
-        }
-    }
-    unsafe {
-        CFRelease(tag_class);
-        CFRelease(bundle);
     }
     if let Some(failure) = failure {
         anyhow::bail!(failure)
@@ -109,94 +56,127 @@ pub(super) fn register_macos_script_handlers() -> Result<()> {
 }
 
 pub(super) fn macos_script_handlers_are_zetta() -> bool {
-    use std::{
-        ffi::CString,
-        os::raw::{c_char, c_void},
+    let Some((tag_class, bundle)) = launch_services_strings() else {
+        return false;
     };
+    MACOS_SCRIPT_EXTENSIONS.iter().all(|extension| {
+        let Some(content_type) = content_type_for(&tag_class, extension) else {
+            return false;
+        };
+        // SAFETY: `content_type` is a live CFString, and the handler returned
+        // follows the Copy rule, so the `CfOwned` is its only owner.
+        let handler = unsafe {
+            cf::CfOwned::new(cf::LSCopyDefaultRoleHandlerForContentType(
+                content_type.0,
+                cf::ALL_ROLES,
+            ))
+        };
+        // SAFETY: `handler` and `bundle` are live CFStrings.
+        handler.is_some_and(|handler| unsafe { cf::CFEqual(handler.0, bundle.0) } != 0)
+    })
+}
 
-    type CfString = *const c_void;
+/// The tag class every extension is looked up under, and Zetta's bundle
+/// identifier.
+fn launch_services_strings() -> Option<(cf::CfOwned, cf::CfOwned)> {
+    cf::CfOwned::string("public.filename-extension").zip(cf::CfOwned::string("com.zetta.Zetta"))
+}
+
+/// The uniform type identifier Launch Services prefers for `extension`.
+fn content_type_for(tag_class: &cf::CfOwned, extension: &str) -> Option<cf::CfOwned> {
+    let tag = cf::CfOwned::string(extension)?;
+    // SAFETY: `tag_class` and `tag` are live CFStrings, the conforming-to type
+    // is optional, and the identifier returned follows the Create rule, so the
+    // `CfOwned` is its only owner.
+    unsafe {
+        cf::CfOwned::new(cf::UTTypeCreatePreferredIdentifierForTag(
+            tag_class.0,
+            tag.0,
+            std::ptr::null(),
+        ))
+    }
+}
+
+/// The Core Foundation and Launch Services calls this module makes, and the
+/// owner that releases what they return.
+mod cf {
+    use std::ffi::c_void;
+
+    pub(super) type CfString = *const c_void;
     const UTF8: u32 = 0x0800_0100;
-    const ALL_ROLES: u32 = 0xFFFF_FFFF;
+    pub(super) const ALL_ROLES: u32 = 0xFFFF_FFFF;
 
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
-        fn CFStringCreateWithCString(
+        fn CFStringCreateWithBytes(
             allocator: *const c_void,
-            string: *const c_char,
+            bytes: *const u8,
+            length: isize,
             encoding: u32,
+            external_representation: u8,
         ) -> CfString;
-        fn CFEqual(left: CfString, right: CfString) -> u8;
+        pub(super) fn CFEqual(left: CfString, right: CfString) -> u8;
         fn CFRelease(value: CfString);
     }
     #[link(name = "CoreServices", kind = "framework")]
     unsafe extern "C" {
-        fn UTTypeCreatePreferredIdentifierForTag(
+        pub(super) fn UTTypeCreatePreferredIdentifierForTag(
             tag_class: CfString,
             tag: CfString,
             conforming_to: CfString,
         ) -> CfString;
-        fn LSCopyDefaultRoleHandlerForContentType(
+        pub(super) fn LSSetDefaultRoleHandlerForContentType(
+            content_type: CfString,
+            role_handler: u32,
+            bundle_identifier: CfString,
+        ) -> i32;
+        pub(super) fn LSCopyDefaultRoleHandlerForContentType(
             content_type: CfString,
             role_handler: u32,
         ) -> CfString;
     }
 
-    let Ok(tag_class) = CString::new("public.filename-extension") else {
-        return false;
-    };
-    let Ok(bundle) = CString::new("com.zetta.Zetta") else {
-        return false;
-    };
-    // SAFETY: the C strings remain alive until their corresponding Core
-    // Foundation objects have been created. Every non-null returned object is
-    // released before this function returns.
-    let tag_class =
-        unsafe { CFStringCreateWithCString(std::ptr::null(), tag_class.as_ptr(), UTF8) };
-    let bundle = unsafe { CFStringCreateWithCString(std::ptr::null(), bundle.as_ptr(), UTF8) };
-    if tag_class.is_null() || bundle.is_null() {
-        if !tag_class.is_null() {
-            unsafe { CFRelease(tag_class) };
+    /// A Core Foundation object returned under the Create or Copy rule, so
+    /// owned by the caller: released exactly once, on every path, when this
+    /// is dropped.
+    pub(super) struct CfOwned(pub(super) CfString);
+
+    impl CfOwned {
+        /// Takes ownership of `value`; `None` when the call that returned it
+        /// failed.
+        ///
+        /// # Safety
+        ///
+        /// `value` is null or a Core Foundation object returned under the
+        /// Create or Copy rule that nothing else releases.
+        pub(super) unsafe fn new(value: CfString) -> Option<Self> {
+            (!value.is_null()).then_some(Self(value))
         }
-        if !bundle.is_null() {
-            unsafe { CFRelease(bundle) };
+
+        pub(super) fn string(text: &str) -> Option<Self> {
+            let length = isize::try_from(text.len()).ok()?;
+            // SAFETY: `text` is `length` readable bytes of UTF-8, which the
+            // call copies, with no NUL terminator needed; the string it
+            // returns follows the Create rule and nothing else holds it.
+            unsafe {
+                Self::new(CFStringCreateWithBytes(
+                    std::ptr::null(),
+                    text.as_ptr(),
+                    length,
+                    UTF8,
+                    0,
+                ))
+            }
         }
-        return false;
     }
 
-    let mut all_registered = true;
-    for extension in MACOS_SCRIPT_EXTENSIONS {
-        let Ok(extension) = CString::new(*extension) else {
-            all_registered = false;
-            continue;
-        };
-        let tag = unsafe { CFStringCreateWithCString(std::ptr::null(), extension.as_ptr(), UTF8) };
-        if tag.is_null() {
-            all_registered = false;
-            continue;
+    impl Drop for CfOwned {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is non-null, was returned under the Create or
+            // Copy rule, and this is its only owner.
+            unsafe { CFRelease(self.0) };
         }
-        let content_type =
-            unsafe { UTTypeCreatePreferredIdentifierForTag(tag_class, tag, std::ptr::null()) };
-        let handler = if content_type.is_null() {
-            std::ptr::null()
-        } else {
-            unsafe { LSCopyDefaultRoleHandlerForContentType(content_type, ALL_ROLES) }
-        };
-        if handler.is_null() || unsafe { CFEqual(handler, bundle) } == 0 {
-            all_registered = false;
-        }
-        if !handler.is_null() {
-            unsafe { CFRelease(handler) };
-        }
-        if !content_type.is_null() {
-            unsafe { CFRelease(content_type) };
-        }
-        unsafe { CFRelease(tag) };
     }
-    unsafe {
-        CFRelease(tag_class);
-        CFRelease(bundle);
-    }
-    all_registered
 }
 
 #[cfg(test)]

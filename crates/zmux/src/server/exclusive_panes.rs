@@ -52,11 +52,30 @@ pub(super) fn discard_pane(
     // lock. Keep cleanup unconditional even if persisting the new state fails.
     let updated = if ended {
         Ok(None)
-    } else {
-        normalize_shared_state(daemon, session).and_then(|state| {
-            #[cfg(feature = "session-persistence")]
+    } else if session.offered {
+        let state = normalize_shared_state(daemon, session);
+        #[cfg(feature = "session-persistence")]
+        let state = state.and_then(|state| {
             persist_live_session(daemon, session)?;
-            Ok(Some(state))
+            Ok(state)
+        });
+        state.map(Some)
+    } else {
+        // A private session is the window's own until it detaches: the daemon
+        // holds no tab state for it (`state` is still null) and no disk record
+        // may exist, because attaching forgot it. Writing one here left a
+        // record a dead daemon could not take back, restored later as a
+        // session nobody kept and that no client can rebuild. Only the catalog
+        // is repaired, and without installing a canonical shared state, which
+        // a restore would read as the session having been offered.
+        let previous = crate::messages::SharedSessionState::new(
+            session.id,
+            session.summary.clone(),
+            serde_json::Value::Null,
+        );
+        summary_from_daemon_panes(session, &previous).map(|summary| {
+            session.summary = summary;
+            None
         })
     };
     if ended {

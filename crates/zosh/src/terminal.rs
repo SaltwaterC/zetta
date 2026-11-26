@@ -3,7 +3,7 @@
 use std::io::{self, IsTerminal as _, Write as _};
 
 #[cfg(unix)]
-use std::{mem::MaybeUninit, os::fd::AsRawFd as _, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use crossterm::{
@@ -43,7 +43,7 @@ pub struct TerminalGuard {
     alternate_screen: bool,
     restored: bool,
     #[cfg(unix)]
-    saved_mode: Option<Arc<libc::termios>>,
+    saved_mode: Option<Arc<rustix::termios::Termios>>,
     /// Whether this guard turned on the console's window input, and so has
     /// to turn it off again.
     #[cfg(windows)]
@@ -55,7 +55,7 @@ pub(crate) struct TerminalState {
     initialized: bool,
     alternate_screen: bool,
     #[cfg(unix)]
-    saved_mode: Option<Arc<libc::termios>>,
+    saved_mode: Option<Arc<rustix::termios::Termios>>,
     #[cfg(windows)]
     added_window_input: bool,
 }
@@ -219,43 +219,21 @@ mod window_input {
 /// termios value from this session is what guarantees that output processing
 /// such as `OPOST` is restored for the shell that launched Zosh.
 #[cfg(unix)]
-fn enter_raw_mode() -> io::Result<Arc<libc::termios>> {
-    let fd = io::stdin().as_raw_fd();
-    let mut saved = MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: `saved` points to writable storage for libc's termios value and
-    // remains alive until the call returns.
-    if unsafe { libc::tcgetattr(fd, saved.as_mut_ptr()) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: tcgetattr initialized the value on success.
-    let saved = unsafe { saved.assume_init() };
-    let mut raw = MaybeUninit::<libc::termios>::uninit();
-    // SAFETY: `saved` is initialized and `raw` has room for one termios
-    // value. A bytewise copy keeps both values independently owned; using
-    // `ptr::read` here would move the value and leave the saved snapshot
-    // unavailable for cleanup.
-    unsafe { std::ptr::copy_nonoverlapping(&saved, raw.as_mut_ptr(), 1) };
-    let mut raw = unsafe { raw.assume_init() };
-    // SAFETY: `raw` is a valid termios value owned by this function.
-    unsafe { libc::cfmakeraw(&mut raw) };
-    // SAFETY: `raw` points to a valid termios value and fd is the terminal
-    // from which input is read throughout the session.
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
+fn enter_raw_mode() -> io::Result<Arc<rustix::termios::Termios>> {
+    use rustix::termios::{OptionalActions, tcgetattr, tcsetattr};
+
+    let stdin = io::stdin();
+    let saved = tcgetattr(&stdin)?;
+    let mut raw = saved.clone();
+    raw.make_raw();
+    tcsetattr(&stdin, OptionalActions::Now, &raw)?;
     Ok(Arc::new(saved))
 }
 
 #[cfg(unix)]
-fn restore_raw_mode(saved: &libc::termios) -> io::Result<()> {
-    let fd = io::stdin().as_raw_fd();
-    // SAFETY: `saved` is the termios snapshot captured from this terminal and
-    // fd is still the session's controlling input terminal during cleanup.
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, saved) } == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+fn restore_raw_mode(saved: &rustix::termios::Termios) -> io::Result<()> {
+    rustix::termios::tcsetattr(io::stdin(), rustix::termios::OptionalActions::Now, saved)?;
+    Ok(())
 }
 
 fn write_close_sequence<W: io::Write>(stdout: &mut W, alternate_screen: bool) -> io::Result<()> {

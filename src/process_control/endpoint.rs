@@ -229,6 +229,13 @@ pub(super) fn control_socket_path(endpoint_path: &Path) -> PathBuf {
 
 /// Restricts the bound control socket to the current user. Windows places the
 /// endpoint under per-user `%APPDATA%`, so only unix needs an explicit mode.
+#[cfg_attr(
+    not(unix),
+    expect(
+        unused_variables,
+        reason = "only Unix restricts the socket's permissions"
+    )
+)]
 pub(super) fn restrict_socket_permissions(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -240,8 +247,6 @@ pub(super) fn restrict_socket_permissions(path: &Path) -> Result<()> {
             )
         })?;
     }
-    #[cfg(not(unix))]
-    let _ = path;
     Ok(())
 }
 

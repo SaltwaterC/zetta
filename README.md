@@ -609,8 +609,8 @@ pressed; `Escape` cancels. The shortcut can be changed in the keymap.
   servers, the TFTP client, and desktop notifications
 - [Performance profiling](docs/performance.md): overlays, automated reports,
   stress workloads, and diagnostics
-- [Windows console server](docs/windows-console-server-plan.md):
-  the default Windows console backend, its measurements and compatibility
+- [Windows console server](crates/console-server/README.md): the default
+  Windows console backend, its measurements and compatibility
 
 Use [`config.example.json`](config.example.json) and
 [`keymap.example.json`](keymap.example.json) as starting points for local

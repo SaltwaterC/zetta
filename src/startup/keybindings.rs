@@ -1034,35 +1034,39 @@ fn install_native_macos_window_menu_key_equivalents() {
     // input, so macOS never gets to invoke the Window-menu items it supplies,
     // including fullscreen. Give that menu first refusal; exact modifier
     // matching in NSMenu keeps unmatched terminal shortcuts intact.
-    unsafe {
-        let main_thread =
-            MainThreadMarker::new().expect("menu monitor must be installed on AppKit");
-        let application = NSApplication::sharedApplication(main_thread);
-        let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
-            let event_ref = event.as_ref();
-            let modifiers = event_ref.modifierFlags();
-            if !macos_native_menu_key_equivalent_is_eligible(modifiers) {
-                return event.as_ptr();
-            }
-            let handled = application.mainMenu().is_some_and(|menu| {
-                // `performKeyEquivalent` performs the menu validation it needs.
-                // Calling `update` first re-enters AppKit while it is dispatching
-                // the key event and can race the input method's deactivation.
-                menu.performKeyEquivalent(event_ref)
-            });
-            if handled {
-                std::ptr::null_mut()
-            } else {
-                event.as_ptr()
-            }
+    let main_thread = MainThreadMarker::new().expect("menu monitor must be installed on AppKit");
+    let application = NSApplication::sharedApplication(main_thread);
+    let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+        // SAFETY: AppKit calls a local monitor with a live NSEvent it keeps
+        // alive until the handler returns, and `event_ref` does not escape it.
+        let event_ref = unsafe { event.as_ref() };
+        let modifiers = event_ref.modifierFlags();
+        if !macos_native_menu_key_equivalent_is_eligible(modifiers) {
+            return event.as_ptr();
+        }
+        let handled = application.mainMenu().is_some_and(|menu| {
+            // `performKeyEquivalent` performs the menu validation it needs.
+            // Calling `update` first re-enters AppKit while it is dispatching
+            // the key event and can race the input method's deactivation.
+            menu.performKeyEquivalent(event_ref)
         });
+        if handled {
+            std::ptr::null_mut()
+        } else {
+            event.as_ptr()
+        }
+    });
 
-        let monitor =
-            NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
-                .expect("failed to install native macOS menu key-equivalent monitor");
-        // The monitor is intentionally process-scoped and removed when AppKit exits.
-        std::mem::forget(monitor);
+    // SAFETY: this runs on the main thread (`main_thread` proves it), where
+    // AppKit also calls local monitors; the block's signature is the one the
+    // method declares, and it returns either the event it was given or null,
+    // the two results AppKit accepts.
+    let monitor = unsafe {
+        NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &handler)
     }
+    .expect("failed to install native macOS menu key-equivalent monitor");
+    // The monitor is intentionally process-scoped and removed when AppKit exits.
+    std::mem::forget(monitor);
 }
 
 /// Function-modified events may be native Window-menu key equivalents before

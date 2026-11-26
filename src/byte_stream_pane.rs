@@ -24,14 +24,18 @@ pub(crate) fn ctrl_c_interrupts_byte_stream(input: &TerminalInput) -> bool {
 
 #[cfg(byte_stream_panes)]
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "each variant is built by a different, independently-featured caller"
-)]
 pub(crate) enum ByteStreamInputPolicy {
     /// Ctrl-C stops the byte stream (HTTP/TFTP servers).
+    #[cfg_attr(
+        not(servers_enabled),
+        expect(dead_code, reason = "built only by the HTTP and TFTP server panes")
+    )]
     CloseOnInterrupt,
     /// Input is broadcast like any other terminal pane (serial console).
+    #[cfg_attr(
+        not(feature = "serial-console"),
+        expect(dead_code, reason = "built only by the serial console pane")
+    )]
     Broadcast,
 }
 
@@ -111,12 +115,14 @@ impl Zetta {
             request.reader,
             request.writer,
             request.title,
-            settings.cursor_shape,
-            settings.alternate_scroll,
-            settings.max_scroll_history_lines,
-            cx.entity_id().as_u64(),
-            cx.background_executor(),
-            PathStyle::local(),
+            terminal::DisplayOnlySettings {
+                cursor_shape: settings.cursor_shape,
+                alternate_scroll: settings.alternate_scroll,
+                max_scroll_history_lines: settings.max_scroll_history_lines,
+                window_id: cx.entity_id().as_u64(),
+                background_executor: cx.background_executor(),
+                path_style: PathStyle::local(),
+            },
         );
         let terminal = cx.new(|cx| builder.subscribe(cx));
         let view = cx.new(|cx| TerminalView::new_with_theme(terminal, terminal_theme, window, cx));

@@ -47,6 +47,8 @@ mod mappings;
 mod alacritty;
 mod console_launch;
 pub use console_launch::ConsoleLaunchOptions;
+mod builder_options;
+pub use builder_options::{DisplayOnlySettings, PtyRequirement, TerminalSpawnOptions};
 mod clipboard_channel;
 #[cfg(windows)]
 mod hosted_console;
@@ -1281,6 +1283,10 @@ fn posix_host(shell: &Shell) -> Option<PosixHost> {
     }
 }
 
+#[cfg_attr(
+    not(windows),
+    expect(unused_variables, reason = "only Windows picks a command by shell")
+)]
 fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
     #[cfg(windows)]
     if let Some(host) = posix_host(shell) {
@@ -1298,8 +1304,6 @@ fn zetta_command_for_shell(shell: &Shell) -> Option<String> {
             }
         };
     }
-    #[cfg(not(windows))]
-    let _ = shell;
     Some("zetta".to_owned())
 }
 
@@ -1814,6 +1818,10 @@ fn install_command_marker_nonce(
 /// which the multiplexer daemon spawns from the environment this fills in. The
 /// terminal reading that pane is then told the same nonce with
 /// [`TerminalBuilder::with_command_marker_nonce`].
+#[cfg_attr(
+    not(windows),
+    expect(unused_variables, reason = "only Windows shares the nonce with WSL")
+)]
 pub fn give_command_marker_nonce<S: std::hash::BuildHasher>(
     shell: &Shell,
     env: &mut std::collections::HashMap<String, String, S>,
@@ -1839,8 +1847,6 @@ pub fn give_command_marker_nonce<S: std::hash::BuildHasher>(
         }
         env.insert("WSLENV".to_owned(), wslenv);
     }
-    #[cfg(not(windows))]
-    let _ = shell;
 }
 
 /// A fresh random nonce for [`COMMAND_MARKER_NONCE_ENV`]: 128 bits, as hex.
@@ -2427,12 +2433,15 @@ fn open_provided_pty(request: ProvidedPtyRequest) -> Result<OpenedProvidedPty> {
 
 /// The console a provider should start: console-server where this pane
 /// would have hosted it, otherwise ConPTY.
+#[cfg_attr(
+    not(windows),
+    expect(unused_variables, reason = "only Windows has a hosted console backend")
+)]
 fn provided_backend(options: &alacritty_terminal::tty::Options) -> zetta_profiles::ConsoleBackend {
     #[cfg(windows)]
     if options.console_backend == alacritty_terminal::tty::ConsoleBackend::Hosted {
         return zetta_profiles::ConsoleBackend::ConsoleServer;
     }
-    let _ = options;
     zetta_profiles::ConsoleBackend::Conpty
 }
 
@@ -2516,11 +2525,13 @@ impl PtyControl for PtySender {
         self.resize_cells(columns, lines);
     }
 
+    #[cfg_attr(
+        not(windows),
+        expect(unused_variables, reason = "only Windows consoles take a palette")
+    )]
     fn set_console_palette(&self, palette: ConsolePalette) {
         #[cfg(windows)]
         PtySender::set_console_palette(self, palette);
-        #[cfg(not(windows))]
-        let _ = palette;
     }
 }
 
@@ -2870,28 +2881,19 @@ impl TerminalBuilder {
     ///
     /// The reader must periodically return (for example by using an I/O timeout)
     /// so dropping the terminal can stop its worker thread promptly.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "each parameter is an independent, unrelated builder input with no natural grouping"
-    )]
     pub fn new_byte_stream(
         reader: Box<dyn Read + Send>,
         writer: Box<dyn Write + Send>,
         title: String,
-        cursor_shape: SettingsCursorShape,
-        alternate_scroll: AlternateScroll,
-        max_scroll_history_lines: Option<usize>,
-        window_id: u64,
-        background_executor: &BackgroundExecutor,
-        path_style: PathStyle,
+        display: DisplayOnlySettings<'_>,
     ) -> TerminalBuilder {
         let mut builder = Self::new_display_only(
-            cursor_shape,
-            alternate_scroll,
-            max_scroll_history_lines,
-            window_id,
-            background_executor,
-            path_style,
+            display.cursor_shape,
+            display.alternate_scroll,
+            display.max_scroll_history_lines,
+            display.window_id,
+            display.background_executor,
+            display.path_style,
         );
         builder.terminal.title_override = Some(title);
         builder.terminal.foreign_init_command_watch_until =
@@ -3021,33 +3023,13 @@ impl TerminalBuilder {
         self
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "forwards one-for-one to new_with_console_palette, which carries the same suppression"
-    )]
-    pub fn new(
-        working_directory: Option<PathBuf>,
-        task: Option<TaskState>,
-        shell: Shell,
-        env: HashMap<String, String>,
-        cursor_shape: SettingsCursorShape,
-        alternate_scroll: AlternateScroll,
-        max_scroll_history_lines: Option<usize>,
-        path_hyperlink_regexes: Vec<String>,
-        path_hyperlink_timeout_ms: u64,
-        is_remote_terminal: bool,
-        window_id: u64,
-        completion_tx: Option<Sender<Option<ExitStatus>>>,
-        cx: &App,
-        activation_script: Vec<String>,
-        path_style: PathStyle,
-        pty_provider: Option<Arc<dyn PtyProvider>>,
-    ) -> Task<Result<TerminalBuilder>> {
-        Self::new_with_console_palette(
+    /// Starts `options.shell` (or its task) in a new terminal.
+    pub fn spawn(options: TerminalSpawnOptions, cx: &App) -> Task<Result<TerminalBuilder>> {
+        let TerminalSpawnOptions {
             working_directory,
             task,
             shell,
-            env,
+            mut env,
             cursor_shape,
             alternate_scroll,
             max_scroll_history_lines,
@@ -3056,128 +3038,14 @@ impl TerminalBuilder {
             is_remote_terminal,
             window_id,
             completion_tx,
-            cx,
-            activation_script,
-            path_style,
-            pty_provider,
-            None,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_console_palette(
-        working_directory: Option<PathBuf>,
-        task: Option<TaskState>,
-        shell: Shell,
-        env: HashMap<String, String>,
-        cursor_shape: SettingsCursorShape,
-        alternate_scroll: AlternateScroll,
-        max_scroll_history_lines: Option<usize>,
-        path_hyperlink_regexes: Vec<String>,
-        path_hyperlink_timeout_ms: u64,
-        is_remote_terminal: bool,
-        window_id: u64,
-        completion_tx: Option<Sender<Option<ExitStatus>>>,
-        cx: &App,
-        activation_script: Vec<String>,
-        path_style: PathStyle,
-        pty_provider: Option<Arc<dyn PtyProvider>>,
-        initial_console_palette: Option<ConsoleLaunchOptions>,
-        initial_bounds: Option<InitialTerminalSize>,
-    ) -> Task<Result<TerminalBuilder>> {
-        Self::new_with_console_palette_and_options(
-            working_directory,
-            task,
-            shell,
-            env,
-            cursor_shape,
-            alternate_scroll,
-            max_scroll_history_lines,
-            path_hyperlink_regexes,
-            path_hyperlink_timeout_ms,
-            is_remote_terminal,
-            window_id,
-            completion_tx,
-            cx,
             activation_script,
             path_style,
             pty_provider,
             initial_console_palette,
             initial_bounds,
-            false,
-        )
-    }
-
-    /// Creates a terminal whose PTY must come from `pty_provider`. This is
-    /// used by disk restoration: a local fallback would silently create a
-    /// different session and make the restored pane impossible to reconnect.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_with_console_palette_for_restore(
-        working_directory: Option<PathBuf>,
-        task: Option<TaskState>,
-        shell: Shell,
-        env: HashMap<String, String>,
-        cursor_shape: SettingsCursorShape,
-        alternate_scroll: AlternateScroll,
-        max_scroll_history_lines: Option<usize>,
-        path_hyperlink_regexes: Vec<String>,
-        path_hyperlink_timeout_ms: u64,
-        is_remote_terminal: bool,
-        window_id: u64,
-        completion_tx: Option<Sender<Option<ExitStatus>>>,
-        cx: &App,
-        activation_script: Vec<String>,
-        path_style: PathStyle,
-        pty_provider: Option<Arc<dyn PtyProvider>>,
-        initial_console_palette: Option<ConsoleLaunchOptions>,
-        initial_bounds: Option<InitialTerminalSize>,
-    ) -> Task<Result<TerminalBuilder>> {
-        Self::new_with_console_palette_and_options(
-            working_directory,
-            task,
-            shell,
-            env,
-            cursor_shape,
-            alternate_scroll,
-            max_scroll_history_lines,
-            path_hyperlink_regexes,
-            path_hyperlink_timeout_ms,
-            is_remote_terminal,
-            window_id,
-            completion_tx,
-            cx,
-            activation_script,
-            path_style,
-            pty_provider,
-            initial_console_palette,
-            initial_bounds,
-            true,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new_with_console_palette_and_options(
-        working_directory: Option<PathBuf>,
-        task: Option<TaskState>,
-        shell: Shell,
-        mut env: HashMap<String, String>,
-        cursor_shape: SettingsCursorShape,
-        alternate_scroll: AlternateScroll,
-        max_scroll_history_lines: Option<usize>,
-        path_hyperlink_regexes: Vec<String>,
-        path_hyperlink_timeout_ms: u64,
-        is_remote_terminal: bool,
-        window_id: u64,
-        completion_tx: Option<Sender<Option<ExitStatus>>>,
-        cx: &App,
-        activation_script: Vec<String>,
-        path_style: PathStyle,
-        pty_provider: Option<Arc<dyn PtyProvider>>,
-        initial_console_palette: Option<ConsoleLaunchOptions>,
-        initial_bounds: Option<InitialTerminalSize>,
-        require_pty_provider: bool,
-    ) -> Task<Result<TerminalBuilder>> {
+            pty_requirement,
+        } = options;
+        let require_pty_provider = pty_requirement == PtyRequirement::ProviderRequired;
         let display_scale_factor = initial_bounds.map_or(1.0, |size| size.scale_factor);
         let initial_bounds = initial_bounds.map(|size| size.bounds);
         let version = release_channel::AppVersion::global(cx);
@@ -6999,7 +6867,8 @@ impl Terminal {
         }
         // Dropping the handle rather than joining it lets the loop thread finish
         // on its own; the terminal must not block on it. The master descriptor
-        // goes with it, so stop reading foreground process groups through it.
+        // goes with it, so close the duplicate kept for foreground-process
+        // lookups too, or it would hold the pty open.
         info.close_pty_handle();
         drop(io.take());
     }
@@ -7282,23 +7151,25 @@ impl Terminal {
 
     pub fn clone_builder(&self, cx: &App, cwd: Option<PathBuf>) -> Task<Result<TerminalBuilder>> {
         let working_directory = self.working_directory().or(cwd);
-        TerminalBuilder::new(
-            working_directory,
-            None,
-            self.template.shell.clone(),
-            self.template.env.clone(),
-            self.template.cursor_shape,
-            self.template.alternate_scroll,
-            self.template.max_scroll_history_lines,
-            self.template.path_hyperlink_regexes.clone(),
-            self.template.path_hyperlink_timeout_ms,
-            self.is_remote_terminal,
-            self.template.window_id,
-            None,
+        TerminalBuilder::spawn(
+            TerminalSpawnOptions {
+                working_directory,
+                env: self.template.env.clone(),
+                cursor_shape: self.template.cursor_shape,
+                alternate_scroll: self.template.alternate_scroll,
+                max_scroll_history_lines: self.template.max_scroll_history_lines,
+                path_hyperlink_regexes: self.template.path_hyperlink_regexes.clone(),
+                path_hyperlink_timeout_ms: self.template.path_hyperlink_timeout_ms,
+                is_remote_terminal: self.is_remote_terminal,
+                activation_script: self.activation_script.clone(),
+                pty_provider: self.template.pty_provider.clone(),
+                ..TerminalSpawnOptions::new(
+                    self.template.shell.clone(),
+                    self.template.window_id,
+                    self.path_style,
+                )
+            },
             cx,
-            self.activation_script.clone(),
-            self.path_style,
-            self.template.pty_provider.clone(),
         )
     }
 }
@@ -8271,11 +8142,13 @@ mod tests {
             self.resizes.lock().push((columns, lines));
         }
 
+        #[cfg_attr(
+            not(windows),
+            expect(unused_variables, reason = "only Windows consoles take a palette")
+        )]
         fn set_console_palette(&self, palette: ConsolePalette) {
             #[cfg(windows)]
             self.palettes.lock().push(palette);
-            #[cfg(not(windows))]
-            let _ = palette;
         }
     }
 
@@ -9878,12 +9751,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(RecordingWriter(written.clone())),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_image_paste_handler(Arc::new(TestImagePasteHandler))
             .subscribe(cx)
@@ -9933,12 +9808,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(RecordingWriter(written.clone())),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_image_paste_handler(Arc::new(BlockingImagePasteHandler {
                 started: started.clone(),
@@ -10057,12 +9934,14 @@ mod tests {
                 }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_replay(restored.as_bytes().to_vec())
         });
@@ -10143,12 +10022,14 @@ mod tests {
                 }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_replay(b"saved screen".to_vec())
         });
@@ -10197,12 +10078,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(RecordingWriter(written.clone())),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_replay(b"\x1b[?1049h\x1b[?1h\x1b[2J\x1b[Hrestored-screen".to_vec())
             .with_fresh_shell_restore()
@@ -10260,12 +10143,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_replay(replay)
             .with_fresh_shell_restore()
@@ -10317,12 +10202,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_replay(replay)
             .with_fresh_shell_restore()
@@ -10369,12 +10256,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(RecordingWriter(written.clone())),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_replay(b"saved screen".to_vec())
             .with_fresh_shell_restore()
@@ -10523,12 +10412,14 @@ mod tests {
                 }),
                 Box::new(RecordingWriter(relayed.clone())),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                &cx.background_executor().clone(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: &cx.background_executor().clone(),
+                    path_style: PathStyle::local(),
+                },
             )
             .subscribe(cx)
         });
@@ -10752,12 +10643,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                &cx.background_executor().clone(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: &cx.background_executor().clone(),
+                    path_style: PathStyle::local(),
+                },
             )
             .subscribe(cx)
         });
@@ -11670,12 +11563,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .subscribe(cx)
         });
@@ -11692,12 +11587,14 @@ mod tests {
                 Box::new(CannedReader { bytes: Vec::new() }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_init_command_startup_shell(Shell::Program("fish".to_owned()))
             .subscribe(cx)
@@ -11831,27 +11728,21 @@ mod tests {
         let (completion_tx, completion_rx) = async_channel::unbounded();
         let builder = cx
             .update(|cx| {
-                TerminalBuilder::new(
-                    None,
-                    None,
-                    task::Shell::WithArguments {
-                        program,
-                        args,
-                        title_override: None,
+                TerminalBuilder::spawn(
+                    TerminalSpawnOptions {
+                        env: test_shell_environment(),
+                        completion_tx: Some(completion_tx),
+                        ..TerminalSpawnOptions::new(
+                            task::Shell::WithArguments {
+                                program,
+                                args,
+                                title_override: None,
+                            },
+                            0,
+                            PathStyle::local(),
+                        )
                     },
-                    test_shell_environment(),
-                    SettingsCursorShape::default(),
-                    AlternateScroll::On,
-                    None,
-                    vec![],
-                    0,
-                    false,
-                    0,
-                    Some(completion_tx),
                     cx,
-                    vec![],
-                    PathStyle::local(),
-                    None,
                 )
             })
             .await
@@ -11878,27 +11769,22 @@ mod tests {
         };
         let builder = cx
             .update(|cx| {
-                TerminalBuilder::new(
-                    None,
-                    Some(task_state),
-                    task::Shell::WithArguments {
-                        program,
-                        args,
-                        title_override: None,
+                TerminalBuilder::spawn(
+                    TerminalSpawnOptions {
+                        task: Some(task_state),
+                        env: test_shell_environment(),
+                        completion_tx: Some(completion_tx),
+                        ..TerminalSpawnOptions::new(
+                            task::Shell::WithArguments {
+                                program,
+                                args,
+                                title_override: None,
+                            },
+                            0,
+                            PathStyle::local(),
+                        )
                     },
-                    test_shell_environment(),
-                    SettingsCursorShape::default(),
-                    AlternateScroll::On,
-                    None,
-                    vec![],
-                    0,
-                    false,
-                    0,
-                    Some(completion_tx),
                     cx,
-                    vec![],
-                    PathStyle::local(),
-                    None,
                 )
             })
             .await
@@ -11957,27 +11843,22 @@ mod tests {
         let builder = cx
             .update(|cx| {
                 cx.set_global(HeadlessTerminal(true));
-                TerminalBuilder::new(
-                    None,
-                    Some(task_state),
-                    task::Shell::WithArguments {
-                        program,
-                        args,
-                        title_override: None,
+                TerminalBuilder::spawn(
+                    TerminalSpawnOptions {
+                        task: Some(task_state),
+                        env: HashMap::default(),
+                        completion_tx: Some(completion_tx),
+                        ..TerminalSpawnOptions::new(
+                            task::Shell::WithArguments {
+                                program,
+                                args,
+                                title_override: None,
+                            },
+                            0,
+                            PathStyle::local(),
+                        )
                     },
-                    HashMap::default(),
-                    SettingsCursorShape::default(),
-                    AlternateScroll::On,
-                    None,
-                    vec![],
-                    0,
-                    false,
-                    0,
-                    Some(completion_tx),
                     cx,
-                    vec![],
-                    PathStyle::local(),
-                    None,
                 )
             })
             .await
@@ -12947,23 +12828,13 @@ mod tests {
         let (completion_tx, completion_rx) = async_channel::unbounded();
         let builder = cx
             .update(|cx| {
-                TerminalBuilder::new(
-                    None,
-                    None,
-                    test_shell(),
-                    test_shell_environment(),
-                    SettingsCursorShape::default(),
-                    AlternateScroll::On,
-                    None,
-                    vec![],
-                    0,
-                    false,
-                    0,
-                    Some(completion_tx),
+                TerminalBuilder::spawn(
+                    TerminalSpawnOptions {
+                        env: test_shell_environment(),
+                        completion_tx: Some(completion_tx),
+                        ..TerminalSpawnOptions::new(test_shell(), 0, PathStyle::local())
+                    },
                     cx,
-                    Vec::new(),
-                    PathStyle::local(),
-                    None,
                 )
             })
             .await
@@ -13016,23 +12887,12 @@ mod tests {
 
         let builder = cx
             .update(|cx| {
-                TerminalBuilder::new(
-                    None,
-                    None,
-                    test_shell(),
-                    test_shell_environment(),
-                    SettingsCursorShape::default(),
-                    AlternateScroll::On,
-                    None,
-                    vec![],
-                    0,
-                    false,
-                    0,
-                    None,
+                TerminalBuilder::spawn(
+                    TerminalSpawnOptions {
+                        env: test_shell_environment(),
+                        ..TerminalSpawnOptions::new(test_shell(), 0, PathStyle::local())
+                    },
                     cx,
-                    Vec::new(),
-                    PathStyle::local(),
-                    None,
                 )
             })
             .await
@@ -13081,27 +12941,21 @@ mod tests {
             .build(Some("asdasdasdasd".to_owned()), &["@@@@@".to_owned()]);
         let builder = cx
             .update(|cx| {
-                TerminalBuilder::new(
-                    None,
-                    None,
-                    task::Shell::WithArguments {
-                        program,
-                        args,
-                        title_override: None,
+                TerminalBuilder::spawn(
+                    TerminalSpawnOptions {
+                        env: test_shell_environment(),
+                        completion_tx: Some(completion_tx),
+                        ..TerminalSpawnOptions::new(
+                            task::Shell::WithArguments {
+                                program,
+                                args,
+                                title_override: None,
+                            },
+                            0,
+                            PathStyle::local(),
+                        )
                     },
-                    test_shell_environment(),
-                    SettingsCursorShape::default(),
-                    AlternateScroll::On,
-                    None,
-                    Vec::new(),
-                    0,
-                    false,
-                    0,
-                    Some(completion_tx),
                     cx,
-                    Vec::new(),
-                    PathStyle::local(),
-                    None,
                 )
             })
             .await
@@ -13382,12 +13236,14 @@ mod tests {
                 }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::Block,
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::Block,
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_raw_output()
             .with_shared_viewport(Some((80, 24)))
@@ -14238,12 +14094,14 @@ mod tests {
                 }),
                 Box::new(std::io::sink()),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_raw_output()
             .with_pty_control(Arc::new(RecordingPtyControl::default()))
@@ -14344,12 +14202,14 @@ mod tests {
                 }),
                 Box::new(RecordingWriter(written.clone())),
                 String::new(),
-                SettingsCursorShape::default(),
-                AlternateScroll::On,
-                None,
-                0,
-                cx.background_executor(),
-                PathStyle::local(),
+                DisplayOnlySettings {
+                    cursor_shape: SettingsCursorShape::default(),
+                    alternate_scroll: AlternateScroll::On,
+                    max_scroll_history_lines: None,
+                    window_id: 0,
+                    background_executor: cx.background_executor(),
+                    path_style: PathStyle::local(),
+                },
             )
             .with_pty_control(Arc::new(RecordingPtyControl::default()))
             .subscribe(cx)
@@ -14976,7 +14836,7 @@ mod tests {
                 terminal.child_process_ended,
                 "the child ending is what releases the pty"
             );
-            let TerminalType::Pty { pty_tx, io, info } = &terminal.terminal_type else {
+            let TerminalType::Pty { pty_tx, io, .. } = &terminal.terminal_type else {
                 panic!("an exited pty pane stays a pty pane");
             };
             assert!(pty_tx.is_none(), "the pty sender should be released");
@@ -14986,11 +14846,12 @@ mod tests {
                 "the local control holds a reference to the loop's poller"
             );
             #[cfg(unix)]
-            assert!(
-                !info.pty_handle_is_open(),
-                "the borrowed pty master descriptor must not be read after it is closed"
-            );
-            let _ = info;
+            if let TerminalType::Pty { info, .. } = &terminal.terminal_type {
+                assert!(
+                    !info.pty_handle_is_open(),
+                    "the borrowed pty master descriptor must not be read after it is closed"
+                );
+            }
         });
     }
 

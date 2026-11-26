@@ -123,14 +123,17 @@ fn top_level_backend_is_read_from_the_file_and_typed() {
 #[test]
 fn backend_spellings_round_trip() {
     for backend in [ConsoleBackend::Conpty, ConsoleBackend::ConsoleServer] {
-        assert_eq!(ConsoleBackend::parse(backend.as_str()), Some(backend));
+        assert_eq!(
+            backend.as_str().parse::<ConsoleBackend>().ok(),
+            Some(backend)
+        );
         assert_eq!(
             serde_json::to_value(backend).unwrap(),
             backend.as_str(),
             "the file and the settings table must spell it the same way"
         );
     }
-    assert_eq!(ConsoleBackend::parse("ConPTY"), None);
+    assert!("ConPTY".parse::<ConsoleBackend>().is_err());
 }
 
 #[test]

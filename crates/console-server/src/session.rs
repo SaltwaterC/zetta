@@ -60,7 +60,7 @@ impl ConsoleOutput for SharedSink {
 pub struct Session {
     cancellation: Option<Arc<dyn Fn() + Send + Sync>>,
     pid: u32,
-    process: crate::native::Handle,
+    process: std::os::windows::io::OwnedHandle,
     input: Input,
     palette: Arc<Mutex<Option<Palette>>>,
     /// What close hands to the reaper: the child's job and the threads.
@@ -78,7 +78,7 @@ impl Session {
         let console = Console::new()?;
         let child = Child::spawn_with_launch(&console, &launch, JobScope::Child)?;
         let shared: SharedOutput = Arc::new(Mutex::new(Box::new(output)));
-        let input_event = console._input_event.duplicate()?;
+        let input_event = console._input_event.try_clone()?;
         let server_handle = Arc::new(console.server);
         let state = ConsoleState::new(
             launch.code_page.unwrap_or_else(crate::codepage::default),
@@ -129,7 +129,7 @@ impl Session {
         Ok(Self {
             cancellation,
             pid: child.pid,
-            process: child.process.duplicate()?,
+            process: child.process.try_clone()?,
             input,
             palette,
             child: Some(child),
@@ -141,7 +141,7 @@ impl Session {
         self.pid
     }
     pub fn child_handle(&self) -> io::Result<std::os::windows::io::OwnedHandle> {
-        self.process.duplicate_owned()
+        self.process.try_clone()
     }
     pub fn input(&self, bytes: &[u8]) -> io::Result<usize> {
         self.input.write(bytes)

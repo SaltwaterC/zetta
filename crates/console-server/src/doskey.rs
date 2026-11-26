@@ -23,7 +23,7 @@ impl Server {
     /// The message's input after the API header and body.
     pub(super) fn api_input(
         &self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<Charged<u8>> {
@@ -59,7 +59,7 @@ impl Server {
     /// Writes `bytes` after the message body; the information is their size.
     pub(super) fn reply_output(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
         bytes: &mut [u8],
@@ -78,7 +78,7 @@ impl Server {
     /// Unicode; the input holds exe, source and target in that order.
     pub(super) fn add_alias(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -109,7 +109,7 @@ impl Server {
     /// CONSOLE_GETALIAS_MSG: TargetLength comes back as the bytes written.
     pub(super) fn get_alias(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -151,7 +151,7 @@ impl Server {
     /// GetConsoleAliasesLength: bytes for "source=target\0" per alias.
     pub(super) fn get_aliases_length(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -165,7 +165,7 @@ impl Server {
     }
     pub(super) fn get_aliases(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -187,7 +187,7 @@ impl Server {
     }
     pub(super) fn get_alias_exes(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -201,7 +201,7 @@ impl Server {
 
     pub(super) fn expunge_history(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -215,7 +215,7 @@ impl Server {
     }
     pub(super) fn set_number_of_commands(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -242,7 +242,7 @@ impl Server {
     }
     pub(super) fn get_command_history_length(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {
@@ -255,7 +255,7 @@ impl Server {
     }
     pub(super) fn get_command_history(
         &mut self,
-        handle: &Handle,
+        handle: &OwnedHandle,
         d: Descriptor,
         size: usize,
     ) -> io::Result<(i32, usize)> {

@@ -90,7 +90,7 @@ fn the_size_row_and_the_cli_offer_the_same_sizes() {
     assert_eq!(offered, OverlayFontSize::CLI_NAMES);
     for (index, name) in OverlayFontSize::CLI_NAMES.iter().enumerate() {
         assert_eq!(
-            OverlayFontSize::parse(name),
+            name.parse::<OverlayFontSize>().ok(),
             Some(OverlayFontSize::ALL[index]),
             "{name} does not parse back to the size it names"
         );

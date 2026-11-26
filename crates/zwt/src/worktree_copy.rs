@@ -388,6 +388,10 @@ fn path_components_equal(left: &std::ffi::OsStr, right: &std::ffi::OsStr) -> boo
     }
 }
 
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(unused_variables, reason = "no symlink API to copy through")
+)]
 fn create_symlink(target: &Path, destination: &Path, source: &Path) -> Result<()> {
     #[cfg(unix)]
     {
@@ -401,9 +405,7 @@ fn create_symlink(target: &Path, destination: &Path, source: &Path) -> Result<()
     }
     #[cfg(windows)]
     {
-        let target_is_directory = fs::metadata(source)
-            .map(|metadata| metadata.is_dir())
-            .unwrap_or(false);
+        let target_is_directory = fs::metadata(source).is_ok_and(|metadata| metadata.is_dir());
         if target_is_directory {
             std::os::windows::fs::symlink_dir(target, destination)
         } else {
@@ -419,12 +421,18 @@ fn create_symlink(target: &Path, destination: &Path, source: &Path) -> Result<()
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (target, destination, source);
         anyhow::bail!("symlink copying is unsupported on this platform");
     }
     Ok(())
 }
 
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", windows)),
+    expect(
+        unused_variables,
+        reason = "no copy-on-write filesystem is detected on this platform"
+    )
+)]
 fn detect_cow_filesystem(source_root: &Path, destination_root: &Path) -> CowFilesystem {
     #[cfg(target_os = "linux")]
     {
@@ -464,7 +472,6 @@ fn detect_cow_filesystem(source_root: &Path, destination_root: &Path) -> CowFile
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     {
-        let _ = (source_root, destination_root);
         CowFilesystem::Unsupported
     }
 }
@@ -494,18 +501,11 @@ const LINUX_XFS_SUPER_MAGIC: u64 = 0x5846_5342;
 
 #[cfg(target_os = "linux")]
 fn linux_filesystem_type(path: &Path) -> Option<u64> {
-    use std::{ffi::CString, os::unix::ffi::OsStrExt};
-
-    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut statistics = unsafe { std::mem::zeroed::<libc::statfs>() };
-    let result = unsafe { libc::statfs(path.as_ptr(), &mut statistics) };
-    (result == 0).then_some(statistics.f_type as u64)
+    Some(rustix::fs::statfs(path).ok()?.f_type as u64)
 }
 
 #[cfg(target_os = "linux")]
 fn copy_linux_clone(source: &Path, destination: &Path) -> Result<CopyFileResult> {
-    use std::os::fd::AsRawFd as _;
-
     let source_file = File::open(source)
         .with_context(|| format!("opening copy source file {}", source.display()))?;
     let destination_file = OpenOptions::new()
@@ -513,18 +513,11 @@ fn copy_linux_clone(source: &Path, destination: &Path) -> Result<CopyFileResult>
         .create_new(true)
         .open(destination)
         .with_context(|| format!("creating copied file {}", destination.display()))?;
-    let result = unsafe {
-        libc::ioctl(
-            destination_file.as_raw_fd(),
-            libc::FICLONE,
-            source_file.as_raw_fd(),
-        )
-    };
-    if result == 0 {
+    let Err(error) = rustix::fs::ioctl_ficlone(&destination_file, &source_file) else {
         return Ok(CopyFileResult::Copied);
-    }
+    };
 
-    let error = io::Error::last_os_error();
+    let error = io::Error::from(error);
     drop(destination_file);
     let _ = fs::remove_file(destination);
     if clone_error_is_unsupported(&error) {
@@ -542,21 +535,13 @@ fn copy_linux_clone(source: &Path, destination: &Path) -> Result<CopyFileResult>
 
 #[cfg(target_os = "macos")]
 fn macos_is_apfs(path: &Path) -> bool {
-    use std::{
-        ffi::{CStr, CString},
-        os::unix::ffi::OsStrExt,
-    };
-
-    let Ok(path) = CString::new(path.as_os_str().as_bytes()) else {
+    let Ok(statistics) = rustix::fs::statfs(path) else {
         return false;
     };
-    let mut statistics = unsafe { std::mem::zeroed::<libc::statfs>() };
-    if unsafe { libc::statfs(path.as_ptr(), &mut statistics) } != 0 {
-        return false;
-    }
-    unsafe { CStr::from_ptr(statistics.f_fstypename.as_ptr()) }
-        .to_bytes()
-        .eq_ignore_ascii_case(b"apfs")
+    // The kernel NUL-terminates the name inside the array.
+    let name = statistics.f_fstypename.map(|byte| byte as u8);
+    std::ffi::CStr::from_bytes_until_nul(&name)
+        .is_ok_and(|name| name.to_bytes().eq_ignore_ascii_case(b"apfs"))
 }
 
 #[cfg(target_os = "macos")]
@@ -567,13 +552,16 @@ fn copy_macos_clone(source: &Path, destination: &Path) -> Result<CopyFileResult>
         .context("copy source path contains an embedded NUL byte")?;
     let destination_path = CString::new(destination.as_os_str().as_bytes())
         .context("copy destination path contains an embedded NUL byte")?;
+    // SAFETY: both paths are NUL-terminated CStrings that outlive the call.
     let result = unsafe { libc::clonefile(source.as_ptr(), destination_path.as_ptr(), 0) };
     if result == 0 {
         return Ok(CopyFileResult::Copied);
     }
 
+    // `clonefile` creates the destination only when it succeeds, so there is
+    // nothing of ours to remove; on `EEXIST` the file there is somebody
+    // else's.
     let error = io::Error::last_os_error();
-    let _ = fs::remove_file(destination);
     if clone_error_is_unsupported(&error) {
         Ok(CopyFileResult::Unsupported)
     } else {
@@ -626,6 +614,9 @@ fn windows_volume_info(path: &Path) -> Option<WindowsVolumeInfo> {
     let mut serial_number = 0;
     let mut flags = 0;
     let mut filesystem_name = [0u16; 32];
+    // SAFETY: `path` is a NUL-terminated wide string that outlives the call,
+    // and each out-parameter is writable; the name buffer's length is passed
+    // with its slice.
     unsafe {
         GetVolumeInformationW(
             PCWSTR(path.as_ptr()),
@@ -681,6 +672,9 @@ fn copy_windows_clone(source: &Path, destination: &Path) -> Result<CopyFileResul
         TargetFileOffset: 0,
         ByteCount: length,
     };
+    // SAFETY: both handles belong to Files open for the whole call; the input
+    // is a live DUPLICATE_EXTENTS_DATA whose exact size is passed, there is
+    // no output buffer, and the call is synchronous (no OVERLAPPED).
     let result = unsafe {
         DeviceIoControl(
             HANDLE(destination_file.as_raw_handle()),

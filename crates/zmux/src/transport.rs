@@ -18,7 +18,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{BorrowedFd, OwnedFd};
 
 #[cfg(unix)]
 mod unix;
@@ -478,14 +478,6 @@ impl Connection {
 /// One attach hands over one master descriptor, so the ceiling is deliberately
 /// small: it bounds the control buffer and rejects a peer claiming more.
 pub const MAX_DESCRIPTORS: usize = 4;
-#[cfg(unix)]
-const CONTROL_BUFFER_LEN: usize = 128;
-
-#[cfg(unix)]
-const _: () = assert!(
-    CONTROL_BUFFER_LEN >= 16 + MAX_DESCRIPTORS * size_of::<RawFd>(),
-    "the control buffer must hold a cmsg header plus MAX_DESCRIPTORS"
-);
 
 #[cfg(test)]
 #[path = "tests/transport.rs"]

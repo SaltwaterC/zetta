@@ -197,7 +197,7 @@ pub(crate) enum LayoutState {
         pane_id: u64,
     },
     Split {
-        axis: AxisState,
+        axis: SplitAxis,
         /// Scaled by `PANE_SPLIT_RATIO_SCALE`, as in [`PaneLayout`]: an
         /// integer keeps a restored layout identical to the one saved rather
         /// than drifting by a fraction of a pixel.
@@ -205,31 +205,6 @@ pub(crate) enum LayoutState {
         first: Box<LayoutState>,
         second: Box<LayoutState>,
     },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum AxisState {
-    Horizontal,
-    Vertical,
-}
-
-impl From<SplitAxis> for AxisState {
-    fn from(axis: SplitAxis) -> Self {
-        match axis {
-            SplitAxis::Horizontal => Self::Horizontal,
-            SplitAxis::Vertical => Self::Vertical,
-        }
-    }
-}
-
-impl From<AxisState> for SplitAxis {
-    fn from(axis: AxisState) -> Self {
-        match axis {
-            AxisState::Horizontal => Self::Horizontal,
-            AxisState::Vertical => Self::Vertical,
-        }
-    }
 }
 
 impl LayoutState {
@@ -242,7 +217,7 @@ impl LayoutState {
                 first,
                 second,
             } => Self::Split {
-                axis: (*axis).into(),
+                axis: *axis,
                 first_ratio: *first_ratio,
                 first: Box::new(Self::from_layout(first)),
                 second: Box::new(Self::from_layout(second)),
@@ -259,7 +234,7 @@ impl LayoutState {
                 first,
                 second,
             } => PaneLayout::Split {
-                axis: axis.into(),
+                axis,
                 first_ratio,
                 first: Box::new(first.into_layout()),
                 second: Box::new(second.into_layout()),
@@ -503,10 +478,8 @@ impl TabState {
                 restored.environment_overrides = pane.environment_overrides;
                 if let Some(overlay) = pane.overlay {
                     restored.overlay_text = Some(overlay.text);
-                    restored.overlay_font_size = overlay
-                        .font_size
-                        .as_deref()
-                        .and_then(crate::OverlayFontSize::parse);
+                    restored.overlay_font_size =
+                        overlay.font_size.and_then(|size| size.parse().ok());
                     restored.overlay_opacity = overlay.opacity;
                     restored.overlay_color =
                         overlay.color.map(|[h, s, l, a]| gpui::Hsla { h, s, l, a });

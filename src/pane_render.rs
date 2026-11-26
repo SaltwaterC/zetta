@@ -132,15 +132,23 @@ fn pane_overlay_element(
         })
 }
 
-fn stacked_entry_status(entry: &StackedPane) -> String {
+fn stacked_entry_status(entry: &StackedPane) -> gpui::SharedString {
     match entry.state {
-        StackedPaneState::Starting => "starting".to_owned(),
-        StackedPaneState::Running => "running".to_owned(),
+        StackedPaneState::Starting => "starting".into(),
+        StackedPaneState::Running => "running".into(),
         StackedPaneState::Completed => entry
             .exit_code
-            .map_or_else(|| "completed".to_owned(), |code| format!("exit {code}")),
-        StackedPaneState::Failed => "failed".to_owned(),
+            .map_or_else(|| "completed".into(), |code| format!("exit {code}").into()),
+        StackedPaneState::Failed => "failed".into(),
     }
+}
+
+/// What every row of one pane's command stack shares.
+#[derive(Clone, Copy)]
+struct StackedRowContext<'a> {
+    tab_id: u64,
+    pane_id: u64,
+    colors: &'a ThemeColors,
 }
 
 fn stacked_rows_container(background: gpui::Hsla) -> gpui::Div {
@@ -162,24 +170,28 @@ impl Zetta {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let selected = pane.stack.selected;
+        let row = StackedRowContext {
+            tab_id: tab.id,
+            pane_id: pane.id,
+            colors,
+        };
         let mut rows = stacked_rows_container(terminal_background);
 
         if (!pane.base_exited || pane.exit.is_some())
             && !matches!(selected, PaneStackSelection::Base)
         {
-            rows = rows.child(self.render_stacked_row(
-                tab,
-                pane,
+            let status = if pane.exit.is_some() {
+                "failed"
+            } else if pane.base_exited {
+                "exited"
+            } else {
+                "running"
+            };
+            rows = rows.child(Self::render_stacked_row(
+                row,
                 PaneStackSelection::Base,
-                "Interactive shell".to_owned(),
-                if pane.exit.is_some() {
-                    "failed".to_owned()
-                } else if pane.base_exited {
-                    "exited".to_owned()
-                } else {
-                    "running".to_owned()
-                },
-                colors,
+                "Interactive shell".into(),
+                status.into(),
                 cx,
             ));
         }
@@ -188,13 +200,11 @@ impl Zetta {
             if selected == PaneStackSelection::Stacked(entry.id) {
                 continue;
             }
-            rows = rows.child(self.render_stacked_row(
-                tab,
-                pane,
+            rows = rows.child(Self::render_stacked_row(
+                row,
                 PaneStackSelection::Stacked(entry.id),
-                entry.command.clone(),
+                entry.command.clone().into(),
                 stacked_entry_status(entry),
-                colors,
                 cx,
             ));
         }
@@ -203,23 +213,18 @@ impl Zetta {
             .into_any_element()
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the stack entry's own six values plus the GPUI context; \
-                  bundling them would only rename the argument list"
-    )]
     fn render_stacked_row(
-        &self,
-        tab: &Tab,
-        pane: &TerminalPane,
+        row: StackedRowContext<'_>,
         selection: PaneStackSelection,
-        command: String,
-        status: String,
-        colors: &ThemeColors,
+        command: gpui::SharedString,
+        status: gpui::SharedString,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        let tab_id = tab.id;
-        let pane_id = pane.id;
+        let StackedRowContext {
+            tab_id,
+            pane_id,
+            colors,
+        } = row;
         let select_handle = cx.entity().downgrade();
         let close_handle = cx.entity().downgrade();
         let row_id = match selection {
@@ -311,10 +316,12 @@ impl Zetta {
             .with_left(!self.sidebar_visible());
         let corner_radii = edges.client_corner_radii(window, context.corner_radius);
         div()
-            .when(self.pane_resize_mode, |layout| {
+            .when(self.pane_resize_mode(), |layout| {
                 layout.key_context("PaneResize")
             })
-            .when(self.pane_move_mode, |layout| layout.key_context("PaneMove"))
+            .when(self.pane_move_mode(), |layout| {
+                layout.key_context("PaneMove")
+            })
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -439,7 +446,7 @@ impl Zetta {
             && pane.stack.is_empty()
             && (tab.renaming_pane == Some(pane_id)
                 || (tab.panes.len() > 1 && self.pane_controls_visible_for == Some(pane_id)));
-        let needs_labels = self.pane_resize_mode || self.pane_move_mode || shows_pane_controls;
+        let needs_labels = self.pane_resize_mode() || self.pane_move_mode() || shows_pane_controls;
         let pane_label = needs_labels.then(|| {
             tab.displayed_pane_label(pane_id)
                 .unwrap_or_else(|| pane.label())
@@ -472,7 +479,7 @@ impl Zetta {
             .overflow_hidden()
             .child(content)
             .when_some(
-                self.pane_resize_mode
+                self.pane_resize_mode()
                     .then(|| pane_label.clone().zip(pane_size.clone()))
                     .flatten(),
                 |element, (pane_label, pane_size)| {
@@ -483,7 +490,7 @@ impl Zetta {
                 },
             )
             .when_some(
-                self.pane_move_mode.then(|| pane_label.clone()).flatten(),
+                self.pane_move_mode().then(|| pane_label.clone()).flatten(),
                 |element, pane_label| {
                     let overlay_label = if tab.active_pane == pane_id {
                         format!("{pane_label} Move mode")
@@ -519,7 +526,7 @@ impl Zetta {
                 },
             )
             .when(
-                self.pane_move_mode && tab.panes.len() > 1 && tab.maximized_pane.is_none(),
+                self.pane_move_mode() && tab.panes.len() > 1 && tab.maximized_pane.is_none(),
                 |pane| {
                     let pane_move_drag = PaneMoveDrag {
                         tab_id: tab.id,
@@ -611,10 +618,10 @@ impl Zetta {
                 view.update(cx, |view, cx| {
                     view.set_window_corner_radii(corner_radii, cx);
                     view.set_pane_resize_mode_entry(
-                        self.pane_resize_mode,
+                        self.pane_resize_mode(),
                         pane_resize_toggle_action,
                     );
-                    view.set_pane_move_mode_entry(self.pane_move_mode, pane_move_toggle_action);
+                    view.set_pane_move_mode_entry(self.pane_move_mode(), pane_move_toggle_action);
                 });
                 // Cached so a frame the terminal did not cause — an overlay
                 // scrolling, a title-bar hover, a tab rename — does not re-lay
@@ -922,8 +929,9 @@ impl Zetta {
         let PaneLayoutContext { tab, colors, .. } = context;
         let first_ratio = PaneLayout::ratio_fraction(first_ratio);
         let second_ratio = 1. - first_ratio;
-        let pane_resize_enabled =
-            self.pane_resize_mode && tab.maximized_pane.is_none() && tab.minimized_panes.is_empty();
+        let pane_resize_enabled = self.pane_resize_mode()
+            && tab.maximized_pane.is_none()
+            && tab.minimized_panes.is_empty();
         let gutter = PaneResizeGutter {
             tab_id: tab.id,
             first_pane: first.first_pane(),

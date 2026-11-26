@@ -557,6 +557,10 @@ fn read_agent_string<'a>(body: &'a [u8], offset: &mut usize) -> Option<&'a [u8]>
     Some(value)
 }
 
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(unused_variables, reason = "no agent transport exists to look for")
+)]
 fn local_agent_path_exists(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -573,16 +577,20 @@ fn local_agent_path_exists(path: &Path) -> bool {
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect::<Vec<_>>();
+            // SAFETY: `wide` is a NUL-terminated name that outlives the call.
             unsafe { WaitNamedPipeW(windows::core::PCWSTR(wide.as_ptr()), 100).as_bool() }
         }
         #[cfg(not(windows))]
         {
-            let _ = path;
             false
         }
     }
 }
 
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(unused_variables, reason = "no other platform has an agent transport")
+)]
 fn connect_agent(path: &Path) -> io::Result<AgentStream> {
     #[cfg(unix)]
     {
@@ -595,7 +603,6 @@ fn connect_agent(path: &Path) -> io::Result<AgentStream> {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = path;
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "SSH-agent forwarding is unsupported on this platform",
@@ -830,18 +837,10 @@ fn relay_pipe_accept_loop(
     stop: Arc<AtomicBool>,
     ready: SyncSender<io::Result<()>>,
 ) {
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::FromRawHandle;
-    use windows::Win32::Foundation::{CloseHandle, ERROR_PIPE_CONNECTED};
-    use windows::Win32::System::Pipes::ConnectNamedPipe;
+    use std::ops::ControlFlow;
 
-    let wide = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let name = windows::core::PCWSTR(wide.as_ptr());
-    let mut pending = match windows_pipe::create(name, AGENT_MAX_FRAME as u32, true) {
+    let name = windows_pipe::PipeName::new(path.as_os_str());
+    let first = match windows_pipe::create(&name, AGENT_MAX_FRAME as u32, true) {
         Ok(handle) => {
             let _ = ready.send(Ok(()));
             handle
@@ -851,36 +850,12 @@ fn relay_pipe_accept_loop(
             return;
         }
     };
-    loop {
-        if stop.load(Ordering::Acquire) {
-            let _ = unsafe { CloseHandle(pending) };
-            break;
-        }
-        let connected = unsafe { ConnectNamedPipe(pending, None) };
-        if stop.load(Ordering::Acquire) {
-            let _ = unsafe { CloseHandle(pending) };
-            break;
-        }
-        // Created while `pending` still exists, so the name is never without
-        // an instance for another account to claim.
-        let Ok(next) = windows_pipe::create(name, AGENT_MAX_FRAME as u32, false) else {
-            let _ = unsafe { CloseHandle(pending) };
-            break;
-        };
-        let accepted = match connected {
-            Ok(()) => true,
-            Err(error) => error.code().0 as u32 & 0xffff == ERROR_PIPE_CONNECTED.0,
-        };
-        if accepted {
-            let stream = unsafe { std::fs::File::from_raw_handle(pending.0 as _) };
-            let agent_path = agent_path.clone();
-            let binding = Arc::clone(&binding);
-            thread::spawn(move || relay_connection(Box::new(stream), &agent_path, &binding));
-        } else {
-            let _ = unsafe { CloseHandle(pending) };
-        }
-        pending = next;
-    }
+    windows_pipe::serve(&name, AGENT_MAX_FRAME as u32, first, &stop, |stream| {
+        let agent_path = agent_path.clone();
+        let binding = Arc::clone(&binding);
+        thread::spawn(move || relay_connection(Box::new(stream), &agent_path, &binding));
+        ControlFlow::Continue(())
+    });
 }
 
 #[cfg(unix)]

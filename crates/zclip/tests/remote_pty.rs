@@ -23,8 +23,9 @@ const COPY_ONLY: Permissions = Permissions {
 fn controlling_pty() -> (std::fs::File, std::fs::File) {
     let mut master = -1;
     let mut slave = -1;
-    // SAFETY: both pointers refer to writable file-descriptor slots.
     assert_eq!(
+        // SAFETY: both pointers refer to writable file-descriptor slots, and
+        // the optional name, termios and winsize arguments are null.
         unsafe {
             libc::openpty(
                 &raw mut master,

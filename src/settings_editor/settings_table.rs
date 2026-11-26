@@ -293,7 +293,7 @@ fn new_tab_profile_kind() -> SettingKind {
         options: &[("default", "Default"), ("inherit", "Inherit")],
         get: |form| form.new_tab_profile.as_str(),
         set: |form, value| {
-            if let Ok(value) = NewTabProfile::parse(value) {
+            if let Ok(value) = value.parse::<NewTabProfile>() {
                 form.new_tab_profile = value;
             }
         },
@@ -330,7 +330,7 @@ fn working_directory_scope_kind() -> SettingKind {
         options: &[("none", "None"), ("pane", "Pane"), ("tab", "Tab")],
         get: |form| form.working_directory_scope.as_str(),
         set: |form, value| {
-            if let Ok(value) = WorkingDirectoryScope::parse(value) {
+            if let Ok(value) = value.parse::<WorkingDirectoryScope>() {
                 form.working_directory_scope = value;
             }
         },
@@ -442,7 +442,7 @@ fn pane_controls_position_kind() -> SettingKind {
         options: &[("right", "Right"), ("left", "Left")],
         get: |form| form.pane_controls_position.as_str(),
         set: |form, value| {
-            if let Ok(value) = PaneControlsPosition::parse(value) {
+            if let Ok(value) = value.parse::<PaneControlsPosition>() {
                 form.pane_controls_position = value;
             }
         },
@@ -456,7 +456,7 @@ fn console_backend_kind() -> SettingKind {
         options: &[("conpty", "ConPTY"), ("console-server", "Console server")],
         get: |form| form.console_backend.as_str(),
         set: |form, value| {
-            if let Some(value) = crate::config::ConsoleBackend::parse(value) {
+            if let Ok(value) = value.parse::<crate::config::ConsoleBackend>() {
                 form.console_backend = value;
             }
         },
@@ -470,7 +470,7 @@ fn session_retention_kind() -> SettingKind {
         options: RETENTION_OPTIONS,
         get: |form| form.session_retention.as_str(),
         set: |form, value| {
-            if let Ok(value) = SessionRetention::parse(value) {
+            if let Ok(value) = value.parse::<SessionRetention>() {
                 form.session_retention = value;
             }
         },
@@ -501,7 +501,7 @@ fn remote_protocol_kind() -> SettingKind {
         options: &[("ssh", "SSH"), ("zosh", "Zosh")],
         get: |form| form.remote_session_protocol.name(),
         set: |form, value| {
-            if let Ok(value) = RemoteSessionProtocol::parse(value) {
+            if let Ok(value) = value.parse::<RemoteSessionProtocol>() {
                 form.remote_session_protocol = value;
             }
         },

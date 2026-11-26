@@ -3,6 +3,7 @@
 //! names exactly the live panes.
 
 use super::*;
+use crate::protocol::SplitAxis;
 
 /// Removes panes whose process has ended and no client is reading, and ends
 /// sessions that no longer hold anything to attach to.
@@ -259,7 +260,7 @@ pub(super) fn summary_from_daemon_panes(
         if laid_out.insert(pane.id) {
             layout = Some(match layout {
                 Some(layout) => BackgroundPaneLayout::Split {
-                    axis: "horizontal".to_owned(),
+                    axis: SplitAxis::Horizontal,
                     first_ratio: crate::protocol::DEFAULT_BACKGROUND_PANE_SPLIT_RATIO,
                     first: Box::new(layout),
                     second: Box::new(BackgroundPaneLayout::Pane { pane_id: pane.id }),
@@ -333,7 +334,7 @@ pub(super) fn retain_daemon_panes_in_layout(
             retain_daemon_panes_in_layout(second, live_pane_ids, seen),
         ) {
             (Some(first), Some(second)) => Some(BackgroundPaneLayout::Split {
-                axis: axis.clone(),
+                axis: *axis,
                 first_ratio: *first_ratio,
                 first: Box::new(first),
                 second: Box::new(second),

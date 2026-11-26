@@ -171,13 +171,15 @@ pub(in crate::server) fn handover_handles(
     pane: &Pane,
     _client_process_id: u32,
 ) -> Result<Handover> {
-    // SAFETY: the borrow lives only until the message has been sent, well
-    // inside the lifetime of the PTY the daemon is holding.
-    let descriptor = unsafe {
-        std::os::fd::BorrowedFd::borrow_raw(std::os::fd::AsRawFd::as_raw_fd(pane.pty.file()))
-    };
+    // A duplicate, close-on-exec like the original, taken while the caller
+    // still holds the sessions lock that keeps the pane alive.
+    let descriptor = pane
+        .pty
+        .file()
+        .try_clone()
+        .context("duplicating the pane's terminal to hand over")?;
     Ok(Handover {
-        attachments: vec![descriptor],
+        attachments: Attachments(vec![descriptor.into()]),
         values: Vec::new(),
     })
 }

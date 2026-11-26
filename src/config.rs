@@ -15,8 +15,11 @@ use task::Shell;
 use terminal::MAX_SCROLL_HISTORY_LINES;
 use ui::IconName;
 
-use crate::pane::MAX_PANES_PER_TAB;
+use crate::pane::{MAX_PANES_PER_TAB, OverlayFontSize};
+// The crate when there is a multiplexer, `zmux_stub.rs` when there is not.
 use crate::profile_icon::ProfileIcon;
+#[cfg(not(feature = "zmux"))]
+use crate::zmux;
 
 mod discovery;
 
@@ -58,8 +61,12 @@ impl SessionRetention {
             Self::Disk => "disk",
         }
     }
+}
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+impl std::str::FromStr for SessionRetention {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "none" => Ok(Self::None),
             "memory" => Ok(Self::Memory),
@@ -69,6 +76,12 @@ impl SessionRetention {
             }
             _ => anyhow::bail!("sessions.retention must be \"none\", \"memory\", or \"disk\""),
         }
+    }
+}
+
+impl std::fmt::Display for SessionRetention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -90,7 +103,7 @@ pub struct SessionPersistenceConfig {
 /// Automatic protection is an age feature, so these have no callers in a build
 /// without one; the configuration itself is still parsed and round-tripped, so
 /// the fields stay.
-#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
+#[cfg(feature = "session-persistence")]
 impl SessionPersistenceConfig {
     /// Whether automatic protection is asked for *and* has the two things it
     /// needs. A missing identity field may resolve to the conventional SSH
@@ -106,7 +119,7 @@ impl SessionPersistenceConfig {
     /// even when that path does not exist, so callers can report its useful
     /// name in an error.
     pub fn resolved_identity(&self) -> Option<PathBuf> {
-        self.resolved_identity_with_home(&home_dir(), default_session_identity_path())
+        self.resolved_identity_with_home(&home_dir(), zmux::persistence::default_identity_path())
     }
 
     fn resolved_identity_with_home(
@@ -155,7 +168,18 @@ pub enum RemoteSessionProtocol {
 }
 
 impl RemoteSessionProtocol {
-    pub fn parse(value: &str) -> Result<Self> {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::Zosh => "zosh",
+        }
+    }
+}
+
+impl std::str::FromStr for RemoteSessionProtocol {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "ssh" => Ok(Self::Ssh),
             "zosh" => Ok(Self::Zosh),
@@ -164,12 +188,11 @@ impl RemoteSessionProtocol {
             }
         }
     }
+}
 
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Ssh => "ssh",
-            Self::Zosh => "zosh",
-        }
+impl std::fmt::Display for RemoteSessionProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -234,13 +257,23 @@ impl PaneControlsPosition {
             Self::Right => "right",
         }
     }
+}
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+impl std::str::FromStr for PaneControlsPosition {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "left" => Ok(Self::Left),
             "right" => Ok(Self::Right),
             _ => anyhow::bail!("pane_controls_position must be \"left\" or \"right\""),
         }
+    }
+}
+
+impl std::fmt::Display for PaneControlsPosition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -258,13 +291,23 @@ impl NewTabProfile {
             Self::Inherit => "inherit",
         }
     }
+}
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+impl std::str::FromStr for NewTabProfile {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "default" => Ok(Self::Default),
             "inherit" => Ok(Self::Inherit),
             _ => anyhow::bail!("new_tab_profile must be \"default\" or \"inherit\""),
         }
+    }
+}
+
+impl std::fmt::Display for NewTabProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -285,7 +328,19 @@ impl WorkingDirectoryScope {
         }
     }
 
-    pub(crate) fn parse(value: &str) -> Result<Self> {
+    pub fn inherits_for_new_tab(self) -> bool {
+        matches!(self, Self::Tab)
+    }
+
+    pub fn inherits_for_new_pane(self) -> bool {
+        matches!(self, Self::Pane | Self::Tab)
+    }
+}
+
+impl std::str::FromStr for WorkingDirectoryScope {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "none" => Ok(Self::None),
             "pane" => Ok(Self::Pane),
@@ -293,13 +348,11 @@ impl WorkingDirectoryScope {
             _ => anyhow::bail!("working_directory_scope must be \"none\", \"pane\", or \"tab\""),
         }
     }
+}
 
-    pub fn inherits_for_new_tab(self) -> bool {
-        matches!(self, Self::Tab)
-    }
-
-    pub fn inherits_for_new_pane(self) -> bool {
-        matches!(self, Self::Pane | Self::Tab)
+impl std::fmt::Display for WorkingDirectoryScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -608,10 +661,10 @@ impl Config {
             self.working_directory_configured = !matches!(directory.as_str(), "~" | "~/");
         }
         if let Some(scope) = file.working_directory_scope.get() {
-            self.working_directory_scope = WorkingDirectoryScope::parse(&scope)?;
+            self.working_directory_scope = scope.parse()?;
         }
         if let Some(profile) = file.new_tab_profile.get() {
-            self.new_tab_profile = NewTabProfile::parse(&profile)?;
+            self.new_tab_profile = profile.parse()?;
         }
         if let Some(theme) = file.theme.get() {
             self.theme = Some(theme);
@@ -671,7 +724,7 @@ impl Config {
             self.hide_project_sidebar = hidden;
         }
         if let Some(position) = file.pane_controls_position.get() {
-            self.pane_controls_position = PaneControlsPosition::parse(&position)?;
+            self.pane_controls_position = position.parse()?;
         }
         if let Some(hidden) = file.pane_controls_hidden_by_default.get() {
             self.pane_controls_hidden_by_default = hidden;
@@ -739,7 +792,7 @@ impl Config {
 impl SessionsFile {
     fn apply(self, sessions: &mut SessionsConfig) -> Result<()> {
         if let Some(retention) = self.retention.get() {
-            sessions.retention = SessionRetention::parse(&retention)?;
+            sessions.retention = retention.parse()?;
         }
         if let Some(ring_bytes) = self.ring_bytes.get() {
             sessions.ring_bytes = usize::try_from(ring_bytes)
@@ -764,7 +817,7 @@ impl SessionsFile {
 impl RemoteSessionFile {
     fn apply(self, remote: &mut RemoteSessionConfig) -> Result<()> {
         if let Some(protocol) = self.protocol.get() {
-            remote.protocol = RemoteSessionProtocol::parse(&protocol)?;
+            remote.protocol = protocol.parse()?;
         }
         if let Some(keep_alive_ms) = self.keep_alive_ms.get() {
             remote.keep_alive_ms = keep_alive_ms
@@ -1015,14 +1068,7 @@ impl ProfileFile {
 /// Resolved by `zmux`, which needs the same directory without depending on
 /// this module: it holds the session catalogs and the control endpoint.
 pub(crate) fn platform_config_dir() -> PathBuf {
-    #[cfg(feature = "zmux")]
-    {
-        zmux::paths::platform_config_dir()
-    }
-    #[cfg(not(feature = "zmux"))]
-    {
-        crate::local_sessions::paths::platform_config_dir()
-    }
+    zmux::paths::platform_config_dir()
 }
 
 pub fn themes_dir() -> PathBuf {
@@ -1042,18 +1088,6 @@ fn expand_home(path: &str) -> PathBuf {
 fn home_dir() -> PathBuf {
     env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map_or_else(|| PathBuf::from("."), PathBuf::from)
-}
-
-/// The conventional local SSH identity used as the age fallback when no
-/// `sessions.persistence.identity` is configured. The file check keeps an
-/// absent convention from changing the identity set or enabling a setting
-/// that cannot be used.
-#[cfg_attr(not(feature = "session-persistence"), allow(dead_code))]
-pub(crate) fn default_session_identity_path() -> Option<PathBuf> {
-    let home =
-        env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)?;
-    let path = home.join(".ssh").join("id_ed25519");
-    path.is_file().then_some(path)
 }
 
 #[cfg(test)]

@@ -16,7 +16,10 @@ pub(super) fn serve(
     token: &str,
     deadline: Instant,
 ) -> Result<()> {
-    let (connection, envelope, peer_process_id) = accept_request(daemon, stream, token, deadline)?;
+    // `_peer` lives until the request has been served: on Windows it holds the
+    // peer process open, so its id cannot pass to another process meanwhile.
+    let (connection, envelope, _peer, peer_process_id) =
+        accept_request(daemon, stream, token, deadline)?;
     let Envelope {
         request,
         client_process_id,
@@ -50,7 +53,7 @@ pub(super) struct Caller<'a> {
 fn accept_request(
     #[cfg_attr(
         not(windows),
-        allow(
+        expect(
             unused_variables,
             reason = "only Windows has to decide whether to attest a peer"
         )
@@ -59,15 +62,12 @@ fn accept_request(
     stream: Stream,
     token: &str,
     deadline: Instant,
-) -> Result<(Connection, Envelope, Option<u32>)> {
+) -> Result<(Connection, Envelope, PeerProcess, Option<u32>)> {
     // A terminal must never cross a user boundary. The socket's permissions
     // already restrict this; checking the peer as well means a mistake in the
     // directory's access control is not on its own enough.
-    anyhow::ensure!(
-        peer_is_this_user(&stream)?,
-        "refusing a connection from another user"
-    );
-    let peer_process_id = crate::transport::peer_process_id(&stream)?;
+    let peer = PeerProcess::of(&stream)?;
+    let peer_process_id = peer.id();
 
     let mut connection = Connection::new(stream);
     let mut envelope = read_request(&mut connection, token, deadline)?;
@@ -101,7 +101,7 @@ fn accept_request(
         envelope = read_request(&mut connection, token, deadline)?;
     }
 
-    // Where the platform reports no peer credentials, a request whose answer
+    // Where the kernel reports no peer (an older Windows), a request whose answer
     // depends on who is asking has to establish that first — see
     // `transport::PeerChallenge`. A peer that will not or cannot answer is not
     // refused here: it simply proceeds without an identity, and the checks that
@@ -121,7 +121,7 @@ fn accept_request(
         None => None,
     };
 
-    Ok((connection, envelope, peer_process_id))
+    Ok((connection, envelope, peer, peer_process_id))
 }
 
 /// Answers a request whose handler reports failure as an error: the request
@@ -544,6 +544,13 @@ fn shutdown(daemon: &Arc<Daemon>, connection: &mut Connection) -> Result<()> {
 /// daemon. A daemon deliberately outlives its clients, so treating its startup
 /// arguments as permanent makes editing the configuration appear to work while
 /// leaving all subsequent sessions under the old retention policy.
+#[cfg_attr(
+    not(feature = "session-persistence"),
+    expect(
+        unused_variables,
+        reason = "recipients and the requesting process matter only to a disk store"
+    )
+)]
 pub(super) fn configure_daemon(
     daemon: &Arc<Daemon>,
     retention: Retention,
@@ -551,8 +558,6 @@ pub(super) fn configure_daemon(
     peer_process_id: Option<u32>,
 ) -> Result<()> {
     retention.validate()?;
-    #[cfg(not(feature = "session-persistence"))]
-    let _ = (persistence_recipients, peer_process_id);
     // Resolved before anything changes, so what a session is pinned to is
     // exactly what the store will be opened with.
     #[cfg(feature = "session-persistence")]

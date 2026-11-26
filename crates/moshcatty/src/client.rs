@@ -106,6 +106,13 @@ fn human_readable_duration(elapsed: Duration) -> String {
     }
 }
 
+#[cfg_attr(
+    not(any(unix, windows)),
+    expect(
+        unused_variables,
+        reason = "no other platform has a message-size errno"
+    )
+)]
 fn is_message_too_long(error: &std::io::Error) -> bool {
     #[cfg(unix)]
     {
@@ -118,7 +125,6 @@ fn is_message_too_long(error: &std::io::Error) -> bool {
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = error;
         false
     }
 }

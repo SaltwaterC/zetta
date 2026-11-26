@@ -426,6 +426,13 @@ fn apply_process_wide_settings(
 
 /// The native launchers' profile lists, once per reload rather than once per
 /// window.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        unused_variables,
+        reason = "each launcher integration reads only what its platform needs"
+    )
+)]
 fn update_launcher_integrations(prepared: &PreparedConfiguration, cx: &mut App) {
     let config = prepared.config.as_ref();
     #[cfg(windows)]
@@ -439,10 +446,6 @@ fn update_launcher_integrations(prepared: &PreparedConfiguration, cx: &mut App) 
     }
     #[cfg(target_os = "macos")]
     update_native_macos_dock_menu(cx, &config.profiles, &config.hidden_profiles);
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    let _ = cx;
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let _ = config;
 }
 
 #[cfg(test)]
